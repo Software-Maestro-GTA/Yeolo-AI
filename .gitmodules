@@ -1,0 +1,3 @@
+[submodule ".agents/Yeolo-SPEC"]
+	path = .agents/Yeolo-SPEC
+	url = https://github.com/Software-Maestro-GTA/Yeolo-SPEC.git
