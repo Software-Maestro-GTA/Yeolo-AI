@@ -63,7 +63,7 @@ yeolo-ai/
 │   ├── schemas/            # Request / Response 데이터 모델 (Pydantic)
 │   └── services/           # 외부 API 및 백엔드 비즈니스 로직
 ├── tests/                  # 테스트 코드 디렉토리
-├── $.env           # 환경변수 설정 샘플
+├── $.env                   # 환경변수 설정 샘플
 ├── pyproject.toml          # uv 프로젝트 의존성 설정 파일
 └── uv.lock                 # 의존성 잠금 파일
 ```

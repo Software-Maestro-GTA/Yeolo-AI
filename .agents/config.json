@@ -1,0 +1,47 @@
+{
+  "project_name": "yeolo-ai",
+  "engine": "antigravity-v2",
+  "sandbox": {
+    "readOnly": false,
+    "allowWritePaths": [
+      ".agents/",
+      "app/",
+      "tests/",
+      ".git/",
+      "pyproject.toml",
+      "uv.lock",
+      "progress.md",
+      "log.md"
+    ],
+    "allowTerminalCommands": [
+      "git",
+      "uv",
+      "pytest",
+      "ruff",
+      "python",
+      "python3",
+      "bash",
+      "sh",
+      "mv",
+      "rm",
+      "cat",
+      "touch"
+    ]
+  },
+  "environments": {
+    "ai-server": {
+      "path": "./",
+      "package_manager": "uv",
+      "test_runner": "pytest",
+      "test_command": "uv run pytest",
+      "lint_command": "uv run ruff check"
+    }
+  },
+  "harness": {
+    "requirements_path": "./.agents/Yeolo-SPEC/requirement-specs",
+    "apis_path": "./.agents/Yeolo-SPEC/api-specs",
+    "domains_path": "./.agents/Yeolo-SPEC/domain-specs",
+    "functionals_path": "./.agents/Yeolo-SPEC/functional-specs",
+    "max_tdd_loops": 5
+  }
+}
