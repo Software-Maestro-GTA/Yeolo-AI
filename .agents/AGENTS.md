@@ -1,98 +1,81 @@
-# Harness Engineering Project Map (AGENTS.md)
+# Harness Multi-Agent System (에이전트 협업 지침서)
 
-이 문서는 초개인화 여행 플랫폼 **여로(Yeolo)**의 AI 서버 프로젝트 아키텍처, 의존성, 다중 에이전트 협업 파이프라인 및 개발 규율을 정의한 **공통 지침서**입니다. 프로젝트에 참여하는 모든 에이전트와 개발자는 작업을 시작하기 전 본 문서를 숙독하고 반드시 준수해야 합니다.
+본 프로젝트는 4종의 고유 라이브 에이전트(Planner, Tester, Coder, Reviewer)와 1종의 사후 개선 에이전트(Updater)가 상호 유기적으로 결합하여 TDD 기반의 코드 작성 및 검증을 수행하는 하네스(Harness) 시스템입니다.
 
----
-
-## 1. 프로젝트 개요 및 목적
-
-- **명칭**: 여로(Yeolo) AI 서버 애플리케이션
-- **목적**: 사용자의 관심사 및 여행 성향을 분석하여 맞춤형 여행 코스 추천, 일정 보관, 생성 이력 조회 등의 모바일 앱 및 웹 환경을 원스톱 제공하는 초개인화 여행 플랫폼의 **AI 추천 핵심 백엔드 및 서비스**를 구축합니다.
-- **하네스 엔지니어링 지향점**: AI 서버 패키지의 안정적인 비즈니스 명세 일치와 지속가능한 코드 품질을 위해 다중 에이전트 기반 자율 TDD 루프(Planner ➔ Tester ➔ Coder ➔ Reviewer)를 활용해 개발의 신뢰성과 생산성을 극대화합니다.
+본 지침서는 하네스 시스템을 새 프로젝트인 `Yeolo-AI`에 이식하고 에이전트들을 안전하게 구동시키기 위한 협업 흐름과 전체 프로젝트 디렉토리 구조를 규정합니다.
 
 ---
 
-## 2. 프로젝트 폴더 구조 (Directory Structure)
+## 프로젝트 환경 설정 (Project Customization)
 
-```directory
-.
-├── .agents/                      # 하네스 오케스트레이션 및 에이전트 규칙 저장소
-│   ├── agents/                   # 다중 에이전트(Planner, Tester, Coder, Reviewer) 역할 프롬프트 (.md)
-│   ├── hooks/                    # 빌드 및 테스트 자동 검증 훅 스크립트 (run_test.sh)
-│   ├── skills/                   # API 모킹, 커밋 메시지 규격, 프레임워크 가이드 등 개별 실행 규칙
-│   ├── templates/                # progress.md, 모듈 주석, 검증 리포트 작성용 템플릿
-│   ├── Yeolo-SPEC/               # 서브모듈로 등록된 공식 기획 스펙 저장소 (요구사항/기능/도메인/API/디자인)
-│   ├── config.json               # 프로젝트 패키지 환경 및 TDD 최대 루프 제한 설정 파일
-│   ├── system.md                 # 전역 에이전트 절대 제약 가이드라인 (System Rules)
-│   ├── progress.md               # 현재 태스크의 TDD 루프 진척 현황판 및 작업 진척도 기록 파일
-│   └── log.md                    # 현재 태스크 검증 도중 발생한 에러 로그 및 리뷰 결과 파일
-│
-├── app/                          # FastAPI 기반 AI 서버 비즈니스 로직
-│   ├── agent/                    # LangChain 기반 에이전트 및 LLM 프롬프트/체인 흐름
-│   ├── api/                      # FastAPI 라우터 및 엔드포인트 구현
-│   ├── core/                     # 전역 설정 및 유틸리티
-│   ├── schemas/                  # Pydantic 기반 Request/Response 데이터 검증 모델
-│   ├── services/                 # 비즈니스 서비스 레이어 (외부 API 및 DB 연동)
-│   └── main.py                   # FastAPI 애플리케이션 진입점 및 Uvicorn 실행 스크립트
-│
-└── tests/                        # pytest 기반 단위 및 통합 테스트 코드 저장소
+하네스를 구동하기 전에, 대상 프로젝트의 환경에 맞춰 아래 가변 설정 인자들을 에이전트 시스템에 올바르게 매핑해야 합니다:
+
+- **대상 프로젝트 기술 스택**: `Python 3.14+ / uv / FastAPI / LangChain / pytest / ruff`
+- **소스코드 경로**: `app/` (FastAPI 기반 백엔드 및 AI 에이전트 서비스)
+- **테스트코드 경로**: `tests/` (pytest 테스트 코드)
+- **개발 명세 보관소**: `.agents/Yeolo-SPEC/` (요구사항, 기능, 도메인, API 기획 보관소)
+- **검증 명령어 세트**:
+  - 스타일 검사: `uv run ruff check .`
+  - 타입 검사: `uv run ruff check .` (정적 코드 분석 겸용)
+  - 단위 테스트: `uv run pytest`
+
+---
+
+## 프로젝트 전체 디렉토리 구조 (Overall Project Directory Structure)
+
+하네스 시스템이 대상 프로젝트에 삽입될 때 구축되는 전체 프로젝트 레이아웃입니다. 하네스의 코어 소스들은 대상 프로젝트 루트 하위의 `.agents/` 디렉토리에 통합 보관되어 구동됩니다:
+
+```
+Yeolo-AI (대상 프로젝트 루트)
+├── app/                      (프로덕션 로직 컴포넌트 및 서비스 코드)
+├── tests/                    (인수/단위 테스트 코드)
+├── .agents/Yeolo-SPEC/       (Given-When-Then 요구사항 및 기능 명세서 보관소)
+├── .agents/                  (하네스 시스템 코어 패키지)
+│   ├── agents/               (에이전트별 시스템 프롬프트: planner.md, tester.md 등)
+│   ├── hooks/                (초기화 및 빌드 검증 셸 스크립트: init.sh, test.sh)
+│   ├── skills/               (진척도 및 리뷰 포맷 확장 스킬 가이드 SKILL.md들)
+│   ├── templates/            (progress.md의 원본 양식 progress_template.md)
+│   └── system.md             (모든 에이전트의 권한 한계를 제약하는 글로벌 룰셋)
+└── progress.md               (전체 에이전트의 기동 상황 및 할 일을 기록하는 진척 보드)
 ```
 
 ---
 
-## 3. 개발 환경 및 기술 스택 (Environments & Dependencies)
+## 에이전트 협업 파이프라인 (Collaboration Pipeline)
 
-- **런타임 및 패키지 매니저**: Python 3.14+ / `uv` (가상환경 기반 패키지 제어)
-- **웹 프레임워크**: FastAPI
-- **AI 라이브러리**: LangChain (LangChain Google GenAI 등)
-- **테스트 러너**: `pytest`
-- **테스트 유틸리티**: `pytest-mock` (mocker 피스처), `httpx` (FastAPI TestClient 연동용)
-- **린트 및 포맷터**: `ruff`
-- **개발 기동**: `uv run uvicorn app.main:app --reload`
-- **테스트 명령어**: `uv run pytest`
-- **린트 명령어**: `uv run ruff check`
+에이전트는 사용자로부터 기능 구현 태스크가 할당되면 아래 단방향 협업 흐름에 따라 작업을 수행하며, Reviewer의 승인 완료 시 즉시 프로세스가 종료됩니다.
 
----
-
-## 4. 다중 에이전트 협업 워크플로우 (Multi-Agent Workflow)
-
-본 프로젝트는 4개 에이전트가 역할을 교대하며 GitHub Issue 티켓을 할당받아 하나의 작업을 완수해 나가는 자율 TDD 이중 루프(Double-Loop)로 진행됩니다.
-
-### 4.1 에이전트별 역할 및 구동 파일
-
-1.  **[Planner](./agents/planner.md)**:
-    - `github-mcp-server`를 이용해 사용자가 등록한 GitHub Issue를 분석하고, `Yeolo-SPEC` 하위 명세를 매핑합니다.
-    - `progress_template.md`를 바탕으로 `progress.md` 파일 초기화 및 인수 기준(Acceptance Criteria) 작성을 수행합니다.
-2.  **[Tester](./agents/tester.md)**:
-    - 기능 구현이 진행되기 전, `progress.md`에 설정된 인수 기준을 검증하는 실패하는 단위 테스트 코드(Red Phase) 및 외부 API/LLM 연동 모킹 핸들러를 먼저 작성합니다.
-3.  **[Coder](./agents/coder.md)**:
-    - 실패하는 테스트 코드를 통과시키는 비즈니스 로직과 API 스키마/엔드포인트를 구현합니다.
-    - **테스트 코드를 임의 수정/완화하는 것은 엄격히 금지**됩니다. 파일 최상단에는 `module-explain-formatter` 주석을 추가합니다.
-4.  **[Reviewer](./agents/reviewer.md)**:
-    - 검증 훅인 `bash .agents/hooks/run_test.sh ai-server`를 구동하여 테스트 및 린트 결과(exit code)를 검증합니다.
-    - 실패 시 에러 로그를 `log.md`에 기록하고 Coder/Tester로 롤백합니다.
-    - 성공 시 `git-commit-formatter` 형식에 맞는 표준 커밋을 적용하고 `github-mcp-server`를 호출하여 관련 GitHub 이슈를 종결(Close) 처리합니다.
+```mermaid
+graph TD
+    User([사용자 백로그 할당]) --> Planner[1. Planner]
+    Planner -->|기획 및 체크리스트 완료| Tester[2. Tester]
+    Tester -->|인수 테스트 코드 작성 완료| Coder[3. Coder]
+    Coder -->|코드 구현 완료| Reviewer[4. Reviewer]
+    Reviewer -->|테스트 오류 발견 시 환류| Tester
+    Reviewer -->|로직/타입/린트 오류 발견 시 환류| Coder
+    Reviewer -->|최종 통과 시 progress.md 완료 마킹| Close([종료])
+```
 
 ---
 
-## 5. 필수로 준수해야 하는 공통 규칙 (Global Rules)
+## 에이전트 역할 및 시스템 프롬프트 명세
 
-1.  **System.md의 절대 준수**:
-    - [system.md](./system.md)에 기술된 제약 조건을 위반하지 않습니다. (테스트 없는 코딩 금지, uv 패키지 환경 보존 등)
-2.  **API 및 LLM 모킹 의무화 (pytest-mocking)**:
-    - 외부 LLM API 호출(Google Gemini 등)이나 외부 연동 서비스와의 차단을 보장하기 위해, 모든 비즈니스 로직 테스트 작성 시 [pytest-mocking/SKILL.md](./skills/pytest-mocking/SKILL.md)에 맞추어 `pytest-mock` 또는 `unittest.mock`을 사용해 API 호출을 모킹해야 합니다.
-3.  **프레임워크 개발 지침 가동**:
-    - AI 서버 구현 시 [python-guideline](./skills/python-guideline/SKILL.md)을 우선 참고하여 폴더 구조와 라우터 설계, Pydantic 스키마 및 LangChain 체인 호출 구조를 일치시킵니다.
-4.  **문서 주석 규격화**:
-    - 새로 만들거나 수정한 모든 소스 코드 최상단에는 [module-explain-formatter](./skills/module-explain-formatter/SKILL.md) 지침에 명시된 Python Docstring 헤더 주석을 필수로 포함합니다.
-5.  **커밋 메시지 표준**:
-    - Git 커밋 시 반드시 [git-commit-formatter](./skills/git-commit-formatter/SKILL.md)에 명시된 커밋 메시지 규격을 준수합니다.
+### 1. [Planner](./agents/planner.md) (기획 및 분석 에이전트)
+- **목적**: 요구사항을 기반으로 기존 명세서들을 분석하고 백로그 구현 체크리스트를 수립합니다.
+- **주요 산출물**: `progress.md` 내 백로그 기본 정보 및 세부 구현 체크리스트 기입.
 
----
+### 2. [Tester](./agents/tester.md) (테스트 설계 및 작성 에이전트)
+- **목적**: `{{SPECIFICATION_DIR}}` 내의 Given-When-Then 인수 조건과 기술 설계서 사양에 부합하는 테스트 코드를 작성합니다.
+- **주요 산출물**: `{{TEST_CODE_DIR}}` 내 단위/통합 테스트 코드.
 
-## 6. 에러 상황 및 예외 처리 (Error Handling & Escalation)
+### 3. [Coder](./agents/coder.md) (프로덕션 로직 및 컴포넌트 구현 에이전트)
+- **목적**: Tester가 작성한 테스트를 통과하고 Planner의 세부 체크리스트를 만족하는 프로덕션 비즈니스 코드와 UI 컴포넌트를 구현합니다. (테스트 파일 무단 변경 금지)
+- **주요 산출물**: `{{PRODUCTION_CODE_DIR}}` 내 프로덕션 코드 구현.
 
-- **TDD 최대 루프 초과 시 대처**:
-  - `max_tdd_loops`(기본 5회)를 초과하여 최종 검증이 반복 실패하는 경우, 에이전트는 무의미한 루프를 멈추고 `log.md`에 최후 에러 내역을 남긴 채 **사람 개발자에게 보고(Escalation)**해야 합니다.
-- **컴파일 및 정적 분석 중단**:
-  - Python 정적 분석 경고나 ruff 린트 에러가 포착되는 즉시 실패(`exit != 0`)로 간주하고 `reviewer.md`가 반려 처리를 실행합니다.
+### 4. [Reviewer](./agents/reviewer.md) (통합 무결성 검증 및 승인 에이전트)
+- **목적**: Coder의 코드가 빌드, 린트, 전체 테스트 스크립트를 완벽하게 만족하는지 검증(`sh hooks/test.sh` 실행)하고 실패 시 문제점을 분석하여 원인을 제공한 에이전트(Tester 또는 Coder)로 피드백 리포트를 발행하며, 최종 승인 시 `progress.md`를 완료 마킹하고 파이프라인을 종료합니다. (최종 Git 커밋은 인간 개발자가 검수 후 직접 진행합니다)
+- **주요 산출물**: 피드백 리뷰 리포트 및 파이프라인 승인 종료.
+
+### 5. [Updater](./agents/updater.md) (에이전트/규칙 개선 에이전트 - 사후 독립 구동)
+- **목적**: 사용자의 질의 응답 완료 후 기동하여 하네스 개선이 필요하다고 판단 시, 사용자에게 변경 전후 diff를 제시하여 명시적 승인을 얻은 후 `agents/`, `hooks/`, `skills/` 등의 코어 인프라를 안전하게 개선합니다.
+- **주요 산출물**: 변경 대비 diff 리포트 및 사용자 최종 승인 하에 패치된 프롬프트, 셸 스크립트, 스킬 규칙셋.

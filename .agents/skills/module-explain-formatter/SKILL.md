@@ -5,7 +5,7 @@ description: Standardize docstrings and header comments for newly created or mod
 
 # Module Explain Formatter Rule
 
-코더 에이전트(`coder.md`)가 새로운 파이썬 파일(코드 모듈)을 생성하거나 기존 소스 코드를 수정할 때, 파일 최상단에 모듈의 설명과 기획 명세 매핑 정보를 기록하는 문서화 주석 표준입니다.
+새로운 파이썬 파일(코드 모듈)을 생성하거나 기존 소스 코드를 수정할 때, 파일 최상단에 모듈의 설명과 기획 명세 매핑 정보를 기록하는 문서화 주석 표준입니다.
 
 ## 1. 파일 헤더 주석 템플릿 (File Header Docstring)
 
@@ -29,7 +29,7 @@ from fastapi import FastAPI
 
 ## 2. 클래스 및 함수 문서화 (Class & Function Docstring)
 
-모듈 외부로 노출되는 주요 클래스 및 비즈니스 함수에는 입력 파라미터, 반환 값 및 예외 처리 정보를 명시하여 다른 에이전트나 개발자가 코드 구조를 즉시 파악하고 테스트를 설계할 수 있도록 돕습니다. (Google Style Docstring 권장)
+모듈 외부로 노출되는 주요 클래스 및 비즈니스 함수에는 입력 파라미터, 반환 값 및 예외 처리 정보를 명시하여 코드 구조를 즉시 파악하고 테스트를 설계할 수 있도록 돕습니다. (Google Style Docstring 권장)
 
 ### 예시:
 

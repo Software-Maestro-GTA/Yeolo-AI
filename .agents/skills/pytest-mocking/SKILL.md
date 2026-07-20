@@ -5,7 +5,7 @@ description: pytest 및 pytest-mock을 활용한 외부 API 및 AI 모델 모킹
 
 # pytest Mocking Rule
 
-테스트 코드를 작성하는 Tester 에이전트(`tester.md`)와 개발을 진행하는 Coder 에이전트(`coder.md`)가 외부 백엔드 API, 외부 Open API(예: Google Gemini, 지도 API 등), 데이터베이스 연동 등을 테스트할 때 준수해야 하는 규칙입니다.
+테스트 코드를 작성하거나 프로덕션 개발을 진행할 때 외부 백엔드 API, 외부 Open API(예: Google Gemini, 지도 API 등), 데이터베이스 연동 등을 테스트하기 위해 준수해야 하는 규칙입니다.
 
 ## 1. Mocking 원칙
 
