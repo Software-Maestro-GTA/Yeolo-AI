@@ -15,11 +15,9 @@
 
 - **디자인/스타일 규칙 일관성**: [디자인 시스템 가이드 준수 여부 및 스타일 일치성]
 - **모듈 문서화(Docstring)**: [module-explain-formatter 주석 누락 여부]
-- **TypeScript/Lint 규칙 준수**: [린트 에러 및 타입 안정성]
+- **Python/TypeScript/Lint 규칙 준수**: [린트 에러 및 타입 안정성]
 
 ## 3. 피드백 및 조치 사항 (Feedback & Action Items)
 
 - **반려 시 수정 요구사항**:
   - [반려된 사유와 구체적인 개선 가이드라인]
-- **승인 시 Git 커밋 메시지 (git-commit-formatter 기준)**:
-  - `[type]: [subject] [issue_id]`

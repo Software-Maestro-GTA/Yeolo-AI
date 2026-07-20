@@ -10,6 +10,7 @@ dependencies = [
     "langchain-community>=0.4.2",
     "langchain-core>=1.4.9",
     "langchain-google-genai>=4.2.7",
+    "langsmith>=0.10.5",
     "python-dotenv>=1.2.2",
     "uvicorn>=0.51.0",
 ]
