@@ -80,7 +80,7 @@ COURSE_GENERATION_PROMPT = ChatPromptTemplate.from_messages([
         "   - 식사 시각(점심 12:00~13:30, 저녁 18:00~19:30) 및 장소별 영업시간/체류시간을 고려하되, 식당 위치 또한 해당 시점 직전/직후 일정 근처의 동선 상 장소로 선정하십시오.\n"
 
         "4. 예상 비용 및 예산 기준:\n"
-        "   - spendingTendency와 budgetType(cost_effective, standard, luxury)에 맞춰 장소별 cost 및 totalCost 계산\n"
+        "   - spendingTendency와 budgetType(cost_effective, standard, luxury)에 맞춰 장소별 cost 계산\n"
         "5. 추천 이유 상세 명시:\n"
         "   - 코스 전체의 recommendationReason과 각 스톱별 reason에 성향 프로필(예: 미식, 휴양, 숨은 명소 등)과의 매칭 포인트를 명확히 설명\n\n"
         "반드시 지정된 Structured Output 스키마 포맷(Pydantic CourseSchema)으로만 응답해 주세요."

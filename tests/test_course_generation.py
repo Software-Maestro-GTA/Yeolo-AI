@@ -99,15 +99,8 @@ def sample_course_schema():
         destinationCity="Jeju",
         startDate="2026-08-01",
         totalDays=2,
-        totalCost=150000,
         tags=["미식", "가성비", "힐링"],
         recommendationReason="친구와 함께 즐기는 가성비 높은 제주 미식 코스입니다.",
-        constraints={
-            "budgetType": "cost_effective",
-            "maxTravelMinutesPerDay": 120,
-            "preferredTransport": ["driving"],
-            "pace": "balanced",
-        },
         itinerary={
             "days": [
                 {

@@ -52,23 +52,14 @@ class ItinerarySchema(BaseModel):
     days: List[DayItinerarySchema] = Field(..., description="일자별 여정 목록")
 
 
-class ConstraintsSchema(BaseModel):
-    budgetType: Literal["cost_effective", "standard", "luxury"] = Field(..., description="예산 유형")
-    maxTravelMinutesPerDay: int = Field(..., description="하루 최대 총 이동 시간 (분)")
-    preferredTransport: List[Literal["walking", "transit", "driving", "taxi"]] = Field(..., description="선호 이동 수단")
-    pace: Literal["relaxed", "balanced", "dense"] = Field(..., description="일정 밀도 (pace)")
-
-
 class CourseSchema(BaseModel):
     title: str = Field(..., description="코스 제목")
     destinationCountry: str = Field(..., description="목적지 국가")
     destinationCity: str = Field(..., description="목적지 도시")
     startDate: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="시작일 (YYYY-MM-DD)")
     totalDays: int = Field(..., ge=1, description="총 여행 일수")
-    totalCost: int = Field(..., ge=0, description="전체 코스 총 예상 비용")
     tags: List[str] = Field(default_factory=list, description="코스 태그 목록")
     recommendationReason: str = Field(..., description="전체 코스 핵심 추천 이유")
-    constraints: ConstraintsSchema = Field(..., description="적용된 제약 조건")
     itinerary: ItinerarySchema = Field(..., description="일자별 세부 여정")
 
 
