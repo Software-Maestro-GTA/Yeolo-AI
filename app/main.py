@@ -48,9 +48,11 @@ app.include_router(taste_profile_router)
 app.include_router(course_router)
 
 
+@app.get("/health")
+@app.get("/healthz")
 @app.get("/")
-def read_root():
-    return {"message": "Hello world!"}
+def health_check():
+    return {"status": "ok", "message": "Healthy"}
 
 
 if __name__ == "__main__":
