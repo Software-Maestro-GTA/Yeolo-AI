@@ -74,6 +74,21 @@ jobs:
     env:
       IMAGE: ${{ needs.build-and-push.outputs.image }}
       CONTAINER_NAME: ${{ vars.CONTAINER_NAME || vars.DEPLOYMENT_NAME }}
+      # ── ConfigMap (ai-env) ──────────────────────────────────────────
+      GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME || vars.AI_MODEL || 'gemini-3.5-flash' }}
+      LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS || '60' }}
+      PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS || '60' }}
+      LANGSMITH_TRACING: ${{ vars.LANGSMITH_TRACING || 'true' }}
+      LANGSMITH_ENDPOINT: ${{ vars.LANGSMITH_ENDPOINT || 'https://api.smith.langchain.com' }}
+      LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT || 'YEOLO' }}
+      # ── Secret (ai-secrets) ─────────────────────────────────────────
+      INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY || secrets.AI_INTERNAL_API_KEY }}
+      AI_INTERNAL_API_KEY: ${{ secrets.AI_INTERNAL_API_KEY || secrets.INTERNAL_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY || secrets.LANGCHAIN_API_KEY }}
+      LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY || secrets.LANGSMITH_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,6 +101,28 @@ jobs:
 
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: Sync app config (ai-env)
+        run: |
+          umask 077
+          : > ai.env
+          for k in GEMINI_MODEL_NAME LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
+            v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai.env
+          done
+          kubectl -n "$K8S_NAMESPACE" create configmap ai-env \
+            --from-env-file=ai.env --dry-run=client -o yaml | kubectl apply -f -
+          rm -f ai.env
+
+      - name: Sync app secrets (ai-secrets)
+        run: |
+          umask 077
+          : > ai-secret.env
+          for k in INTERNAL_API_KEY AI_INTERNAL_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
+            v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai-secret.env
+          done
+          kubectl -n "$K8S_NAMESPACE" create secret generic ai-secrets \
+            --from-env-file=ai-secret.env --dry-run=client -o yaml | kubectl apply -f -
+          rm -f ai-secret.env
 
       - name: Set image
         run: |
@@ -102,4 +139,3 @@ jobs:
           echo "rollout failed — rolling back deployment/${DEPLOYMENT_NAME}"
           kubectl -n "$K8S_NAMESPACE" rollout undo "deployment/${DEPLOYMENT_NAME}"
           kubectl -n "$K8S_NAMESPACE" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=5m
-
