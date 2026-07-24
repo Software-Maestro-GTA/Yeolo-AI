@@ -1,0 +1,105 @@
+name: deploy
+
+# main 브랜치 push 만 배포한다.
+# OIDC trust 가 ref:refs/heads/main 으로 고정돼 있어 다른 ref 에서는 role assume 자체가 불가.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# 최소 권한: OIDC 토큰 발급 + 소스 read 만.
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  EKS_CLUSTER: ${{ vars.EKS_CLUSTER }}
+  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+  DEPLOYMENT_NAME: ${{ vars.DEPLOYMENT_NAME }}
+  # 이미지 태그 = immutable git commit SHA. mutable 태그로 배포 금지.
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-and-push:
+    # workflow_dispatch 로 실행하더라도 main 에서만 동작(OIDC trust 와 일치).
+    if: github.ref == 'refs/heads/main'
+    # EKS 노드가 Graviton(arm64, t4g)이므로 arm64 네이티브 러너에서 빌드한다.
+    # amd64 러너로 빌드하면 노드에서 'exec format error' 로 CrashLoopBackOff.
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve image reference
+        id: meta
+        run: echo "image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  deploy:
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # 승인 게이트를 걸 수 있도록 environment 지정.
+    environment: dev
+    # 같은 앱의 배포를 직렬화한다. 진행 중 배포는 취소하지 않고 대기.
+    concurrency:
+      group: deploy-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      IMAGE: ${{ needs.build-and-push.outputs.image }}
+      CONTAINER_NAME: ${{ vars.CONTAINER_NAME || vars.DEPLOYMENT_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: Set image
+        run: |
+          kubectl -n "$K8S_NAMESPACE" set image \
+            "deployment/${DEPLOYMENT_NAME}" \
+            "${CONTAINER_NAME}=${IMAGE}"
+
+      - name: Verify rollout
+        run: kubectl -n "$K8S_NAMESPACE" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=5m
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "rollout failed — rolling back deployment/${DEPLOYMENT_NAME}"
+          kubectl -n "$K8S_NAMESPACE" rollout undo "deployment/${DEPLOYMENT_NAME}"
+          kubectl -n "$K8S_NAMESPACE" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=5m
+
