@@ -8,7 +8,7 @@
 """
 
 import logging
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.schemas.course import CourseRequestSchema
 from app.services.course_service import generate_course_service
@@ -22,6 +22,7 @@ router = APIRouter(prefix="/internal/ai", tags=["Course Generation"])
 @router.post("/courses")
 async def generate_course_api(
     request: CourseRequestSchema,
+    raw_request: Request,
     x_internal_api_key: str = Header(None, alias="X-Internal-Api-Key"),
 ):
     """
@@ -30,7 +31,8 @@ async def generate_course_api(
     # 1. 인증 헤더 검증
     if not x_internal_api_key or x_internal_api_key != settings.INTERNAL_API_KEY:
         logger.warning(f"Unauthorized access attempt to /internal/ai/courses for userId: {request.userId}")
-        logger.warning(f"외부 서버 api 요청 인증 key{x_internal_api_key}, ai 서버 api 요청 검증 key{settings.INTERNAL_API_KEY}")
+        logger.warning(f"외부 서버 API 요청 헤더 전체: {dict(raw_request.headers)}")
+        logger.warning(f"수신된 API Key: '{x_internal_api_key}', 서버 설정 API Key: '{settings.INTERNAL_API_KEY}'")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"status": 401, "message": "내부 인증 실패"},
