@@ -9,7 +9,7 @@
 
 import json
 import logging
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.schemas.behavior import BehaviorAnalysisRequest
 from app.services.behavior_service import analyze_behavior_stream
@@ -22,12 +22,14 @@ router = APIRouter(prefix="/internal/ai/taste-profile", tags=["Taste Profile"])
 @router.post("/behavior")
 async def analyze_behavior_api(
     request: BehaviorAnalysisRequest,
+    raw_request: Request,
     x_internal_api_key: str = Header(..., alias="X-Internal-Api-Key")
 ):
     """전처리된 이미지 메타데이터 리스트를 기반으로 사용자의 여행 성향(Taste Profile)을 추출하여 SSE 스트림으로 반환합니다.
 
     Args:
         request (BehaviorAnalysisRequest): 분석용 데이터.
+        raw_request (Request): HTTP 원본 요청 객체.
         x_internal_api_key (str): 내부 통신 인증용 헤더 값.
 
     Returns:
@@ -37,7 +39,8 @@ async def analyze_behavior_api(
     # 1. 인증 헤더 검증
     if x_internal_api_key != settings.INTERNAL_API_KEY:
         logger.warning(f"Unauthorized access attempt to /internal/ai/taste-profile/behavior for userId={request.userId}")
-        logger.warning(f"외부 서버 api 요청 인증 key{x_internal_api_key}, ai 서버 api 요청 검증 key{settings.INTERNAL_API_KEY}")
+        logger.warning(f"외부 서버 API 요청 헤더 전체: {dict(raw_request.headers)}")
+        logger.warning(f"수신된 API Key: '{x_internal_api_key}', 서버 설정 API Key: '{settings.INTERNAL_API_KEY}'")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={
