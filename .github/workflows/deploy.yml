@@ -75,6 +75,7 @@ jobs:
       IMAGE: ${{ needs.build-and-push.outputs.image }}
       CONTAINER_NAME: ${{ vars.CONTAINER_NAME || vars.DEPLOYMENT_NAME }}
       # ── ConfigMap (ai-env) ──────────────────────────────────────────
+      LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
       GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME || vars.AI_MODEL || 'gemini-3.5-flash' }}
       LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS || '60' }}
       PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS || '60' }}
@@ -82,8 +83,7 @@ jobs:
       LANGSMITH_ENDPOINT: ${{ vars.LANGSMITH_ENDPOINT || 'https://api.smith.langchain.com' }}
       LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT || 'YEOLO' }}
       # ── Secret (ai-secrets) ─────────────────────────────────────────
-      INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY || secrets.AI_INTERNAL_API_KEY }}
-      AI_INTERNAL_API_KEY: ${{ secrets.AI_INTERNAL_API_KEY || secrets.INTERNAL_API_KEY }}
+      INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -106,7 +106,7 @@ jobs:
         run: |
           umask 077
           : > ai.env
-          for k in GEMINI_MODEL_NAME LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
+          for k in LOG_LEVEL GEMINI_MODEL_NAME LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai.env
           done
           kubectl -n "$K8S_NAMESPACE" create configmap ai-env \
@@ -117,7 +117,7 @@ jobs:
         run: |
           umask 077
           : > ai-secret.env
-          for k in INTERNAL_API_KEY AI_INTERNAL_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
+          for k in INTERNAL_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai-secret.env
           done
           kubectl -n "$K8S_NAMESPACE" create secret generic ai-secrets \

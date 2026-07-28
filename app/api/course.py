@@ -7,11 +7,14 @@
 @author Antigravity Agent
 """
 
+import logging
 from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.schemas.course import CourseRequestSchema
 from app.services.course_service import generate_course_service
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/internal/ai", tags=["Course Generation"])
 
@@ -26,10 +29,17 @@ async def generate_course_api(
     """
     # 1. 인증 헤더 검증
     if not x_internal_api_key or x_internal_api_key != settings.INTERNAL_API_KEY:
+        logger.warning(f"Unauthorized access attempt to /internal/ai/courses for userId: {request.userId}")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"status": 401, "message": "내부 인증 실패"},
         )
+
+    logger.info(
+        f"Course generation request received for userId: {request.userId}, "
+        f"Destination: {request.tripCondition.destinationCountry}/{request.tripCondition.destinationCity}, "
+        f"TotalDays: {request.tripCondition.totalDays}"
+    )
 
     try:
         # 코스 생성 비동기 처리 및 SSE generator 획득
@@ -38,12 +48,15 @@ async def generate_course_api(
             sse_generator, media_type="text/event-stream"
         )
     except HTTPException as e:
+        logger.warning(f"Course generation HTTP exception for userId: {request.userId} -> Code {e.status_code}: {e.detail}")
         return JSONResponse(
             status_code=e.status_code,
             content={"status": e.status_code, "message": e.detail},
         )
     except Exception as e:
+        logger.error(f"Unexpected error in course generation for userId: {request.userId} -> {str(e)}", exc_info=True)
         return JSONResponse(
             status_code=500,
             content={"status": 500, "message": f"AI 코스 생성 중 오류가 발생했습니다: {str(e)}"},
         )
+

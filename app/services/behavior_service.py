@@ -21,6 +21,10 @@ from app.agent.taste_profile_chains import (
     activity_food_spending_chain
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 def summarize_raw_metadata(items: List[BehaviorItemSchema]) -> str:
     """수십~수백 개의 메타데이터 목록을 파이썬 규칙에 따라 1차 통계 축약 처리하여 텍스트 리포트로 생성합니다."""
     total_count = len(items)
@@ -77,10 +81,13 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
     """
     # 1. 예외 처리: 입력 메타데이터 목록이 비어 있거나 부족한 경우
     if not request.items:
+        logger.warning(f"[behavior_service] Empty items list for userId={request.userId}")
         raise HTTPException(
             status_code=400,
             detail="분석 가능한 전처리 메타데이터가 부족합니다."
         )
+
+    logger.info(f"[behavior_service] Starting behavior analysis stream for userId={request.userId}")
 
     # 1차 진행 상황 반환
     yield {
@@ -92,23 +99,29 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
     }
 
     # 2. 1단계: 파이썬 기반 데이터 축약 및 정성적 특징 요약
+    logger.info(f"[behavior_service] Summarizing raw metadata for userId={request.userId} ({len(request.items)} items)")
     statistics_report = summarize_raw_metadata(request.items)
     
     try:
-        # LLM을 이용해 행동 맥락 Fact Sheet 요약본 생성
+        logger.info(f"[behavior_service] Stage 1 LLM invoke (summarize_chain) for userId={request.userId}")
         fact_sheet_response = await summarize_chain.ainvoke({"statistics_report": statistics_report})
         fact_sheet = fact_sheet_response.content
+        logger.info(f"[behavior_service] Stage 1 LLM invoke completed for userId={request.userId}")
     except Exception as e:
+        logger.error(f"[behavior_service] Stage 1 LLM error for userId={request.userId}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"1단계 요약본 생성 중 AI 엔진 오류 발생: {str(e)}")
 
     # 3. 2단계: 도메인별 병렬 채점 (asyncio.gather 활용 병렬 구동)
     try:
+        logger.info(f"[behavior_service] Stage 2 parallel LLM chains invoke for userId={request.userId}")
         purpose_pace_result, location_env_result, activity_food_result = await asyncio.gather(
             purpose_pace_companion_chain.ainvoke({"fact_sheet": fact_sheet}),
             location_environment_chain.ainvoke({"fact_sheet": fact_sheet}),
             activity_food_spending_chain.ainvoke({"fact_sheet": fact_sheet})
         )
+        logger.info(f"[behavior_service] Stage 2 parallel LLM chains completed for userId={request.userId}")
     except Exception as e:
+        logger.error(f"[behavior_service] Stage 2 LLM error for userId={request.userId}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"2단계 도메인 병렬 채점 중 AI 엔진 오류 발생: {str(e)}")
 
     # 4. 결과 취합 및 데이터 변환 (Structured Output 가공)

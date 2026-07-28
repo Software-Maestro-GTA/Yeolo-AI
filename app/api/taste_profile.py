@@ -8,11 +8,14 @@
 """
 
 import json
+import logging
 from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.schemas.behavior import BehaviorAnalysisRequest
 from app.services.behavior_service import analyze_behavior_stream
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/internal/ai/taste-profile", tags=["Taste Profile"])
 
@@ -33,6 +36,7 @@ async def analyze_behavior_api(
     """
     # 1. 인증 헤더 검증
     if x_internal_api_key != settings.INTERNAL_API_KEY:
+        logger.warning(f"Unauthorized access attempt to /internal/ai/taste-profile/behavior for userId={request.userId}")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={
@@ -43,6 +47,7 @@ async def analyze_behavior_api(
 
     # 2. 데이터 유효성 검사 (데이터 부족 예외 처리)
     if not request.items:
+        logger.warning(f"Behavior analysis requested with empty items for userId={request.userId}")
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
@@ -51,6 +56,8 @@ async def analyze_behavior_api(
             }
         )
 
+    logger.info(f"Behavior analysis request received for userId={request.userId} with {len(request.items)} items")
+
     # 3. SSE 비동기 스트리밍 발생
     async def sse_generator():
         try:
@@ -58,9 +65,11 @@ async def analyze_behavior_api(
                 # SSE 포맷 규격에 맞추어 \n\n으로 이벤트를 구분하여 반환
                 yield f"event: {event['event']}\ndata: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
         except HTTPException as e:
+            logger.warning(f"HTTPException in behavior stream for userId={request.userId} -> Code {e.status_code}: {e.detail}")
             error_data = {"status": e.status_code, "message": e.detail}
             yield f"event: error\ndata: {json.dumps(error_data, ensure_ascii=False)}\n\n"
         except Exception as e:
+            logger.error(f"Error in behavior stream for userId={request.userId} -> {str(e)}", exc_info=True)
             error_data = {"status": 500, "message": f"AI 분석 스트림 중 에러 발생: {str(e)}"}
             yield f"event: error\ndata: {json.dumps(error_data, ensure_ascii=False)}\n\n"
 
@@ -68,3 +77,4 @@ async def analyze_behavior_api(
         sse_generator(),
         media_type="text/event-stream"
     )
+

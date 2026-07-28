@@ -22,4 +22,7 @@ class Settings:
     # 사용할 Gemini 모델명
     GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash")
 
+    # 로깅 레벨 (DEV: DEBUG, PROD: INFO)
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
 settings = Settings()
