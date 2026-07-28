@@ -37,6 +37,7 @@ async def analyze_behavior_api(
     # 1. 인증 헤더 검증
     if x_internal_api_key != settings.INTERNAL_API_KEY:
         logger.warning(f"Unauthorized access attempt to /internal/ai/taste-profile/behavior for userId={request.userId}")
+        logger.warning(f"외부 서버 api 요청 인증 key{x_internal_api_key}, ai 서버 api 요청 검증 key{settings.INTERNAL_API_KEY}")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={

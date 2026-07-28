@@ -30,6 +30,7 @@ async def generate_course_api(
     # 1. 인증 헤더 검증
     if not x_internal_api_key or x_internal_api_key != settings.INTERNAL_API_KEY:
         logger.warning(f"Unauthorized access attempt to /internal/ai/courses for userId: {request.userId}")
+        logger.warning(f"외부 서버 api 요청 인증 key{x_internal_api_key}, ai 서버 api 요청 검증 key{settings.INTERNAL_API_KEY}")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"status": 401, "message": "내부 인증 실패"},
