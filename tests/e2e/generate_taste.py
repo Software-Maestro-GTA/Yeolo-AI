@@ -1,12 +1,3 @@
-"""
-@file generate_taste.py
-@description 실제 Gemini API를 호출하여 위치/시간 기반 성향 분석의 전체 흐름(API-BA-6)을 검증하는 E2E 테스트 및 실행 스크립트
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 import sys
 import json
 import asyncio

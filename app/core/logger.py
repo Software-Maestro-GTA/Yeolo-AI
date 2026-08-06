@@ -1,10 +1,3 @@
-"""
-@file logger.py
-@description AWS CloudWatch 및 컨테이너 배포 환경 통합 로깅 구성 모듈
-@requirements REQ-11, REQ-7
-@author Antigravity Agent
-"""
-
 import logging
 import sys
 from app.core.config import settings

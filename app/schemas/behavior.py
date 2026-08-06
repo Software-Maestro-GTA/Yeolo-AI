@@ -1,12 +1,3 @@
-"""
-@file behavior.py
-@description API-BA-6 (전처리 이미지 메타데이터 기반 성향 분석) API의 요청 본문 검증을 위한 Pydantic 스키마 정의
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 from typing import List, Literal
 from pydantic import BaseModel, Field, UUID4
 

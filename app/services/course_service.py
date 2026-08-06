@@ -1,12 +1,3 @@
-"""
-@file course_service.py
-@description 성향 프로필 및 여행 조건을 처리하여 SSE 스트리밍 데이터를 생성하고 예외 정책(FUN-2)을 관리하는 서비스 모듈
-@requirements REQ-7
-@functional FUN-2
-@api API-BA-1
-@author Antigravity Agent
-"""
-
 import json
 import logging
 from typing import AsyncGenerator

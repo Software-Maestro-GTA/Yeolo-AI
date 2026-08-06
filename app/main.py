@@ -1,12 +1,3 @@
-"""
-@file main.py
-@description FastAPI 애플리케이션 진입점 및 예외 처리 라우터 설정 모듈
-@requirements REQ-7, REQ-11
-@functional FUN-1, FUN-2
-@api API-BA-1, API-BA-6
-@author Antigravity Agent
-"""
-
 import logging
 import time
 from fastapi import FastAPI, HTTPException, Request

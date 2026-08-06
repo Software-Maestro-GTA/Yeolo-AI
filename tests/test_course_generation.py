@@ -1,12 +1,3 @@
-"""
-@file test_course_generation.py
-@description 성향 프로필 및 여행 조건 기반 맞춤 코스 생성 API(API-BA-1) 및 파이프라인에 대한 단위/E2E 테스트 모듈
-@requirements REQ-7
-@functional FUN-2
-@api API-BA-1
-@author Antigravity Agent
-"""
-
 import pytest
 from httpx import AsyncClient, ASGITransport
 from fastapi import HTTPException

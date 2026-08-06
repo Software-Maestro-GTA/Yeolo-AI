@@ -1,12 +1,3 @@
-"""
-@file taste_profile.py
-@description API-BA-6 (전처리 이미지 메타데이터 기반 성향 분석) API 엔드포인트 구현 및 인증, SSE 비동기 스트림 처리 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 import json
 import logging
 from fastapi import APIRouter, Header, HTTPException, Request, status

@@ -1,12 +1,3 @@
-"""
-@file course_chain.py
-@description LangChain LCEL과 ChatGoogleGenerativeAI를 활용하여 성향 프로필/여행 조건 기반 여행 코스를 구조화(CourseSchema)된 형태로 비동기 생성하는 체인 모듈
-@requirements REQ-7
-@functional FUN-2
-@api API-BA-1
-@author Antigravity Agent
-"""
-
 from langchain_google_genai import ChatGoogleGenerativeAI
 from app.core.config import settings
 from app.schemas.course import CourseSchema, CourseRequestSchema

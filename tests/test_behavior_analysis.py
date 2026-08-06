@@ -1,12 +1,3 @@
-"""
-@file test_behavior_analysis.py
-@description 위치/시간 전처리 메타데이터 기반 성향 분석 API(API-BA-6)에 대한 인수 및 예외 처리 검증 테스트 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 import json
 import pytest
 from httpx import AsyncClient, ASGITransport

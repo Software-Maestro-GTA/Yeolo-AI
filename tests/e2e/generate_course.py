@@ -1,12 +1,3 @@
-"""
-@file generate_course.py
-@description 실제 Gemini API를 호출하여 성향 프로필 및 여행 조건 기반 맞춤 코스 생성의 전체 흐름(API-BA-1)을 검증하는 E2E 테스트 및 실행 스크립트
-@requirements REQ-7
-@functional FUN-2
-@api API-BA-1
-@author Antigravity Agent
-"""
-
 import sys
 import json
 import asyncio

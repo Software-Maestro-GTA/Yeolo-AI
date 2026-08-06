@@ -1,12 +1,3 @@
-"""
-@file taste_profile_chains.py
-@description LangChain LCEL과 ChatGoogleGenerativeAI를 활용하여 성향 분석 1, 2단계 체인 및 구조화된 출력을 정의하는 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 from langchain_google_genai import ChatGoogleGenerativeAI
 from app.core.config import settings
 from app.schemas.taste_profile import (

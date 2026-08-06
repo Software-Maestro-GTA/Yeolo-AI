@@ -1,12 +1,3 @@
-"""
-@file course.py
-@description API-BA-1 및 DOM-2 (코스 정보) 사양에 따른 여행 코스 생성 요청/응답 Pydantic 스키마 정의
-@requirements REQ-7
-@functional FUN-2
-@api API-BA-1
-@author Antigravity Agent
-"""
-
 from typing import List, Literal
 from uuid import UUID
 from pydantic import BaseModel, Field

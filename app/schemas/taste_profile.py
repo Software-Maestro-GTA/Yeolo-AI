@@ -1,12 +1,3 @@
-"""
-@file taste_profile.py
-@description DOM-1 (성향 정보) 및 API-BA-6 응답 스키마와 LLM 체인 출력을 위한 Pydantic 스키마 정의
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 from typing import List, Literal
 from pydantic import BaseModel, Field
 

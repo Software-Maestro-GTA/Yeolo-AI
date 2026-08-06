@@ -1,12 +1,3 @@
-"""
-@file course.py
-@description API-BA-1 (성향 프로필 기반 여행 코스 생성) API 엔드포인트 및 인증, SSE 비동기 스트림 처리 모듈
-@requirements REQ-7
-@functional FUN-2
-@api API-BA-1
-@author Antigravity Agent
-"""
-
 import logging
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse, JSONResponse

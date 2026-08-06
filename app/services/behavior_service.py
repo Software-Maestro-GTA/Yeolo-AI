@@ -1,12 +1,3 @@
-"""
-@file behavior_service.py
-@description 위치/시간 전처리 메타데이터 통계 축약 및 2단계 LLM 병렬 분석 파이프라인(SSE 스트림 반환) 비즈니스 로직 구현 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 import asyncio
 from collections import Counter
 from typing import AsyncGenerator, Dict, Any, List

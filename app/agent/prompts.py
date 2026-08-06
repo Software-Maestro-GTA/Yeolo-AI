@@ -1,12 +1,3 @@
-"""
-@file prompts.py
-@description 1단계(여행자 Fact Sheet 요약) 및 2단계(도메인별 병렬 채점 체인 A, B, C)를 위한 LangChain Prompt Templates 정의 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 from langchain_core.prompts import ChatPromptTemplate
 
 # 1단계: 파이썬 축약 리포트를 바탕으로 여행자 Fact Sheet(정성적 요약본)를 작성하는 프롬프트

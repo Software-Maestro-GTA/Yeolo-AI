@@ -1,10 +1,3 @@
-"""
-@file test_logger.py
-@description 로깅 구성(app/core/logger.py) 및 HTTP 미들웨어/예외 핸들러 로깅 기능 단위 테스트
-@requirements REQ-11, REQ-7
-@author Antigravity Agent
-"""
-
 import logging
 import pytest
 from httpx import AsyncClient, ASGITransport
