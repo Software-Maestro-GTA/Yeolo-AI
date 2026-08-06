@@ -1,10 +1,9 @@
 name: deploy
 
-# main 브랜치 push 만 배포한다.
-# OIDC trust 가 ref:refs/heads/main 으로 고정돼 있어 다른 ref 에서는 role assume 자체가 불가.
+# main 브랜치 (prod 배포) 및 dev 브랜치 (dev 배포) push 트리거
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch: {}
 
 # 최소 권한: OIDC 토큰 발급 + 소스 read 만.
@@ -13,18 +12,16 @@ permissions:
   id-token: write
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-  EKS_CLUSTER: ${{ vars.EKS_CLUSTER }}
-  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
-  DEPLOYMENT_NAME: ${{ vars.DEPLOYMENT_NAME }}
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-2' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || '627407462404.dkr.ecr.ap-northeast-2.amazonaws.com/yeolo/ai' }}
+  EKS_CLUSTER: ${{ vars.EKS_CLUSTER || 'yeolo-dev' }}
+  DEPLOYMENT_NAME: ${{ vars.DEPLOYMENT_NAME || 'ai' }}
   # 이미지 태그 = immutable git commit SHA. mutable 태그로 배포 금지.
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
   build-and-push:
-    # workflow_dispatch 로 실행하더라도 main 에서만 동작(OIDC trust 와 일치).
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
     # EKS 노드가 Graviton(arm64, t4g)이므로 arm64 네이티브 러너에서 빌드한다.
     # amd64 러너로 빌드하면 노드에서 'exec format error' 로 CrashLoopBackOff.
     runs-on: ubuntu-24.04-arm
@@ -34,10 +31,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve OIDC role
+        id: role
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            ROLE="${{ vars.AWS_ROLE_ARN }}"
+          elif [ "${{ github.ref }}" = "refs/heads/dev" ]; then
+            ROLE="${{ vars.AWS_ROLE_ARN_DEV }}"
+          fi
+
+          if [ -z "$ROLE" ]; then
+            echo "::error::AWS IAM Role ARN for ref '${{ github.ref }}' is missing in repository variables!"
+            exit 1
+          fi
+
+          echo "role=${ROLE}" >> "$GITHUB_OUTPUT"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ steps.role.outputs.role }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
@@ -61,27 +74,26 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
-  deploy:
+  deploy-prod:
     needs: build-and-push
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # 승인 게이트를 걸 수 있도록 environment 지정.
-    environment: dev
-    # 같은 앱의 배포를 직렬화한다. 진행 중 배포는 취소하지 않고 대기.
+    environment: prod
     concurrency:
-      group: deploy-${{ github.repository }}-${{ github.ref }}
+      group: deploy-prod-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
     env:
+      K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE || 'app' }}
       IMAGE: ${{ needs.build-and-push.outputs.image }}
       CONTAINER_NAME: ${{ vars.CONTAINER_NAME || vars.DEPLOYMENT_NAME }}
       # ── ConfigMap (ai-env) ──────────────────────────────────────────
-      LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
-      GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME || vars.AI_MODEL || 'gemini-3.5-flash' }}
-      LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS || '60' }}
-      PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS || '60' }}
-      LANGSMITH_TRACING: ${{ vars.LANGSMITH_TRACING || 'true' }}
-      LANGSMITH_ENDPOINT: ${{ vars.LANGSMITH_ENDPOINT || 'https://api.smith.langchain.com' }}
-      LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT || 'YEOLO' }}
+      LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+      GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME }}
+      LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS }}
+      PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS }}
+      LANGSMITH_TRACING: ${{ vars.LANGSMITH_TRACING }}
+      LANGSMITH_ENDPOINT: ${{ vars.LANGSMITH_ENDPOINT }}
+      LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}
       # ── Secret (ai-secrets) ─────────────────────────────────────────
       INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -117,6 +129,16 @@ jobs:
         run: |
           umask 077
           : > ai-secret.env
+          missing=0
+          for k in INTERNAL_API_KEY GEMINI_API_KEY; do
+            v="${!k}"
+            if [ -z "$v" ]; then
+              echo "::error::Required secret $k is missing in GitHub Environment secrets!"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 1 ] && exit 1
+
           for k in INTERNAL_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai-secret.env
           done
@@ -125,6 +147,7 @@ jobs:
           rm -f ai-secret.env
 
       - name: Set image
+        id: set_image
         run: |
           kubectl -n "$K8S_NAMESPACE" set image \
             "deployment/${DEPLOYMENT_NAME}" \
@@ -134,7 +157,96 @@ jobs:
         run: kubectl -n "$K8S_NAMESPACE" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=5m
 
       - name: Rollback on failure
-        if: failure()
+        if: failure() && steps.set_image.outcome == 'success'
+        run: |
+          echo "rollout failed — rolling back deployment/${DEPLOYMENT_NAME}"
+          kubectl -n "$K8S_NAMESPACE" rollout undo "deployment/${DEPLOYMENT_NAME}"
+          kubectl -n "$K8S_NAMESPACE" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=5m
+
+  deploy-dev:
+    needs: build-and-push
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency:
+      group: deploy-dev-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      K8S_NAMESPACE: app-dev
+      IMAGE: ${{ needs.build-and-push.outputs.image }}
+      CONTAINER_NAME: ${{ vars.CONTAINER_NAME || vars.DEPLOYMENT_NAME }}
+      # ── ConfigMap (ai-env) ──────────────────────────────────────────
+      LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+      GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME }}
+      LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS }}
+      PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS }}
+      LANGSMITH_TRACING: ${{ vars.LANGSMITH_TRACING }}
+      LANGSMITH_ENDPOINT: ${{ vars.LANGSMITH_ENDPOINT }}
+      LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}
+      # ── Secret (ai-secrets) ─────────────────────────────────────────
+      INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY || secrets.LANGCHAIN_API_KEY }}
+      LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY || secrets.LANGSMITH_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: Sync app config (ai-env)
+        run: |
+          umask 077
+          : > ai.env
+          for k in LOG_LEVEL GEMINI_MODEL_NAME LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
+            v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai.env
+          done
+          kubectl -n "$K8S_NAMESPACE" create configmap ai-env \
+            --from-env-file=ai.env --dry-run=client -o yaml | kubectl apply -f -
+          rm -f ai.env
+
+      - name: Sync app secrets (ai-secrets)
+        run: |
+          umask 077
+          : > ai-secret.env
+          missing=0
+          for k in INTERNAL_API_KEY GEMINI_API_KEY; do
+            v="${!k}"
+            if [ -z "$v" ]; then
+              echo "::error::Required secret $k is missing in GitHub Environment secrets!"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 1 ] && exit 1
+
+          for k in INTERNAL_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
+            v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai-secret.env
+          done
+          kubectl -n "$K8S_NAMESPACE" create secret generic ai-secrets \
+            --from-env-file=ai-secret.env --dry-run=client -o yaml | kubectl apply -f -
+          rm -f ai-secret.env
+
+      - name: Set image
+        id: set_image
+        run: |
+          kubectl -n "$K8S_NAMESPACE" set image \
+            "deployment/${DEPLOYMENT_NAME}" \
+            "${CONTAINER_NAME}=${IMAGE}"
+
+      - name: Verify rollout
+        run: kubectl -n "$K8S_NAMESPACE" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=5m
+
+      - name: Rollback on failure
+        if: failure() && steps.set_image.outcome == 'success'
         run: |
           echo "rollout failed — rolling back deployment/${DEPLOYMENT_NAME}"
           kubectl -n "$K8S_NAMESPACE" rollout undo "deployment/${DEPLOYMENT_NAME}"
