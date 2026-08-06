@@ -1,0 +1,27 @@
+name: PR Source Branch Guard
+
+# main 브랜치를 타겟으로 하는 Pull Request가 생성/업데이트될 때 검사
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-source-branch:
+    name: Verify PR Source Branch is 'dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Source Branch
+        run: |
+          echo "Target Branch: ${{ github.base_ref }}"
+          echo "Source Branch: ${{ github.head_ref }}"
+
+          if [ "${{ github.head_ref }}" != "dev" ]; then
+            echo "::error::[Merge Policy Violation] Only PRs originating from the 'dev' branch are allowed to be merged into 'main'!"
+            echo "Current source branch '${{ github.head_ref }}' is not permitted."
+            exit 1
+          fi
+
+          echo "Source branch validation passed! 'dev' -> 'main' PR detected."
