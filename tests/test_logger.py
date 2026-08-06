@@ -9,13 +9,12 @@ import logging
 import pytest
 from httpx import AsyncClient, ASGITransport
 from app.main import app
-from app.core.logger import setup_logging, logger
-from app.core.config import settings
+from app.core.logger import setup_logging
 
 
 def test_setup_logging_initialization(mocker):
     """setup_logging() 함수가 로거 및 핸들러를 올바르게 초기화하는지 검증"""
-    mock_stream = mocker.patch("sys.stdout")
+    mocker.patch("sys.stdout")
     setup_logging()
     
     root_logger = logging.getLogger()
