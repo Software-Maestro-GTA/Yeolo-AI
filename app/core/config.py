@@ -1,13 +1,5 @@
-"""
-@file config.py
-@description 환경 변수 설정 및 프로젝트 글로벌 환경 변수 정의 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()

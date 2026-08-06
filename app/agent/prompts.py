@@ -1,12 +1,3 @@
-"""
-@file prompts.py
-@description 1단계(여행자 Fact Sheet 요약) 및 2단계(도메인별 병렬 채점 체인 A, B, C)를 위한 LangChain Prompt Templates 정의 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 from langchain_core.prompts import ChatPromptTemplate
 
 # 1단계: 파이썬 축약 리포트를 바탕으로 여행자 Fact Sheet(정성적 요약본)를 작성하는 프롬프트
@@ -64,28 +55,38 @@ ACTIVITY_FOOD_SPENDING_PROMPT = ChatPromptTemplate.from_messages([
 COURSE_GENERATION_PROMPT = ChatPromptTemplate.from_messages([
     ("system", (
         "당신은 최고 레벨의 AI 여행 플래너입니다.\n"
-        "사용자의 성향 프로필(tasteProfile)과 여행 제약 조건(tripCondition)을 심층적으로 분석하여 "
+        "사용자의 MBTI, 성향 프로필(tasteProfile), 그리고 여행 제약 조건(tripCondition)을 심층적으로 분석하여 "
         "일자별 최적화된 여행 코스를 생성해 주세요.\n\n"
         "작성 시 다음 규칙 및 제약사항을 엄격하게 준수하십시오:\n"
-        "1. 일정 밀도(pace) 반영:\n"
-        "   - travelPaceDensity가 slow_stay 또는 long_stay인 경우: relaxed (하루 2~3개 스톱)\n"
-        "   - balanced 또는 spontaneous인 경우: balanced (하루 3~4개 스톱)\n"
-        "   - dense_schedule인 경우: dense (하루 4~5개 스톱)\n"
-        "2. 이동 수단 및 이동 시간:\n"
+        "1. MBTI 및 성향 프로필 반영:\n"
+        "   - MBTI가 주어진 경우 (e.g. E/I, N/S, T/F, J/P), 해당 성향에 적합한 활동 성격, 장소 분위기(소셜/활발함 vs 아늑함/고요함), 동선 계획의 체계성을 코스 구성에 적극 반영하십시오.\n"
+        "   - tasteProfile이 주어진 경우, 세부 여행 목적, 장소/활동 취향, 소비 성향을 종합 반영하십시오.\n"
+        "2. 일정 밀도(pace) 반영 및 스톱 개념:\n"
+        "   - 하루 방문 스톱(stops) 수에는 명소/관광지뿐만 아니라 식사(아침, 점심, 저녁 식당) 및 카페 스톱이 모두 포함됩니다.\n"
+        "   - travelPaceDensity가 slow_stay 또는 long_stay인 경우: relaxed (하루 총 3~4개 스톱)\n"
+        "   - balanced 또는 spontaneous인 경우: balanced (하루 총 4~5개 스톱)\n"
+        "   - dense_schedule인 경우: dense (하루 총 5~6개 스톱)\n"
+        "3. 이동 수단 및 이동 시간:\n"
         "   - 동행 형태(companionType)와 소비 성향, 목적지 여건을 고려해 walking, transit, driving, taxi 중 적합한 이동 수단을 선택\n"
         "   - 하루 총 이동 시간이 180분을 초과하지 않도록 억제하고 스톱 간 이동 시간을 현실적으로 배치\n"
-        "3. 효율적인 이동 동선 및 불필요한 왕복 방지 (동선 최적화 필수):\n"
+        "4. 삼시세끼 식사 및 식사 이후 유연한 일정 구성:\n"
+        "   - 하루 일정을 구성할 때 **아침 식사**(08:00~09:30), **점심 식사**(12:00~13:30), **저녁 식사**(18:00~19:30) 시각 및 인근 식당/카페 스톱을 포함하십시오.\n"
+        "   - **저녁 식사가 반드시 하루 일정의 마지막 스톱일 필요는 없으며**, 저녁 식사 후 야경 관람, 야시장 탐방, 야간 산책, 카페/바 등 저녁 식사 이후의 일정도 유연하게 이어지도록 구성할 수 있습니다.\n"
         "   - 동일 일자 내 장소 배치는 지리적으로 인접한 구역 순서대로 배치하며, 비효율적인 핑퐁/왕복 이동(예: A지역 점심 -> B지역 관광 -> 다시 A지역 저녁 등)을 엄격히 금지합니다.\n"
         "   - 동선 흐름은 지리적 흐름에 맞춰 단방향 또는 순환 코스로 이어지도록 설계하여 이동 시간과 체력 낭비를 최소화하십시오.\n"
-        "   - 식사 시각(점심 12:00~13:30, 저녁 18:00~19:30) 및 장소별 영업시간/체류시간을 고려하되, 식당 위치 또한 해당 시점 직전/직후 일정 근처의 동선 상 장소로 선정하십시오.\n"
-
-        "4. 예상 비용 및 예산 기준:\n"
+        "5. 예상 비용 및 예산 기준:\n"
         "   - spendingTendency와 budgetType(cost_effective, standard, luxury)에 맞춰 장소별 cost 계산\n"
-        "5. 추천 이유 상세 명시:\n"
-        "   - 코스 전체의 recommendationReason과 각 스톱별 reason에 성향 프로필(예: 미식, 휴양, 숨은 명소 등)과의 매칭 포인트를 명확히 설명\n\n"
+        "6. 장소별 메모(memo) 및 추천 이유 상세 명시:\n"
+        "   - 각 스톱의 memo 필드는 단답형 한 문장 작성을 금지하며, 최소 2~3문장 이상(약 80~150자 내외)으로 풍부하게 작성하십시오.\n"
+        "   - memo 내용에는 **해당 장소의 특징, 분위기 및 핵심 매력에 대한 구체적 설명**과 **방문 시 반드시 유의/주의해야 할 점**(예: 사전 예약/대기표 작성 필수, 주차 혼잡, 특정 시간대 피크, 복장 규정, 브레이크 타임 등)을 문장으로 구체적으로 서술하십시오.\n"
+        "   - 코스 전체의 recommendationReason과 각 스톱별 reason에 MBTI 및 성향 프로필과의 매칭 포인트를 명확히 설명하십시오.\n"
+        "7. 폐업 방지 및 검증된 장소 추천 규칙:\n"
+        "   - 폐업 가능성이 높은 임시/단기 매장 대신, 오랫동안 안정적으로 영업하여 지속성이 검증된 로컬 대표 명소 및 맛집을 우선적으로 추천하십시오.\n"
+        "   - 실재 여부가 불확실하거나 폐업 위험이 있는 장소의 추천을 엄격히 지양하십시오.\n\n"
         "반드시 지정된 Structured Output 스키마 포맷(Pydantic CourseSchema)으로만 응답해 주세요."
     )),
     ("user", (
+        "사용자 MBTI:\n{mbti}\n\n"
         "사용자 성향 프로필:\n{taste_profile}\n\n"
         "여행 조건:\n{trip_condition}\n\n"
         "위 정보를 기반으로 {total_days}일간의 여행 코스를 빌드하십시오."

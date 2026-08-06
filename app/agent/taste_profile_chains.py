@@ -1,24 +1,16 @@
-"""
-@file taste_profile_chains.py
-@description LangChain LCEL과 ChatGoogleGenerativeAI를 활용하여 성향 분석 1, 2단계 체인 및 구조화된 출력을 정의하는 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 from langchain_google_genai import ChatGoogleGenerativeAI
+
+from app.agent.prompts import (
+    ACTIVITY_FOOD_SPENDING_PROMPT,
+    FACT_SHEET_PROMPT,
+    LOCATION_ENVIRONMENT_PROMPT,
+    PURPOSE_PACE_COMPANION_PROMPT,
+)
 from app.core.config import settings
 from app.schemas.taste_profile import (
-    PurposePaceCompanionOutput,
+    ActivityFoodSpendingOutput,
     LocationEnvironmentOutput,
-    ActivityFoodSpendingOutput
-)
-from app.agent.prompts import (
-    FACT_SHEET_PROMPT,
-    PURPOSE_PACE_COMPANION_PROMPT,
-    LOCATION_ENVIRONMENT_PROMPT,
-    ACTIVITY_FOOD_SPENDING_PROMPT
+    PurposePaceCompanionOutput,
 )
 
 # API Key가 비어 있으면 테스트 수집 및 임포트 시 Pydantic 검증 에러를 방지하기 위해 가짜 키로 대체합니다.

@@ -14,7 +14,7 @@
 ## 2. 코드 품질 검토 (Code Quality Review)
 
 - **디자인/스타일 규칙 일관성**: [디자인 시스템 가이드 준수 여부 및 스타일 일치성]
-- **모듈 문서화(Docstring)**: [module-explain-formatter 주석 누락 여부]
+- **모듈 문서화(Docstring)**: [주요 클래스 및 비즈니스 함수 Docstring 작성 여부]
 - **Python/TypeScript/Lint 규칙 준수**: [린트 에러 및 타입 안정성]
 
 ## 3. 피드백 및 조치 사항 (Feedback & Action Items)

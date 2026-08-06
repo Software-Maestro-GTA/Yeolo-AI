@@ -1,13 +1,5 @@
-"""
-@file taste_profile.py
-@description DOM-1 (성향 정보) 및 API-BA-6 응답 스키마와 LLM 체인 출력을 위한 Pydantic 스키마 정의
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
+from typing import Literal
 
-from typing import List, Literal
 from pydantic import BaseModel, Field
 
 # ----------------- 1. 최종 API 응답용 및 도메인 스키마 -----------------
@@ -57,7 +49,6 @@ class FoodPreferenceSchema(BaseModel):
     sightseeingOverFood: int = Field(..., ge=1, le=5, description="음식보다 관광 중시형 (1-5)")
 
 class TasteProfileSchema(BaseModel):
-    sourceType: Literal["survey", "behavior", "mixed"] = Field("behavior", description="성향 생성 방식")
     travelPurpose: TravelPurposeSchema = Field(..., description="여행 목적 선호도")
     travelPaceDensity: Literal["slow_stay", "balanced", "dense_schedule", "spontaneous", "long_stay"] = Field(..., description="여행 속도/일정 밀도")
     preferredLocationType: PreferredLocationTypeSchema = Field(..., description="선호 장소 유형")
@@ -67,7 +58,7 @@ class TasteProfileSchema(BaseModel):
         "solo", "couple", "friends", "family", "with_children", "with_parents", "group", "with_pet", "social"
     ] = Field(..., description="동행 형태")
     foodPreference: FoodPreferenceSchema = Field(..., description="음식 취향")
-    seasonalEnvironmentPreference: List[
+    seasonalEnvironmentPreference: list[
         Literal[
             "warm_region", "cold_region", "summer_resort", "winter_sports",
             "spring_flower_autumn_foliage", "dry_weather", "off_season", "peak_season"

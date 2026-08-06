@@ -16,7 +16,6 @@ description: 소스코드를 검증하고 피드백 루프를 돌 때 사용하�
 
 1. **`LINT` (스타일 및 정적 분석 오류)**:
    - Python/Ruff 린트 경고 및 에러.
-   - 신규/수정 소스 파일 최상단에 `module-explain-formatter`에 규정된 파일 설명 헤더(Docstring)가 누락되거나 규격에 맞지 않는 경우.
 2. **`TYPE` (타입 무결성 오류)**:
    - Pydantic v2 데이터 검증 실패, Python 정적 타입 힌트 오류 및 불일치.
 3. **`TEST` (테스트 실패 오류)**:
