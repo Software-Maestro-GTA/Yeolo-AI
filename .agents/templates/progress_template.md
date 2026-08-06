@@ -57,7 +57,7 @@ Planner 에이전트가 기획/명세를 바탕으로 이 백로그를 구현하
 - **수행 시각**: YYYY-MM-DD HH:MM
 - **수행 상세**:
   - [예: app/schemas/recommendation.py 및 app/services/recommendation.py 코드 구현 작성]
-  - [예: app/api/recommendation.py 라우터 등록 및 모듈 상단에 module-explain-formatter 주석 완료]
+  - [예: app/api/recommendation.py 라우터 등록 완료]
   - [예: 로컬 환경에서 pytest 테스트 스크립트 실행하여 작성한 테스트 통과 확인]
 
 ### 4. Reviewer (코드 무결성 및 빌드 검증)
