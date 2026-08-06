@@ -153,6 +153,9 @@ jobs:
             "deployment/${DEPLOYMENT_NAME}" \
             "${CONTAINER_NAME}=${IMAGE}"
 
+      - name: Restart deployment to apply new secrets/config
+        run: kubectl -n "$K8S_NAMESPACE" rollout restart "deployment/${DEPLOYMENT_NAME}"
+
       - name: Verify rollout
         run: kubectl -n "$K8S_NAMESPACE" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=5m
 
@@ -241,6 +244,9 @@ jobs:
           kubectl -n "$K8S_NAMESPACE" set image \
             "deployment/${DEPLOYMENT_NAME}" \
             "${CONTAINER_NAME}=${IMAGE}"
+
+      - name: Restart deployment to apply new secrets/config
+        run: kubectl -n "$K8S_NAMESPACE" rollout restart "deployment/${DEPLOYMENT_NAME}"
 
       - name: Verify rollout
         run: kubectl -n "$K8S_NAMESPACE" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=5m
