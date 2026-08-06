@@ -1,8 +1,10 @@
 import logging
+
 import pytest
-from httpx import AsyncClient, ASGITransport
-from app.main import app
+from httpx import ASGITransport, AsyncClient
+
 from app.core.logger import setup_logging
+from app.main import app
 
 
 def test_setup_logging_initialization(mocker):

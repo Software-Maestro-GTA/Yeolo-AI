@@ -1,7 +1,8 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
-from app.core.config import settings
-from app.schemas.course import CourseSchema, CourseRequestSchema
+
 from app.agent.prompts import COURSE_GENERATION_PROMPT
+from app.core.config import settings
+from app.schemas.course import CourseRequestSchema, CourseSchema
 
 # API Key가 비어 있으면 테스트/임포트 시 오류를 방지하기 위해 가짜 키로 대체
 gemini_api_key = settings.GEMINI_API_KEY or "fake_gemini_api_key_for_testing"
@@ -18,10 +19,18 @@ course_generation_chain = COURSE_GENERATION_PROMPT | llm.with_structured_output(
 
 async def run_course_generation_chain(request: CourseRequestSchema) -> CourseSchema:
     """
-    성향 프로필과 여행 조건을 받아 LangChain 체인을 비동기(ainvoke) 실행하고 CourseSchema를 반환합니다.
+    MBTI, 성향 프로필 및 여행 조건을 받아 LangChain 체인을 비동기(ainvoke) 실행하고 CourseSchema를 반환합니다.
     """
+    mbti_str = request.mbti if request.mbti else "제공되지 않음"
+    taste_profile_str = (
+        request.tasteProfile.model_dump_json(indent=2)
+        if request.tasteProfile
+        else "제공되지 않음"
+    )
+
     input_data = {
-        "taste_profile": request.tasteProfile.model_dump_json(indent=2),
+        "mbti": mbti_str,
+        "taste_profile": taste_profile_str,
         "trip_condition": request.tripCondition.model_dump_json(indent=2),
         "total_days": request.tripCondition.totalDays,
     }

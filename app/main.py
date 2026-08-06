@@ -1,10 +1,12 @@
 import logging
 import time
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from app.api.taste_profile import router as taste_profile_router
+
 from app.api.course import router as course_router
+from app.api.taste_profile import router as taste_profile_router
 from app.core.logger import setup_logging
 
 # 로깅 환경 초기화
@@ -30,15 +32,14 @@ async def log_requests(request: Request, call_next):
         return response
     except Exception as exc:
         process_time_ms = (time.time() - start_time) * 1000
-        logger.error(
-            f"Unhandled Exception on [{request.method}] {request.url.path} ({process_time_ms:.2f}ms): {str(exc)}",
-            exc_info=True,
+        logger.exception(
+            f"Unhandled Exception on [{request.method}] {request.url.path} ({process_time_ms:.2f}ms): {exc!s}"  # noqa: TRY401
         )
         return JSONResponse(
             status_code=500,
             content={
                 "status": 500,
-                "message": f"서버 내부 오류가 발생했습니다: {str(exc)}",
+                "message": f"서버 내부 오류가 발생했습니다: {exc!s}",
             },
         )
 
@@ -46,9 +47,10 @@ async def log_requests(request: Request, call_next):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    # 코스 생성 API 엔드포인트 요청 시의 validation error 문구 처리
     if "/courses" in request.url.path:
         message = "코스 생성 조건이 올바르지 않습니다."
+    elif "/taste-profile" in request.url.path:
+        message = "분석 가능한 전처리 메타데이터가 부족합니다."
     else:
         message = "전처리 메타데이터 부족/형식 오류"
 
@@ -61,6 +63,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={
             "status": 400,
             "message": message,
+            "data": None,
         },
     )
 
@@ -88,16 +91,15 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """처리되지 않은 모든 서버 내부 예외에 대해 스택 트레이스를 기록하는 로깅 핸들러"""
-    logger.error(
-        f"Unhandled Exception on [{request.method}] {request.url.path}: {str(exc)}",
-        exc_info=True,
+    logger.exception(
+        f"Unhandled Exception on [{request.method}] {request.url.path}"
     )
 
     return JSONResponse(
         status_code=500,
         content={
             "status": 500,
-            "message": f"서버 내부 오류가 발생했습니다: {str(exc)}",
+            "message": f"서버 내부 오류가 발생했습니다: {exc!s}",
         },
     )
 

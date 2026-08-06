@@ -1,22 +1,23 @@
 import asyncio
+import logging
 from collections import Counter
-from typing import AsyncGenerator, Dict, Any, List
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from fastapi import HTTPException
+
+from app.agent.taste_profile_chains import (
+    activity_food_spending_chain,
+    location_environment_chain,
+    purpose_pace_companion_chain,
+    summarize_chain,
+)
 from app.schemas.behavior import BehaviorAnalysisRequest, BehaviorItemSchema
 from app.schemas.taste_profile import TasteProfileSchema
-from app.agent.taste_profile_chains import (
-    summarize_chain,
-    purpose_pace_companion_chain,
-    location_environment_chain,
-    activity_food_spending_chain
-)
-
-import logging
 
 logger = logging.getLogger(__name__)
 
-def summarize_raw_metadata(items: List[BehaviorItemSchema]) -> str:
+def summarize_raw_metadata(items: list[BehaviorItemSchema]) -> str:
     """수십~수백 개의 메타데이터 목록을 파이썬 규칙에 따라 1차 통계 축약 처리하여 텍스트 리포트로 생성합니다."""
     total_count = len(items)
     
@@ -58,7 +59,7 @@ def summarize_raw_metadata(items: List[BehaviorItemSchema]) -> str:
     
     return "\n".join(report_lines)
 
-async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGenerator[Dict[str, Any], None]:
+async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGenerator[dict[str, Any]]:
     """위치 및 시간 데이터를 통계 축약하고 2단계 LLM 병렬 분석 파이프라인을 거쳐 Taste Profile을 생성 및 SSE 스트리밍으로 반환합니다.
 
     Args:
@@ -99,8 +100,8 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
         fact_sheet = fact_sheet_response.content
         logger.info(f"[behavior_service] Stage 1 LLM invoke completed for userId={request.userId}")
     except Exception as e:
-        logger.error(f"[behavior_service] Stage 1 LLM error for userId={request.userId}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"1단계 요약본 생성 중 AI 엔진 오류 발생: {str(e)}")
+        logger.exception(f"[behavior_service] Stage 1 LLM error for userId={request.userId}")
+        raise HTTPException(status_code=500, detail=f"1단계 요약본 생성 중 AI 엔진 오류 발생: {e!s}")
 
     # 3. 2단계: 도메인별 병렬 채점 (asyncio.gather 활용 병렬 구동)
     try:
@@ -112,8 +113,8 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
         )
         logger.info(f"[behavior_service] Stage 2 parallel LLM chains completed for userId={request.userId}")
     except Exception as e:
-        logger.error(f"[behavior_service] Stage 2 LLM error for userId={request.userId}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"2단계 도메인 병렬 채점 중 AI 엔진 오류 발생: {str(e)}")
+        logger.exception(f"[behavior_service] Stage 2 LLM error for userId={request.userId}")
+        raise HTTPException(status_code=500, detail=f"2단계 도메인 병렬 채점 중 AI 엔진 오류 발생: {e!s}")
 
     # 4. 결과 취합 및 데이터 변환 (Structured Output 가공)
     # location_environment_chain의 Boolean 결과 중 True인 키값들만 추려 seasonalEnvironmentPreference 목록 구성
@@ -125,7 +126,6 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
 
     # TasteProfileSchema에 맞게 각 컴포넌트 조립
     taste_profile = TasteProfileSchema(
-        sourceType="behavior",
         travelPurpose={
             "relaxation": purpose_pace_result.relaxation,
             "sightseeing": purpose_pace_result.sightseeing,

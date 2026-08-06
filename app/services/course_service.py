@@ -1,14 +1,16 @@
 import json
 import logging
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
+
 from fastapi import HTTPException
-from app.schemas.course import CourseRequestSchema, CourseSchema
+
 from app.agent.course_chain import run_course_generation_chain
+from app.schemas.course import CourseRequestSchema, CourseSchema
 
 logger = logging.getLogger(__name__)
 
 
-async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerator[str, None]:
+async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerator[str]:
     """
     성향 프로필과 여행 조건 기반 코스를 비동기로 생성한 후 SSE 스트림을 반환합니다.
     1) LLM 파이프라인 실행 중 오류나 조건 미충족 시 404 / 500 HTTPException 발생 (StreamingResponse 시작 전)
@@ -20,8 +22,8 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
         course_result: CourseSchema = await run_course_generation_chain(request)
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"[course_service] Error in course generation chain for userId={request.userId}: {str(e)}", exc_info=True)
+    except Exception:
+        logger.exception(f"[course_service] Error in course generation chain for userId={request.userId}")
         raise HTTPException(status_code=500, detail="AI 코스 생성 중 오류가 발생했습니다.")
 
     if not course_result:
@@ -31,7 +33,7 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
 
     logger.info(f"[course_service] Successfully generated course '{course_result.title}' for userId={request.userId}. Starting SSE stream.")
 
-    async def sse_generator() -> AsyncGenerator[str, None]:
+    async def sse_generator() -> AsyncGenerator[str]:
         # 1. 진행 상태 전송 (event: progress)
         progress_data = {
             "step": "GENERATING_ROUTE",

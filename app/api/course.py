@@ -1,9 +1,11 @@
 import logging
+
 from fastapi import APIRouter, Header, HTTPException, Request, status
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from app.core.config import settings
 from app.schemas.course import CourseRequestSchema
 from app.services.course_service import generate_course_service
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,7 @@ async def generate_course_api(
         logger.warning(f"수신된 API Key: '{x_internal_api_key}', 서버 설정 API Key: '{settings.INTERNAL_API_KEY}'")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"status": 401, "message": "내부 인증 실패"},
+            content={"status": 401, "message": "내부 인증 실패", "data": None},
         )
 
     logger.info(
@@ -45,12 +47,12 @@ async def generate_course_api(
         logger.warning(f"Course generation HTTP exception for userId: {request.userId} -> Code {e.status_code}: {e.detail}")
         return JSONResponse(
             status_code=e.status_code,
-            content={"status": e.status_code, "message": e.detail},
+            content={"status": e.status_code, "message": e.detail, "data": None},
         )
     except Exception as e:
-        logger.error(f"Unexpected error in course generation for userId: {request.userId} -> {str(e)}", exc_info=True)
+        logger.exception(f"Unexpected error in course generation for userId: {request.userId}")
         return JSONResponse(
             status_code=500,
-            content={"status": 500, "message": f"AI 코스 생성 중 오류가 발생했습니다: {str(e)}"},
+            content={"status": 500, "message": f"AI 코스 생성 중 오류가 발생했습니다: {e!s}", "data": None},
         )
 
