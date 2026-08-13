@@ -101,6 +101,9 @@ def export_course_to_markdown(
     md_lines = []
     md_lines.append(f"# {course.title}")
     md_lines.append("")
+    if course.coverImageUrl:
+        md_lines.append(f"![코스 커버 이미지]({course.coverImageUrl})")
+        md_lines.append("")
     md_lines.append(f"> **목적지**: {course.destinationCountry} {course.destinationCity}")
     md_lines.append(f"> **일정**: {course.startDate} 부터 (총 {course.totalDays}일간)")
     if course.tags:
@@ -133,25 +136,43 @@ def export_course_to_markdown(
         md_lines.append("| :---: | :---: | :--- | :---: | :---: | :---: | :---: |")
 
         for stop in day_item.stops:
-            transport_str = transport_map.get(stop.transportToNext, stop.transportToNext)
-            if stop.travelMinutesToNext > 0:
-                transport_info = f"{transport_str} ({stop.travelMinutesToNext}분)"
+            place_name = stop.place.placeName if stop.place else "알 수 없음"
+            category = stop.place.category if stop.place else "미정"
+
+            t_type = stop.transportToNext.type if stop.transportToNext else "none"
+            t_minutes = stop.transportToNext.minutes if stop.transportToNext else None
+            t_cost = stop.transportToNext.cost if stop.transportToNext else None
+
+            transport_str = transport_map.get(t_type, t_type)
+            if t_minutes and t_minutes > 0:
+                transport_info = f"{transport_str} ({t_minutes}분)"
             else:
                 transport_info = transport_str
 
-            cost_str = f"{stop.cost:,}원" if stop.cost > 0 else "무료/기본"
+            cost_val = t_cost or 0
+            cost_str = f"{cost_val:,}원" if cost_val > 0 else "무료/기본"
 
             md_lines.append(
-                f"| {stop.sequence} | {stop.arrivalTime} | **{stop.placeName}** | `{stop.category}` | {stop.stayMinutes}분 | {transport_info} | {cost_str} |"
+                f"| {stop.sequence} | {stop.arrivalTime} | **{place_name}** | `{category}` | {stop.stayMinutes}분 | {transport_info} | {cost_str} |"
             )
 
         md_lines.append("")
         md_lines.append("#### 장소별 상세 설명 및 방문 주의사항 (memo)")
         for stop in day_item.stops:
-            md_lines.append(f"##### {stop.sequence}. {stop.placeName} (`{stop.category}`)")
+            p = stop.place
+            p_name = p.placeName if p else "장소"
+            p_cat = p.category if p else "카테고리"
+            p_addr = p.address if p and p.address else ""
+            p_rating = f" (평점: {p.rating})" if p and p.rating else ""
+
+            md_lines.append(f"##### {stop.sequence}. {p_name} (`{p_cat}`){p_rating}")
+            if p_addr:
+                md_lines.append(f"- **주소**: {p_addr}")
             md_lines.append(f"- **도착 시각**: {stop.arrivalTime} (체류 {stop.stayMinutes}분)")
             md_lines.append(f"- **추천 이유**: {stop.reason}")
             md_lines.append(f"- **메모/주의사항**: {stop.memo}")
+            if stop.transportToNext and stop.transportToNext.memo:
+                md_lines.append(f"- **이동안내**: {stop.transportToNext.memo}")
             md_lines.append("")
 
         md_lines.append("---")

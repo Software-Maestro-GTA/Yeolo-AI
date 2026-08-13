@@ -97,6 +97,7 @@ jobs:
       # ── Secret (ai-secrets) ─────────────────────────────────────────
       INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY || secrets.LANGCHAIN_API_KEY }}
@@ -139,7 +140,7 @@ jobs:
           done
           [ "$missing" -eq 1 ] && exit 1
 
-          for k in INTERNAL_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
+          for k in INTERNAL_API_KEY GEMINI_API_KEY GOOGLE_MAPS_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai-secret.env
           done
           kubectl -n "$K8S_NAMESPACE" create secret generic ai-secrets \
@@ -189,6 +190,7 @@ jobs:
       # ── Secret (ai-secrets) ─────────────────────────────────────────
       INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY || secrets.LANGCHAIN_API_KEY }}
@@ -231,7 +233,7 @@ jobs:
           done
           [ "$missing" -eq 1 ] && exit 1
 
-          for k in INTERNAL_API_KEY GEMINI_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
+          for k in INTERNAL_API_KEY GEMINI_API_KEY GOOGLE_MAPS_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai-secret.env
           done
           kubectl -n "$K8S_NAMESPACE" create secret generic ai-secrets \
