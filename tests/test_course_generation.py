@@ -100,6 +100,7 @@ def sample_course_schema():
         title="제주 가성비 힐링 & 미식 여행 2일",
         destinationCountry="South Korea",
         destinationCity="Jeju",
+        coverImageUrl="https://example.com/cover.jpg",
         startDate="2026-08-01",
         totalDays=2,
         tags=["미식", "가성비", "힐링"],
@@ -113,15 +114,29 @@ def sample_course_schema():
                     "stops": [
                         {
                             "sequence": 1,
-                            "placeName": "제주 동문시장",
-                            "category": "시장/길거리음식",
                             "arrivalTime": "11:00",
                             "stayMinutes": 90,
                             "memo": "현지 야시장 음식 체험 (주의: 주차장이 혼잡할 수 있으니 대중교통 이용 권장)",
-                            "transportToNext": "driving",
-                            "travelMinutesToNext": 20,
-                            "cost": 15000,
                             "reason": "길거리 음식 및 현지 시장 적극 반영",
+                            "place": {
+                                "placeId": "places/ChIJN1t_tDeuEmsRUsoyG83frY4",
+                                "placeName": "제주 동문시장",
+                                "placeEngName": "Jeju Dongmun Traditional Market",
+                                "category": "시장/길거리음식",
+                                "address": "제주특별자치도 제주시 관덕로14길 20",
+                                "latitude": 33.5126,
+                                "longitude": 126.5283,
+                                "rating": 4.5,
+                                "photoUrl": "https://example.com/photo.jpg",
+                                "openingHours": ["매일 08:00 ~ 21:00"],
+                            },
+                            "transportToNext": {
+                                "type": "driving",
+                                "distance": 12000.0,
+                                "minutes": 20,
+                                "cost": 15000,
+                                "memo": "차량으로 약 20분 이동",
+                            },
                         }
                     ],
                 }
