@@ -433,6 +433,7 @@ def test_course_prompt_requirements():
     assert "설명" in prompt_str
     assert "주의" in prompt_str or "유의" in prompt_str
     assert "비용" in prompt_str or "cost" in prompt_str
+    assert "placeEngName" in prompt_str or "영문" in prompt_str
 
 
 def test_stop_schema_cost_field_validation():

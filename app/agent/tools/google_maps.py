@@ -7,6 +7,7 @@ Google Maps Platform의 Place (New) Text Search API와 Routes API를 호출하�
 
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -21,6 +22,15 @@ GOOGLE_PLACES_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 GOOGLE_ROUTES_COMPUTE_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 
 
+def _clean_english_name(name: str) -> str:
+    """한글이 포함되어 있거나 비어있는 경우 빈 문자열을 반환하고, 유효한 영문/로마자 명칭만 반환합니다."""
+    if not name:
+        return ""
+    if re.search(r"[\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f]", name):
+        return ""
+    return name.strip()
+
+
 @tool
 async def search_place_detail_tool(
     query: str,
@@ -30,9 +40,9 @@ async def search_place_detail_tool(
     """Google Maps Place (New) API를 사용해 장소의 정밀 정보(위경도, 주소, 평점, 영업시간 등)를 조회합니다.
 
     Args:
-        query (str): 장소 한글명 또는 주 검색어 (예: "N서울타워", "레 상피옹").
-        destination_city (str): 도시명 또는 목적지 보조 정보 (예: "서울", "파리").
-        english_query (str): 해외 장소인 경우 원문 또는 영문 명칭 (예: "Le Comptoir du Relais").
+        query (str): 장소의 한글 공식 명칭 또는 주 검색어.
+        destination_city (str): 방문 도시명 또는 목적지 보조 정보.
+        english_query (str): 해외 장소인 경우 원문 또는 공식 영문/로마자 명칭.
 
     Returns:
         dict: 장소 상세 정보 (placeId, placeName, placeEngName, category, address, latitude, longitude, rating, photoUrl, openingHours).
@@ -99,18 +109,18 @@ async def search_place_detail(
     검색이 모두 실패하면 fallback_place가 있을 경우 기존 유효 정보를 보존하여 반환합니다.
 
     Args:
-        query (str): 장소 한글명 또는 주 검색어 (예: "N서울타워", "레 상피옹").
-        destination_city (str): 도시명 또는 목적지 보조 정보 (예: "서울", "파리").
-        english_query (str): 해외 장소인 경우 원문 또는 영문 명칭 (예: "Le Comptoir du Relais").
+        query (str): 장소의 한글 공식 명칭 또는 주 검색어.
+        destination_city (str): 방문 도시명 또는 목적지 보조 정보.
+        english_query (str): 해외 장소인 경우 원문 또는 공식 영문/로마자 명칭.
         fallback_place (PlaceSchema | None): API 실패 시 참고할 기존 장소 데이터 (LLM 생성 데이터 보존용).
 
     Returns:
         PlaceSchema: 장소 상세 정보 (위경도, 주소, 평점, 사진 URL, 영업시간 등).
     """
     api_key = settings.GOOGLE_MAPS_API_KEY or os.getenv("GOOGLE_MAPS_API_KEY", "")
-    eng_name = english_query.strip() if english_query and english_query.strip() else (
-        fallback_place.placeEngName if fallback_place and fallback_place.placeEngName else query
-    )
+    cleaned_english_query = _clean_english_name(english_query)
+    cleaned_fallback_eng = _clean_english_name(fallback_place.placeEngName) if fallback_place else ""
+    eng_name = cleaned_english_query or cleaned_fallback_eng
 
     if not api_key:
         return _get_fallback_place(query, destination_city, eng_name, fallback_place)
@@ -121,7 +131,7 @@ async def search_place_detail(
         places = await _execute_places_text_search(full_text, api_key)
 
         # 1차 한글 검색 결과가 없고 영문명이 존재하는 경우 2차 영문 다단계 검색 시도
-        if not places and eng_name and eng_name != query:
+        if not places and eng_name:
             eng_full_text = f"{destination_city} {eng_name}".strip()
             places = await _execute_places_text_search(eng_full_text, api_key)
 
@@ -257,9 +267,9 @@ def _get_fallback_place(
     fallback_place: PlaceSchema | None = None,
 ) -> PlaceSchema:
     """API 호출 불가 또는 검색 실패 시 기본 Fallback PlaceSchema 반환 (기존 fallback_place가 존재할 경우 유효 데이터 보존)."""
-    eng_name = english_query.strip() if english_query and english_query.strip() else (
-        fallback_place.placeEngName if fallback_place and fallback_place.placeEngName else query
-    )
+    cleaned_english_query = _clean_english_name(english_query)
+    cleaned_fallback_eng = _clean_english_name(fallback_place.placeEngName) if fallback_place else ""
+    eng_name = cleaned_english_query or cleaned_fallback_eng
 
     if fallback_place:
         lat = fallback_place.latitude if (fallback_place.latitude != 0.0 or fallback_place.longitude != 0.0) else 0.0
