@@ -15,6 +15,7 @@ llm = ChatGoogleGenerativeAI(
     model=settings.GEMINI_MODEL_NAME,
     google_api_key=gemini_api_key,
     temperature=0.5,
+    thinking_level=settings.GEMINI_THINKING_LEVEL,
 )
 
 # Google Maps API 도구를 LLM에 바인딩

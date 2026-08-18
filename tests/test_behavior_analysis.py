@@ -128,12 +128,10 @@ async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload
         sightseeingOverFood=2
     )
 
-    # 1단계 LLM 인보크 모킹
-    mock_llm_ainvoke = mocker.patch(
-        "langchain_google_genai.ChatGoogleGenerativeAI.ainvoke",
-        new_callable=AsyncMock
-    )
-    mock_llm_ainvoke.return_value = mock_fact_sheet
+    # 1단계 LLM 인보크 체인 모킹
+    mock_summarize_chain = AsyncMock()
+    mock_summarize_chain.ainvoke.return_value = mock_fact_sheet
+    mocker.patch("app.services.behavior_service.summarize_chain", mock_summarize_chain)
 
     # 2단계 Structured Output 체인 자체를 AsyncMock으로 패치하여 Pydantic delattr 이슈를 방지
     # 서비스 모듈 네임스페이스의 참조를 직접 패치하여 임포트 바인딩 문제를 방지합니다.

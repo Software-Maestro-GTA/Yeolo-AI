@@ -132,8 +132,8 @@ def export_course_to_markdown(
         md_lines.append(f"> *{day_item.memo}*")
         md_lines.append("")
 
-        md_lines.append("| 순서 | 시간 | 장소명 | 카테고리 | 체류시간 | 다음 장소 이동 | 예상 비용 |")
-        md_lines.append("| :---: | :---: | :--- | :---: | :---: | :---: | :---: |")
+        md_lines.append("| 순서 | 시간 | 장소명 | 카테고리 | 체류시간 | 장소 예상 비용 | 다음 장소 이동 | 이동 비용 |")
+        md_lines.append("| :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: |")
 
         for stop in day_item.stops:
             place_name = stop.place.placeName if stop.place else "알 수 없음"
@@ -149,11 +149,13 @@ def export_course_to_markdown(
             else:
                 transport_info = transport_str
 
-            cost_val = t_cost or 0
-            cost_str = f"{cost_val:,}원" if cost_val > 0 else "무료/기본"
+            place_cost_val = stop.cost or 0
+            place_cost_str = f"{place_cost_val:,}원" if place_cost_val > 0 else "무료"
+            trans_cost_val = t_cost or 0
+            trans_cost_str = f"{trans_cost_val:,}원" if trans_cost_val > 0 else "-"
 
             md_lines.append(
-                f"| {stop.sequence} | {stop.arrivalTime} | **{place_name}** | `{category}` | {stop.stayMinutes}분 | {transport_info} | {cost_str} |"
+                f"| {stop.sequence} | {stop.arrivalTime} | **{place_name}** | `{category}` | {stop.stayMinutes}분 | {place_cost_str} | {transport_info} | {trans_cost_str} |"
             )
 
         md_lines.append("")
@@ -169,6 +171,7 @@ def export_course_to_markdown(
             if p_addr:
                 md_lines.append(f"- **주소**: {p_addr}")
             md_lines.append(f"- **도착 시각**: {stop.arrivalTime} (체류 {stop.stayMinutes}분)")
+            md_lines.append(f"- **예상 비용**: {stop.cost:,}원" if stop.cost > 0 else "- **예상 비용**: 무료 (0원)")
             md_lines.append(f"- **추천 이유**: {stop.reason}")
             md_lines.append(f"- **메모/주의사항**: {stop.memo}")
             if stop.transportToNext and stop.transportToNext.memo:

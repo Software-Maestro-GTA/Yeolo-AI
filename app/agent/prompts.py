@@ -73,11 +73,15 @@ COURSE_GENERATION_PROMPT = ChatPromptTemplate.from_messages([
         "6. 삼시세끼 식사 및 식사 이후 유연한 일정 구성:\n"
         "   - 아침, 점심, 저녁 식사 시각을 고려하고 인근 인접한 지리적 순서대로 동선을 단방향/순환 코스로 설계하십시오.\n"
         "7. 예상 비용 및 예산 기준:\n"
-        "   - spendingTendency와 budgetType에 맞춰 비용을 계산하십시오.\n"
+        "   - 사용자의 소비 성향(spendingTendency) 및 예산 유형(budgetType)에 맞추어 각 스톱의 예상 활동/식사/입장 비용(StopSchema.cost, 원 단위)과 이동 비용(transportToNext.cost)을 합리적으로 산정하십시오.\n"
+        "   - 무료 관광지나 공원, 산책 등 별도 비용이 들지 않는 스톱의 cost는 0으로 지정하십시오.\n"
         "8. 장소별 메모(memo) 및 추천 이유 상세 명시:\n"
         "   - memo 필드는 최소 2~3문장 이상(80~150자 내외)으로 구체적인 특징과 장소 설명, 방문 시 주의사항(예약, 주차, 피크시간 등)을 풍부하게 서술하십시오.\n"
         "9. 폐업 방지 및 검증된 장소 추천 규칙:\n"
-        "   - 지속성이 검증된 로컬 대표 명소 및 맛집을 최우선 추천하십시오.\n\n"
+        "   - 지속성이 검증된 로컬 대표 명소 및 맛집을 최우선 추천하십시오.\n"
+        "10. 다음 장소 이동 안내(transportToNext.memo) 작성 규정:\n"
+        "   - transportToNext.memo는 목적지 지명만 단순 반복하는 모호한 서술을 지양하고, 사용자가 현재 위치에서 다음 목적지까지 찾아갈 수 있도록 이동 수단, 환승/탑승 경로, 도보 방향 등 이동 방법과 경로를 자연스럽고 친절한 한국어 안내 문장으로 작성하십시오.\n"
+        "   - 당일의 마지막 스톱은 transportToNext.type을 'none'으로 하고, minutes=0, cost=0으로 지정하십시오.\n\n"
         "반드시 지정된 Structured Output 스키마 포맷(Pydantic CourseSchema)으로만 응답해 주세요."
     )),
     ("user", (

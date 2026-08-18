@@ -29,20 +29,23 @@ async def enrich_course_with_google_maps(course: CourseSchema) -> CourseSchema:
         for stop in stops:
             p_name = stop.place.placeName if stop.place and stop.place.placeName else "장소"
 
-            # 이미 유효한 Google Place ID(places/...) 및 영업시간/주소가 정밀하게 채워져 있는 경우 Skip
+            # 이미 정규 Google Places API(New) 응답 데이터(요일별 영업시간 7개 이상 및 주소, 사진 등)가 완결된 경우 Skip
             is_place_complete = (
                 stop.place
                 and stop.place.placeId
                 and not stop.place.placeId.startswith("place_")
-                and len(stop.place.openingHours) > 0
+                and len(stop.place.openingHours) >= 7
                 and stop.place.address != ""
+                and bool(stop.place.photoUrl)
             )
 
             if is_place_complete:
-                logger.debug(f"[course_service] Skip Place API call for '{p_name}' (already enriched by LLM Tool Calling)")
+                logger.debug(f"[course_service] Skip Place API call for '{p_name}' (already enriched with complete Place data)")
                 detail = stop.place
             else:
                 detail = await search_place_detail(query=p_name, destination_city=destination_city)
+                orig_name = stop.place.placeName if stop.place and stop.place.placeName else detail.placeName
+                detail.placeName = orig_name
                 stop.place = detail
 
             place_details.append(detail)
@@ -53,35 +56,43 @@ async def enrich_course_with_google_maps(course: CourseSchema) -> CourseSchema:
                 curr_place = place_details[i]
                 next_place = place_details[i + 1]
 
-                # 이미 이동 소요시간과 거리가 정밀하게 계산되어 있는 경우 Skip
-                is_route_complete = (
-                    stops[i].transportToNext
-                    and stops[i].transportToNext.minutes is not None
-                    and stops[i].transportToNext.distance is not None
-                    and stops[i].transportToNext.memo is not None
-                    and "약" in (stops[i].transportToNext.memo or "")
+                travel_mode = stops[i].transportToNext.type if stops[i].transportToNext else "transit"
+                orig_cost = stops[i].transportToNext.cost if stops[i].transportToNext and stops[i].transportToNext.cost is not None else 0
+                orig_memo = (stops[i].transportToNext.memo or "").strip() if stops[i].transportToNext else ""
+
+                origin = {"latitude": curr_place.latitude, "longitude": curr_place.longitude}
+                destination = {"latitude": next_place.latitude, "longitude": next_place.longitude}
+
+                transport_info = await compute_route_between_places(
+                    origin=origin,
+                    destination=destination,
+                    travel_mode=travel_mode,
                 )
 
-                if is_route_complete:
-                    logger.debug(f"[course_service] Skip Routes API call between '{curr_place.placeName}' and '{next_place.placeName}'")
-                else:
-                    origin = {"latitude": curr_place.latitude, "longitude": curr_place.longitude}
-                    destination = {"latitude": next_place.latitude, "longitude": next_place.longitude}
+                mode_kr = {"walking": "도보", "transit": "대중교통", "driving": "차량", "taxi": "택시"}.get(travel_mode, "이동")
+                dist_val = transport_info.distance or 0.0
+                dist_str = f"{dist_val / 1000:.1f}km" if dist_val >= 1000 else f"{int(dist_val)}m"
 
-                    travel_mode = stops[i].transportToNext.type if stops[i].transportToNext else "transit"
-                    transport_info = await compute_route_between_places(
-                        origin=origin,
-                        destination=destination,
-                        travel_mode=travel_mode,
-                    )
-                    stops[i].transportToNext = transport_info
+                # LLM이 작성한 이동 안내 메모가 있으면 우선 유지하고, 누락/공백인 경우 기본 출발지-도착지 이동 안내로 보강
+                if orig_memo and len(orig_memo) > 5 and not orig_memo.endswith("소요"):
+                    transport_info.memo = orig_memo
+                else:
+                    if transport_info.minutes is not None:
+                        dist_val = transport_info.distance or 0.0
+                        dist_str = f", {dist_val / 1000:.1f}km" if dist_val >= 1000 else (f", {int(dist_val)}m" if dist_val > 0 else "")
+                        transport_info.memo = f"{curr_place.placeName}에서 {next_place.placeName}(으)로 {mode_kr} 이동 (약 {transport_info.minutes}분 소요{dist_str})"
+                    else:
+                        transport_info.memo = f"{curr_place.placeName}에서 {next_place.placeName}(으)로 {mode_kr} 이동"
+
+                transport_info.cost = orig_cost
+                stops[i].transportToNext = transport_info
             else:
                 stops[i].transportToNext = TransportToNextSchema(
                     type="none",
                     distance=0.0,
                     minutes=0,
                     cost=0,
-                    memo="오늘의 마지막 일정입니다.",
+                    memo="오늘의 일정을 마무리하고 숙소로 이동하거나 자유 일정을 즐깁니다.",
                 )
 
     return course
