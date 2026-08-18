@@ -40,9 +40,9 @@ async def search_place_detail_tool(
     """Google Maps Place (New) API를 사용해 장소의 정밀 정보(위경도, 주소, 평점, 영업시간 등)를 조회합니다.
 
     Args:
-        query (str): 장소 한글명 또는 주 검색어 (예: "N서울타워", "레 상피옹").
-        destination_city (str): 도시명 또는 목적지 보조 정보 (예: "서울", "파리").
-        english_query (str): 해외 장소인 경우 원문 또는 영문 명칭 (예: "Le Comptoir du Relais").
+        query (str): 장소의 한글 공식 명칭 또는 주 검색어.
+        destination_city (str): 방문 도시명 또는 목적지 보조 정보.
+        english_query (str): 해외 장소인 경우 원문 또는 공식 영문/로마자 명칭.
 
     Returns:
         dict: 장소 상세 정보 (placeId, placeName, placeEngName, category, address, latitude, longitude, rating, photoUrl, openingHours).
@@ -109,9 +109,9 @@ async def search_place_detail(
     검색이 모두 실패하면 fallback_place가 있을 경우 기존 유효 정보를 보존하여 반환합니다.
 
     Args:
-        query (str): 장소 한글명 또는 주 검색어 (예: "N서울타워", "레 상피옹").
-        destination_city (str): 도시명 또는 목적지 보조 정보 (예: "서울", "파리").
-        english_query (str): 해외 장소인 경우 원문 또는 영문 명칭 (예: "Le Comptoir du Relais").
+        query (str): 장소의 한글 공식 명칭 또는 주 검색어.
+        destination_city (str): 방문 도시명 또는 목적지 보조 정보.
+        english_query (str): 해외 장소인 경우 원문 또는 공식 영문/로마자 명칭.
         fallback_place (PlaceSchema | None): API 실패 시 참고할 기존 장소 데이터 (LLM 생성 데이터 보존용).
 
     Returns:
