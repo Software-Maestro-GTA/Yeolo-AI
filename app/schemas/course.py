@@ -54,6 +54,7 @@ class StopSchema(BaseModel):
     stayMinutes: int = Field(..., ge=1, description="체류 시간 (분)")
     memo: str = Field(..., description="메모 및 안내 사항")
     reason: str = Field(..., description="해당 장소 추천 이유")
+    cost: int = Field(default=0, ge=0, description="해당 스톱 예상 활동/식사/입장 비용 (원)")
     place: PlaceSchema = Field(..., description="장소 상세 정보 (Google Maps API 연동)")
     transportToNext: TransportToNextSchema = Field(..., description="다음 장소까지 이동 정보 (Google Routes API 연동)")
 
