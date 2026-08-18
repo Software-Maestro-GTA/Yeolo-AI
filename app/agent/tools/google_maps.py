@@ -22,17 +22,22 @@ GOOGLE_ROUTES_COMPUTE_URL = "https://routes.googleapis.com/directions/v2:compute
 
 
 @tool
-async def search_place_detail_tool(query: str, destination_city: str = "") -> dict[str, Any]:
+async def search_place_detail_tool(
+    query: str,
+    destination_city: str = "",
+    english_query: str = "",
+) -> dict[str, Any]:
     """Google Maps Place (New) API를 사용해 장소의 정밀 정보(위경도, 주소, 평점, 영업시간 등)를 조회합니다.
 
     Args:
-        query (str): 장소명 또는 검색어 (예: "N서울타워", "족 프린스").
-        destination_city (str): 도시명 또는 목적지 보조 정보 (예: "서울", "방콕").
+        query (str): 장소 한글명 또는 주 검색어 (예: "N서울타워", "레 상피옹").
+        destination_city (str): 도시명 또는 목적지 보조 정보 (예: "서울", "파리").
+        english_query (str): 해외 장소인 경우 원문 또는 영문 명칭 (예: "Le Comptoir du Relais").
 
     Returns:
         dict: 장소 상세 정보 (placeId, placeName, placeEngName, category, address, latitude, longitude, rating, photoUrl, openingHours).
     """
-    res = await search_place_detail(query, destination_city)
+    res = await search_place_detail(query, destination_city, english_query)
     return res.model_dump()
 
 
@@ -62,22 +67,8 @@ async def compute_route_between_places_tool(
     return res.model_dump()
 
 
-async def search_place_detail(query: str, destination_city: str = "") -> PlaceSchema:
-    """Google Maps Place (New) API를 사용하여 장소의 상세 정보를 검색하고 추출합니다.
-
-    Args:
-        query (str): 장소명 또는 검색어 (예: "N서울타워").
-        destination_city (str): 도시명 또는 목적지 보조 정보 (예: "서울").
-
-    Returns:
-        PlaceSchema: 장소 상세 정보 (위경도, 주소, 평점, 사진 URL, 영업시간 등).
-    """
-    api_key = settings.GOOGLE_MAPS_API_KEY or os.getenv("GOOGLE_MAPS_API_KEY", "")
-    full_text = f"{destination_city} {query}".strip()
-
-    if not api_key:
-        return _get_fallback_place(query, destination_city)
-
+async def _execute_places_text_search(text_query: str, api_key: str) -> list[dict[str, Any]]:
+    """Google Places API (New) Text Search 엔드포인트를 호출하여 장소 목록을 반환합니다."""
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
@@ -87,53 +78,98 @@ async def search_place_detail(query: str, destination_city: str = "") -> PlaceSc
             "places.regularOpeningHours,places.currentOpeningHours,places.primaryTypeDisplayName"
         ),
     }
-    payload = {"textQuery": full_text, "languageCode": "ko"}
+    payload = {"textQuery": text_query, "languageCode": "ko"}
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.post(GOOGLE_PLACES_SEARCH_URL, json=payload, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("places", [])
+    return []
+
+
+async def search_place_detail(
+    query: str,
+    destination_city: str = "",
+    english_query: str = "",
+    fallback_place: PlaceSchema | None = None,
+) -> PlaceSchema:
+    """Google Maps Place (New) API를 사용하여 장소의 상세 정보를 검색하고 추출합니다.
+    1차로 한글 명칭(query)으로 검색하고, 검색 결과가 없을 경우 영문 명칭(english_query)으로 2차 다단계 검색을 수행합니다.
+    검색이 모두 실패하면 fallback_place가 있을 경우 기존 유효 정보를 보존하여 반환합니다.
+
+    Args:
+        query (str): 장소 한글명 또는 주 검색어 (예: "N서울타워", "레 상피옹").
+        destination_city (str): 도시명 또는 목적지 보조 정보 (예: "서울", "파리").
+        english_query (str): 해외 장소인 경우 원문 또는 영문 명칭 (예: "Le Comptoir du Relais").
+        fallback_place (PlaceSchema | None): API 실패 시 참고할 기존 장소 데이터 (LLM 생성 데이터 보존용).
+
+    Returns:
+        PlaceSchema: 장소 상세 정보 (위경도, 주소, 평점, 사진 URL, 영업시간 등).
+    """
+    api_key = settings.GOOGLE_MAPS_API_KEY or os.getenv("GOOGLE_MAPS_API_KEY", "")
+    eng_name = english_query.strip() if english_query and english_query.strip() else (
+        fallback_place.placeEngName if fallback_place and fallback_place.placeEngName else query
+    )
+
+    if not api_key:
+        return _get_fallback_place(query, destination_city, eng_name, fallback_place)
+
+    full_text = f"{destination_city} {query}".strip()
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(GOOGLE_PLACES_SEARCH_URL, json=payload, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                places = data.get("places", [])
-                if places:
-                    p = places[0]
-                    place_id = p.get("id", f"place_{hash(query)}")
-                    display_name = p.get("displayName", {}).get("text", query)
-                    address = p.get("formattedAddress", f"{destination_city} {query}")
-                    location = p.get("location", {})
-                    lat = location.get("latitude", 37.5665)
-                    lng = location.get("longitude", 126.9780)
-                    rating = p.get("rating")
-                    
-                    photos = p.get("photos", [])
-                    photo_url = ""
-                    if photos:
-                        photo_name = photos[0].get("name", "")
-                        photo_url = f"https://places.googleapis.com/v1/{photo_name}/media?key={api_key}&maxHeightPx=400"
+        places = await _execute_places_text_search(full_text, api_key)
 
-                    opening_hours = []
-                    hours_data = p.get("regularOpeningHours") or p.get("currentOpeningHours") or {}
-                    if hours_data and "weekdayDescriptions" in hours_data:
-                        opening_hours = hours_data.get("weekdayDescriptions", [])
+        # 1차 한글 검색 결과가 없고 영문명이 존재하는 경우 2차 영문 다단계 검색 시도
+        if not places and eng_name and eng_name != query:
+            eng_full_text = f"{destination_city} {eng_name}".strip()
+            places = await _execute_places_text_search(eng_full_text, api_key)
 
-                    category = p.get("primaryTypeDisplayName", {}).get("text", "명소")
+        if places:
+            p = places[0]
+            place_id = p.get("id", f"place_{abs(hash(query))}")
+            display_name = p.get("displayName", {}).get("text", query)
+            address = p.get("formattedAddress", f"{destination_city} {query}")
+            location = p.get("location", {})
+            lat = location.get("latitude", 37.5665)
+            lng = location.get("longitude", 126.9780)
+            rating = p.get("rating")
 
-                    return PlaceSchema(
-                        placeId=place_id,
-                        placeName=display_name,
-                        placeEngName=query,
-                        category=category,
-                        address=address,
-                        latitude=lat,
-                        longitude=lng,
-                        rating=rating,
-                        photoUrl=photo_url,
-                        openingHours=opening_hours,
-                    )
+            photos = p.get("photos", [])
+            photo_url = ""
+            if photos:
+                photo_name = photos[0].get("name", "")
+                photo_url = f"https://places.googleapis.com/v1/{photo_name}/media?key={api_key}&maxHeightPx=400"
+            elif fallback_place and fallback_place.photoUrl:
+                photo_url = fallback_place.photoUrl
+
+            opening_hours = []
+            hours_data = p.get("regularOpeningHours") or p.get("currentOpeningHours") or {}
+            if hours_data and "weekdayDescriptions" in hours_data:
+                opening_hours = hours_data.get("weekdayDescriptions", [])
+            elif fallback_place and fallback_place.openingHours:
+                opening_hours = fallback_place.openingHours
+
+            category = p.get("primaryTypeDisplayName", {}).get("text", "")
+            if not category:
+                category = fallback_place.category if fallback_place and fallback_place.category else "명소"
+
+            return PlaceSchema(
+                placeId=place_id,
+                placeName=display_name,
+                placeEngName=eng_name,
+                category=category,
+                address=address,
+                latitude=lat,
+                longitude=lng,
+                rating=rating if rating is not None else (fallback_place.rating if fallback_place else None),
+                photoUrl=photo_url,
+                openingHours=opening_hours,
+            )
     except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
-        logger.warning(f"Google Places API request failed for '{query}': {exc}")
+        logger.warning(f"Google Places API request failed for '{query}' (eng: '{english_query}'): {exc}")
 
-    return _get_fallback_place(query, destination_city)
+    return _get_fallback_place(query, destination_city, eng_name, fallback_place)
 
 
 async def compute_route_between_places(
@@ -214,12 +250,37 @@ async def compute_route_between_places(
     return _get_fallback_transport(travel_mode)
 
 
-def _get_fallback_place(query: str, destination_city: str) -> PlaceSchema:
-    """API 호출 불가 시 사용하는 기본 Fallback PlaceSchema 반환."""
+def _get_fallback_place(
+    query: str,
+    destination_city: str,
+    english_query: str = "",
+    fallback_place: PlaceSchema | None = None,
+) -> PlaceSchema:
+    """API 호출 불가 또는 검색 실패 시 기본 Fallback PlaceSchema 반환 (기존 fallback_place가 존재할 경우 유효 데이터 보존)."""
+    eng_name = english_query.strip() if english_query and english_query.strip() else (
+        fallback_place.placeEngName if fallback_place and fallback_place.placeEngName else query
+    )
+
+    if fallback_place:
+        lat = fallback_place.latitude if (fallback_place.latitude != 0.0 or fallback_place.longitude != 0.0) else 0.0
+        lng = fallback_place.longitude if (fallback_place.latitude != 0.0 or fallback_place.longitude != 0.0) else 0.0
+        return PlaceSchema(
+            placeId=fallback_place.placeId if fallback_place.placeId else f"place_{abs(hash(query))}",
+            placeName=fallback_place.placeName or query,
+            placeEngName=eng_name,
+            category=fallback_place.category or "관광명소",
+            address=fallback_place.address or f"{destination_city} {query}",
+            latitude=lat,
+            longitude=lng,
+            rating=fallback_place.rating,
+            photoUrl=fallback_place.photoUrl or "",
+            openingHours=fallback_place.openingHours or [],
+        )
+
     return PlaceSchema(
         placeId=f"place_{abs(hash(query))}",
         placeName=query,
-        placeEngName=query,
+        placeEngName=eng_name,
         category="관광명소",
         address=f"{destination_city} {query}",
         latitude=0.0,
