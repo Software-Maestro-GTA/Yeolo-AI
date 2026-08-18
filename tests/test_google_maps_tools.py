@@ -122,7 +122,8 @@ async def test_compute_route_between_places_fallback(mocker):
 
     assert isinstance(transport_info, TransportToNextSchema)
     assert transport_info.type == "walking"
-    assert transport_info.minutes is not None
+    assert transport_info.minutes is None
+    assert transport_info.distance is None
 
 
 @pytest.mark.asyncio

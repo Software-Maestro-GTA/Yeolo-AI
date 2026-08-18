@@ -28,3 +28,7 @@ dev = [
 filterwarnings = [
     "ignore:.*_UnionGenericAlias.*:DeprecationWarning",
 ]
+
+[tool.ruff]
+extend-exclude = [".agents"]
+

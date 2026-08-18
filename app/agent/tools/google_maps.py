@@ -84,10 +84,10 @@ async def search_place_detail(query: str, destination_city: str = "") -> PlaceSc
         "X-Goog-FieldMask": (
             "places.id,places.displayName,places.formattedAddress,"
             "places.location,places.rating,places.photos,"
-            "places.regularOpeningHours,places.primaryTypeDisplayName"
+            "places.regularOpeningHours,places.currentOpeningHours,places.primaryTypeDisplayName"
         ),
     }
-    payload = {"textQuery": full_text}
+    payload = {"textQuery": full_text, "languageCode": "ko"}
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -112,7 +112,7 @@ async def search_place_detail(query: str, destination_city: str = "") -> PlaceSc
                         photo_url = f"https://places.googleapis.com/v1/{photo_name}/media?key={api_key}&maxHeightPx=400"
 
                     opening_hours = []
-                    hours_data = p.get("regularOpeningHours", {})
+                    hours_data = p.get("regularOpeningHours") or p.get("currentOpeningHours") or {}
                     if hours_data and "weekdayDescriptions" in hours_data:
                         opening_hours = hours_data.get("weekdayDescriptions", [])
 
@@ -197,7 +197,9 @@ async def compute_route_between_places(
                     duration_str = r.get("duration", "900s")
                     minutes = int(duration_str.rstrip("s")) // 60 if isinstance(duration_str, str) and duration_str.endswith("s") else 15
                     
-                    memo_str = f"{travel_mode}로 약 {minutes}분 소요 ({distance_meters}m)"
+                    mode_kr = {"walking": "도보", "transit": "대중교통", "driving": "차량", "taxi": "택시"}.get(travel_mode, "이동")
+                    dist_text = f"{distance_meters / 1000:.1f}km" if distance_meters >= 1000 else f"{distance_meters}m"
+                    memo_str = f"{mode_kr}로 약 {minutes}분 이동 ({dist_text})"
 
                     return TransportToNextSchema(
                         type=travel_mode,  # type: ignore
@@ -220,21 +222,21 @@ def _get_fallback_place(query: str, destination_city: str) -> PlaceSchema:
         placeEngName=query,
         category="관광명소",
         address=f"{destination_city} {query}",
-        latitude=37.5665,
-        longitude=126.9780,
-        rating=4.5,
+        latitude=0.0,
+        longitude=0.0,
+        rating=None,
         photoUrl="",
-        openingHours=["매일 09:00 - 22:00"],
+        openingHours=[],
     )
 
 
 def _get_fallback_transport(travel_mode: str) -> TransportToNextSchema:
-    """API 호출 불가 시 사용하는 기본 Fallback TransportToNextSchema 반환."""
+    """API 호출 불가 시 가짜 수치를 주입하지 않고 안전한 기본 TransportToNextSchema 반환."""
     valid_mode = travel_mode if travel_mode in ["walking", "transit", "driving", "taxi", "none"] else "transit"
     return TransportToNextSchema(
         type=valid_mode,  # type: ignore
-        distance=1200.0,
-        minutes=15,
+        distance=None,
+        minutes=None,
         cost=0,
-        memo=f"{valid_mode} 이동 (약 15분)",
+        memo=None,
     )
