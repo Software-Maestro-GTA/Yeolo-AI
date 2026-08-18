@@ -66,6 +66,7 @@ async def test_search_place_detail_fallback_on_error(mocker):
 
     assert isinstance(place_detail, PlaceSchema)
     assert place_detail.placeName == "경복궁"
+    assert place_detail.placeEngName == ""
     assert place_detail.placeId != ""
 
 

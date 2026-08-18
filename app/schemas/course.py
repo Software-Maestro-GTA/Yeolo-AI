@@ -30,7 +30,7 @@ class CourseRequestSchema(BaseModel):
 class PlaceSchema(BaseModel):
     placeId: str = Field(..., description="Google Maps Place ID 또는 서비스 장소 식별자")
     placeName: str = Field(..., description="장소 한글 명칭")
-    placeEngName: str = Field(default="", description="장소 영문 명칭")
+    placeEngName: str = Field(default="", description="장소 공식 영문/로마자 명칭 (한글 제외)")
     category: str = Field(..., description="장소 카테고리")
     address: str = Field(default="", description="장소 주소")
     latitude: float = Field(..., description="위도")
