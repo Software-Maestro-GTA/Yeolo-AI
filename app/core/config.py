@@ -14,6 +14,9 @@ class Settings:
     # 사용할 Gemini 모델명
     GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash")
 
+    # Gemini Thinking Level (minimal, low, medium, high)
+    GEMINI_THINKING_LEVEL: str = os.getenv("GEMINI_THINKING_LEVEL", "medium")
+
     # Google Maps API Key (Place New & Routes API)
     GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
