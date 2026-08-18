@@ -152,7 +152,7 @@ async def test_langchain_google_maps_tools(mocker):
     )
 
     place_dict = await search_place_detail_tool.ainvoke(
-        {"query": "경복궁", "destination_city": "서울"}
+        {"query": "경복궁", "destination_city": "서울", "english_query": "Gyeongbokgung"}
     )
     assert place_dict["placeName"] == "경복궁"
     assert place_dict["latitude"] == 37.5796
@@ -180,3 +180,84 @@ async def test_langchain_google_maps_tools(mocker):
     )
     assert route_dict["type"] == "transit"
     assert route_dict["minutes"] == 12
+
+
+@pytest.mark.asyncio
+async def test_search_place_detail_english_fallback_success(mocker):
+    """한글 장소명 1차 검색 실패 시 영문명(english_query) 2차 다단계 검색 성공 시나리오 테스트."""
+    mock_response_empty = MagicMock()
+    mock_response_empty.status_code = 200
+    mock_response_empty.json.return_value = {"places": []}
+
+    mock_response_english = MagicMock()
+    mock_response_english.status_code = 200
+    mock_response_english.json.return_value = {
+        "places": [
+            {
+                "id": "places/ChIJc86-1ZNx5kcR9X3cQ2-2M1A",
+                "displayName": {"text": "Le Comptoir du Relais", "languageCode": "fr"},
+                "formattedAddress": "9 Carrefour de l'Odéon, 75006 Paris, France",
+                "location": {"latitude": 48.8519, "longitude": 2.3389},
+                "rating": 4.3,
+                "photos": [{"name": "places/photos/photo_le_comptoir"}],
+                "regularOpeningHours": {
+                    "weekdayDescriptions": ["매일 12:00 - 23:00"]
+                },
+                "primaryTypeDisplayName": {"text": "비스트로"},
+            }
+        ]
+    }
+
+    mock_post = mocker.patch("httpx.AsyncClient.post", new_callable=AsyncMock)
+    mock_post.side_effect = [mock_response_empty, mock_response_english]
+
+    place_detail = await search_place_detail(
+        query="레 상피옹",
+        destination_city="파리",
+        english_query="Le Comptoir du Relais",
+    )
+
+    assert isinstance(place_detail, PlaceSchema)
+    assert place_detail.placeId == "places/ChIJc86-1ZNx5kcR9X3cQ2-2M1A"
+    assert place_detail.placeEngName == "Le Comptoir du Relais"
+    assert place_detail.latitude == 48.8519
+    assert place_detail.longitude == 2.3389
+    assert place_detail.category == "비스트로"
+    assert mock_post.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_search_place_detail_preserves_fallback_place_on_failure(mocker):
+    """Google Maps API 검색 실패 시 기존 fallback_place(LLM 생성 데이터) 보존 검증 테스트."""
+    mocker.patch(
+        "httpx.AsyncClient.post",
+        side_effect=httpx.HTTPError("Network Error"),
+    )
+
+    existing_place = PlaceSchema(
+        placeId="temp_llm_place_id",
+        placeName="레 상피옹",
+        placeEngName="Le Comptoir du Relais",
+        category="비스트로",
+        address="9 Carrefour de l'Odeon, 75006 Paris, France",
+        latitude=48.8519,
+        longitude=2.3389,
+        rating=4.3,
+        photoUrl="https://images.unsplash.com/photo-1517248135467-4c7edcad34c4",
+        openingHours=["매일 12:00 - 23:00"],
+    )
+
+    place_detail = await search_place_detail(
+        query="레 상피옹",
+        destination_city="파리",
+        english_query="Le Comptoir du Relais",
+        fallback_place=existing_place,
+    )
+
+    assert isinstance(place_detail, PlaceSchema)
+    assert place_detail.latitude == 48.8519
+    assert place_detail.longitude == 2.3389
+    assert place_detail.category == "비스트로"
+    assert place_detail.photoUrl == "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4"
+    assert place_detail.rating == 4.3
+

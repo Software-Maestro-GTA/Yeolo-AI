@@ -1,3 +1,4 @@
+import httpx
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
@@ -489,4 +490,28 @@ def test_stop_schema_cost_field_validation():
             place=place,
             transportToNext=transport,
         )
+
+
+@pytest.mark.asyncio
+async def test_enrich_course_preserves_llm_place_data_on_search_failure(mocker, sample_course_schema):
+    """
+    Google Places API 검색 실패 시에도 LLM이 사전에 생성했던 유효한 위경도/사진/카테고리 등이 소실(0.0/빈값)되지 않고 보존되는지 검증
+    """
+    from app.services.course_service import enrich_course_with_google_maps
+
+    # Google Maps API 호출 시 빈 결과/실패 모킹
+    mocker.patch(
+        "httpx.AsyncClient.post",
+        side_effect=httpx.HTTPError("API Call Failed"),
+    )
+
+    enriched_course = await enrich_course_with_google_maps(sample_course_schema)
+
+    # 1일차 1번째 스톱의 위경도 및 사진 정보가 0.0이나 빈값으로 초기화되지 않고 유지되는지 확인
+    first_stop_place = enriched_course.itinerary.days[0].stops[0].place
+    assert first_stop_place.latitude == 33.5126
+    assert first_stop_place.longitude == 126.5283
+    assert first_stop_place.placeName == "제주 동문시장"
+    assert "https://places.googleapis.com" in first_stop_place.photoUrl
+
 

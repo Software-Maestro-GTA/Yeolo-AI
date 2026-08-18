@@ -28,6 +28,7 @@ async def enrich_course_with_google_maps(course: CourseSchema) -> CourseSchema:
         place_details = []
         for stop in stops:
             p_name = stop.place.placeName if stop.place and stop.place.placeName else "장소"
+            p_eng_name = stop.place.placeEngName if stop.place and stop.place.placeEngName else ""
 
             # 이미 정규 Google Places API(New) 응답 데이터(요일별 영업시간 7개 이상 및 주소, 사진 등)가 완결된 경우 Skip
             is_place_complete = (
@@ -43,7 +44,12 @@ async def enrich_course_with_google_maps(course: CourseSchema) -> CourseSchema:
                 logger.debug(f"[course_service] Skip Place API call for '{p_name}' (already enriched with complete Place data)")
                 detail = stop.place
             else:
-                detail = await search_place_detail(query=p_name, destination_city=destination_city)
+                detail = await search_place_detail(
+                    query=p_name,
+                    destination_city=destination_city,
+                    english_query=p_eng_name,
+                    fallback_place=stop.place,
+                )
                 orig_name = stop.place.placeName if stop.place and stop.place.placeName else detail.placeName
                 detail.placeName = orig_name
                 stop.place = detail
