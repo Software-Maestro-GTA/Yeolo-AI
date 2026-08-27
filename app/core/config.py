@@ -1,13 +1,5 @@
-"""
-@file config.py
-@description 환경 변수 설정 및 프로젝트 글로벌 환경 변수 정의 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,6 +13,12 @@ class Settings:
     
     # 사용할 Gemini 모델명
     GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash")
+
+    # Gemini Thinking Level (minimal, low, medium, high)
+    GEMINI_THINKING_LEVEL: str = os.getenv("GEMINI_THINKING_LEVEL", "medium")
+
+    # Google Maps API Key (Place New & Routes API)
+    GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
     # 로깅 레벨 (DEV: DEBUG, PROD: INFO)
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

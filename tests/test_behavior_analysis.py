@@ -1,16 +1,9 @@
-"""
-@file test_behavior_analysis.py
-@description 위치/시간 전처리 메타데이터 기반 성향 분석 API(API-BA-6)에 대한 인수 및 예외 처리 검증 테스트 모듈
-@requirements REQ-11
-@functional FUN-1
-@api API-BA-6
-@author Antigravity Agent
-"""
-
 import json
-import pytest
-from httpx import AsyncClient, ASGITransport
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
 from app.main import app
 
 # 테스트용 API Key
@@ -74,9 +67,9 @@ async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload
     
     # 2단계 병렬 체인 Structured Output 결과 모킹
     from app.schemas.taste_profile import (
-        PurposePaceCompanionOutput,
-        LocationEnvironmentOutput,
         ActivityFoodSpendingOutput,
+        LocationEnvironmentOutput,
+        PurposePaceCompanionOutput,
     )
     
     mock_purpose_pace_output = PurposePaceCompanionOutput(
@@ -135,12 +128,10 @@ async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload
         sightseeingOverFood=2
     )
 
-    # 1단계 LLM 인보크 모킹
-    mock_llm_ainvoke = mocker.patch(
-        "langchain_google_genai.ChatGoogleGenerativeAI.ainvoke",
-        new_callable=AsyncMock
-    )
-    mock_llm_ainvoke.return_value = mock_fact_sheet
+    # 1단계 LLM 인보크 체인 모킹
+    mock_summarize_chain = AsyncMock()
+    mock_summarize_chain.ainvoke.return_value = mock_fact_sheet
+    mocker.patch("app.services.behavior_service.summarize_chain", mock_summarize_chain)
 
     # 2단계 Structured Output 체인 자체를 AsyncMock으로 패치하여 Pydantic delattr 이슈를 방지
     # 서비스 모듈 네임스페이스의 참조를 직접 패치하여 임포트 바인딩 문제를 방지합니다.
@@ -161,7 +152,7 @@ async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = {"X-Internal-Api-Key": TEST_API_KEY}
         response = await client.post(
-            "/internal/ai/taste-profile/behavior",
+            "/internal/ai/taste-profile/analysis",
             json=valid_request_payload,
             headers=headers
         )
@@ -189,7 +180,6 @@ async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload
         assert "tasteProfile" in complete_data
         
         profile = complete_data["tasteProfile"]
-        assert profile["sourceType"] == "behavior"
         assert profile["travelPurpose"]["relaxation"] == 4
         assert profile["travelPaceDensity"] == "balanced"
         assert profile["spendingTendency"] == "moderate"
@@ -208,7 +198,7 @@ async def test_behavior_analysis_invalid_format(mock_env):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = {"X-Internal-Api-Key": TEST_API_KEY}
         response = await client.post(
-            "/internal/ai/taste-profile/behavior",
+            "/internal/ai/taste-profile/analysis",
             json=invalid_payload,
             headers=headers
         )
@@ -226,7 +216,7 @@ async def test_behavior_analysis_insufficient_data(mock_env):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = {"X-Internal-Api-Key": TEST_API_KEY}
         response = await client.post(
-            "/internal/ai/taste-profile/behavior",
+            "/internal/ai/taste-profile/analysis",
             json=insufficient_payload,
             headers=headers
         )
@@ -240,7 +230,7 @@ async def test_behavior_analysis_unauthorized(valid_request_payload):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = {"X-Internal-Api-Key": "wrong_key_123"}
         response = await client.post(
-            "/internal/ai/taste-profile/behavior",
+            "/internal/ai/taste-profile/analysis",
             json=valid_request_payload,
             headers=headers
         )

@@ -26,9 +26,9 @@ description: Map user-reported issues to specifications within Yeolo-SPEC.
 분석 결과를 `progress.md`에 다음과 같은 형식의 마크다운 리스트로 명시하여 후속 구현 및 검증 단계에서 즉각 확인할 수 있게 해야 합니다.
 
 ```markdown
-- **관련 요구사항**: [REQ-1 (인덱스 링크)](./Yeolo-SPEC/requirement-specs/REQ-01.md)
-- **비즈니스 로직**: [FUN-1 (인덱스 링크)](./Yeolo-SPEC/functional-specs/FUN-01.md)
-- **API 명세**: [API-BA-1 (인덱스 링크)](./Yeolo-SPEC/api-specs/API-FB-01.md)
+- **관련 요구사항**: [REQ-1 (인덱스 링크)](./Yeolo-SPEC/requirement-specs/REQ-1.md)
+- **비즈니스 로직**: [FUN-1 (인덱스 링크)](./Yeolo-SPEC/functional-specs/FUN-1.md)
+- **API 명세**: [API-AI-1 (인덱스 링크)](./Yeolo-SPEC/api-specs/API-AI-1.md)
 - **인수 기준 (Acceptance Criteria)**:
   - [ ] 사용자가 스타일 버튼 클릭 시 활성화 상태(Active)로 표시되어야 함
   - [ ] API 호출 실패 시 에러 모달이 표시되어야 함
