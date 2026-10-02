@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
 from datetime import date, timedelta
@@ -12,6 +13,7 @@ from fastapi import HTTPException
 from app.agent.course_graph import stream_course_generation
 from app.core.config import settings
 from app.schemas.course import CourseRequestSchema
+from app.services.course_history import CourseHistory
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,8 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
     Returns:
         SSE iterator using only progress/complete and the existing payload fields.
     Raises:
-        HTTPException: Invalid calendar input or missing provider configuration.
+        HTTPException: Invalid input, missing provider configuration, or unavailable
+            course history storage before the response headers are sent.
 
     Once streaming starts, failures emit progress and close without complete.
     Cancellation closes the graph and its outstanding external operations.
@@ -38,6 +41,10 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
         raise HTTPException(status_code=400, detail='코스 생성 조건이 올바르지 않습니다.')
     if not settings.GEMINI_API_KEY or not settings.GOOGLE_MAPS_API_KEY:
         raise HTTPException(status_code=500, detail='AI 코스 생성 설정을 확인할 수 없습니다.')
+    try:
+        await CourseHistory().ensure_available()
+    except (OSError, sqlite3.Error):
+        raise HTTPException(status_code=500, detail='AI 코스 생성 저장소를 확인할 수 없습니다.') from None
 
     async def sse_generator() -> AsyncGenerator[str]:
         queue: asyncio.Queue = asyncio.Queue(maxsize=8)

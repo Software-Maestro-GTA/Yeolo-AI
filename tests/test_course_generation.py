@@ -1,5 +1,8 @@
 import asyncio
+import errno
 import json
+import sqlite3
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -31,7 +34,8 @@ async def failed_stream(error):
 
 
 @pytest.fixture
-def mock_env(mocker):
+def mock_env(mocker, tmp_path):
+    mocker.patch("app.core.config.settings.COURSE_HISTORY_PATH", str(tmp_path / "history.sqlite3"))
     mocker.patch("app.core.config.settings.INTERNAL_API_KEY", TEST_API_KEY)
     mocker.patch("app.core.config.settings.GEMINI_API_KEY", "offline-gemini")
     mocker.patch("app.core.config.settings.GOOGLE_MAPS_API_KEY", "offline-maps")
@@ -634,3 +638,112 @@ async def test_service_complete_allows_producer_to_finish_normally(mock_env, val
     assert sum(event.startswith('event: complete') for event in events) == 1
     assert normal_exit.is_set()
     assert not cancelled.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('storage_error', [
+    PermissionError(errno.EACCES, 'Permission denied', '.data'),
+    sqlite3.OperationalError('attempt to write a readonly database: /private/db'),
+    sqlite3.DatabaseError('file is not a database: /private/db'),
+])
+async def test_unavailable_history_returns_sanitized_500_before_stream(
+    mock_env, valid_course_request_payload, mocker, storage_error,
+):
+    """Storage failures use the existing JSON error envelope before headers start."""
+    from app.services.course_history import CourseHistory
+
+    probe = mocker.patch.object(
+        CourseHistory, 'ensure_available', new_callable=AsyncMock,
+        create=True, side_effect=storage_error,
+    )
+    generation = mocker.patch('app.services.course_service.stream_course_generation')
+    maps_provider = mocker.patch('app.agent.course_graph.VerifiedMapsProvider')
+    model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post(
+            '/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY},
+            json=valid_course_request_payload,
+        )
+
+    assert response.status_code == 500
+    assert response.headers['content-type'].startswith('application/json')
+    assert response.json() == {
+        'status': 500, 'message': 'AI 코스 생성 저장소를 확인할 수 없습니다.', 'data': None,
+    }
+    assert '.data' not in response.text
+    assert '/private/db' not in response.text
+    probe.assert_awaited_once_with()
+    generation.assert_not_called()
+    maps_provider.assert_not_called()
+    model.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_history_preflight_finishes_before_stream_factory(
+    mock_env, valid_course_request_payload, sample_course_schema, mocker,
+):
+    """Readiness is awaited before an SSE iterator or any graph can start."""
+    from app.schemas.course import CourseRequestSchema
+    from app.services.course_history import CourseHistory
+    from app.services.course_service import generate_course_service
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_probe():
+        entered.set()
+        await release.wait()
+
+    probe = mocker.patch.object(
+        CourseHistory, 'ensure_available', new_callable=AsyncMock,
+        create=True, side_effect=blocked_probe,
+    )
+    generation = mocker.patch(
+        'app.services.course_service.stream_course_generation',
+        side_effect=lambda request: successful_stream(sample_course_schema),
+    )
+    task = asyncio.create_task(generate_course_service(
+        CourseRequestSchema.model_validate(valid_course_request_payload),
+    ))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=.5)
+        assert not task.done()
+        generation.assert_not_called()
+        release.set()
+        stream = await task
+        events = [event async for event in stream]
+        assert events[0].startswith('event: progress')
+        assert events[-1].startswith('event: complete')
+        probe.assert_awaited_once_with()
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid_case', ['unauthorized', 'calendar', 'schema'])
+async def test_invalid_request_does_not_touch_history(
+    mock_env, valid_course_request_payload, mocker, invalid_case,
+):
+    """Invalid and unauthorized requests must finish without storage access."""
+    from app.services.course_history import CourseHistory
+
+    probe = mocker.patch.object(
+        CourseHistory, 'ensure_available', new_callable=AsyncMock, create=True,
+        side_effect=AssertionError('Rejected request must not touch storage'),
+    )
+    headers = {'X-Internal-Api-Key': TEST_API_KEY}
+    expected_status = 400
+    if invalid_case == 'unauthorized':
+        headers = {}
+        expected_status = 401
+    elif invalid_case == 'calendar':
+        valid_course_request_payload['tripCondition']['startDate'] = '2026-02-30'
+    else:
+        valid_course_request_payload['tripCondition']['totalDays'] = 0
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/internal/ai/courses', headers=headers, json=valid_course_request_payload)
+    assert response.status_code == expected_status
+    probe.assert_not_awaited()

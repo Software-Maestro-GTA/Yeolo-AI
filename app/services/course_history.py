@@ -6,6 +6,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from app.core.config import settings
 from app.schemas.course import CourseRequestSchema
@@ -35,8 +36,39 @@ class CourseHistory:
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=10)
-        connection.execute('CREATE TABLE IF NOT EXISTS courses (user_key TEXT NOT NULL, signature TEXT NOT NULL, ids TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(user_key, signature))')
+        try:
+            connection.execute('CREATE TABLE IF NOT EXISTS courses (user_key TEXT NOT NULL, signature TEXT NOT NULL, ids TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(user_key, signature))')
+        except sqlite3.Error:
+            connection.close()
+            raise
         return connection
+
+    def _ensure_available(self) -> None:
+        connection = self._connect()
+        try:
+            connection.execute('BEGIN IMMEDIATE')
+            probe = uuid4().hex
+            connection.execute('INSERT INTO courses VALUES (?, ?, ?, ?)', (probe, probe, '[]', time.time()))
+        finally:
+            try:
+                # Exercise SQLite journal writes without retaining a probe or pruning history.
+                connection.rollback()
+            finally:
+                connection.close()
+
+    async def ensure_available(self) -> None:
+        """Verify configured storage with a rolled-back write off the event loop.
+
+        Returns:
+            None once the directory, database, and transaction journal are writable.
+        Raises:
+            OSError: The configured directory cannot be accessed or created.
+            sqlite3.Error: Database initialization or a real write transaction fails.
+
+        Existing course history is preserved, including expired entries; the probe
+        does not invoke normal history cleanup or persist a dummy course.
+        """
+        await asyncio.to_thread(self._ensure_available)
 
     def _operate(self, key: str, ids: set[str] | None) -> list[set[str]] | bool:
         connection = self._connect()
