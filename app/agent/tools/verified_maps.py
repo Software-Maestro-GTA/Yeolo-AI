@@ -100,6 +100,7 @@ class Destination:
     west: float
     north: float
     east: float
+    place_id: str = ''
 
     def contains(self, latitude: float, longitude: float) -> bool:
         """Check a point, including viewports that cross the date line."""
@@ -126,14 +127,57 @@ def _normalized(value: str) -> str:
     return ''.join(char for char in unicodedata.normalize('NFKC', value).casefold() if char.isalnum())
 
 
-def _city_name(value: str, country_code: str) -> str:
-    """Canonicalize one Korean city suffix without broadening venue matching."""
-    name = _normalized(value)
-    if country_code == 'KR':
-        for suffix in ('특별자치시', '특별시', '광역시', '시'):
-            if name.endswith(suffix) and len(name.removesuffix(suffix)) >= 2:
-                return name.removesuffix(suffix)
-    return name
+def _destination_query(value: str) -> str:
+    """Clean search whitespace and Unicode width without translating names."""
+    return ' '.join(unicodedata.normalize('NFKC', value).split())
+
+
+def _destination_types(raw: dict) -> set[str]:
+    """Return the record's own geographic types, never its parent types."""
+    types = raw.get('types', [])
+    return set(types) if isinstance(types, list) and all(isinstance(kind, str) for kind in types) else set()
+
+
+def _destination_id(raw: dict) -> str | None:
+    """Require the actual provider identifier character contract."""
+    identifier = raw.get('id')
+    return identifier if isinstance(identifier, str) and re.fullmatch(r'[A-Za-z0-9_-]+', identifier) else None
+
+
+def _destination_country_code(raw: dict) -> str | None:
+    """Require one consistent uppercase ISO2 country component code."""
+    components = raw.get('addressComponents', [])
+    if not isinstance(components, list):
+        return None
+    codes: set[str] = set()
+    for component in components:
+        if not isinstance(component, dict):
+            return None
+        types = component.get('types', [])
+        if not isinstance(types, list):
+            return None
+        if 'country' not in types:
+            continue
+        code = component.get('shortText')
+        if not isinstance(code, str) or not re.fullmatch(r'[A-Z]{2}', code):
+            return None
+        codes.add(code)
+    return next(iter(codes)) if len(codes) == 1 else None
+
+
+def _destination_bounds(raw: dict) -> tuple[float, float, float, float] | None:
+    """Validate finite numeric viewport coordinates, including date-line bounds."""
+    try:
+        viewport = raw['viewport']
+        values = (viewport['low']['latitude'], viewport['low']['longitude'], viewport['high']['latitude'], viewport['high']['longitude'])
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in values):
+            return None
+        south, west, north, east = values
+        if not -90 <= south <= north <= 90 or not -180 <= west <= 180 or not -180 <= east <= 180:
+            return None
+        return tuple(float(value) for value in values)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
 
 
 def _same_name(candidate: Any, name: str) -> bool:
@@ -302,14 +346,31 @@ class VerifiedMapsProvider:
         raise MapsProviderError('transient')
 
     async def resolve_destination(self, country: str, city: str) -> Destination:
-        """Resolve country and city; require matching country components and bounds."""
+        """Resolve a single actual geographic entity without comparing its names.
+
+        Args:
+            country: Original country search text, cleaned only for Unicode space.
+            city: Original city search text, cleaned only for Unicode space.
+        Returns:
+            Verified country code, destination ID and finite viewport bounds.
+        Raises:
+            ValueError: Blank input, missing geographic facts or ambiguous results.
+            MapsProviderError: Provider request or authorization failure.
+
+        Names returned by Maps may be in a different language. Its interpretation
+        remains subject to own geographic type, identity, country and boundary
+        validation; this does not establish an exact administrative polygon.
+        """
+        country_query, city_query = _destination_query(country), _destination_query(city)
+        if not country_query or not city_query:
+            raise ValueError('Destination search text is empty')
         url = 'https://places.googleapis.com/v1/places:searchText'
         headers = {'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': 'places.id,places.displayName,places.addressComponents,places.types,places.viewport'}
         async def lookup(query: str, language: str) -> dict:
             return await self._request('POST', url, headers=headers, json={'textQuery': query, 'languageCode': language, 'pageSize': 5})
         country_data, city_data = await asyncio.gather(
-            lookup(country, 'ko' if re.search('[가-힣]', country) else 'en'),
-            lookup(f'{city}, {country}', 'ko' if re.search('[가-힣]', city) else 'en'),
+            lookup(country_query, 'ko' if re.search('[가-힣]', country_query) else 'en'),
+            lookup(f'{city_query}, {country_query}', 'ko' if re.search('[가-힣]', city_query) else 'en'),
             return_exceptions=True,
         )
         results = (country_data, city_data)
@@ -323,37 +384,34 @@ class VerifiedMapsProvider:
         for result in results:
             if isinstance(result, BaseException):
                 raise MapsProviderError('invalid') from None
-        codes = set()
+        countries: list[tuple[str, str]] = []
         for raw in country_data.get('places', []):
-            for component in raw.get('addressComponents', []):
-                country_alias = component.get('shortText') == 'KR' and _normalized(country) in {'한국', '대한민국', 'southkorea', 'republicofkorea', 'kr'}
-                if 'country' in component.get('types', []) and (country_alias or _normalized(country) in {_normalized(component.get('longText', '')), _normalized(component.get('shortText', ''))}):
-                    codes.add(component.get('shortText'))
-        if len(codes) != 1:
-            raise ValueError('Country could not be verified')
-        expected = codes.pop()
-        matches = []
+            identifier, code = _destination_id(raw), _destination_country_code(raw)
+            if 'country' in _destination_types(raw) and identifier is not None and code is not None:
+                countries.append((identifier, code))
+        if len(countries) != 1:
+            raise ValueError('Country could not be unambiguously verified')
+        country_id, expected = countries[0]
+        # Query whitespace cleanup cannot establish identical input intent.
+        same_input = unicodedata.normalize('NFKC', country).casefold().strip() == unicodedata.normalize('NFKC', city).casefold().strip()
+        geographic_types = {'locality', 'postal_town', 'administrative_area_level_1', 'administrative_area_level_2'}
+        matches: list[Destination] = []
         for raw in city_data.get('places', []):
-            if _country(raw.get('addressComponents', [])) != expected or not set(raw.get('types', [])) & {'locality', 'administrative_area_level_1', 'administrative_area_level_2', 'postal_town'}:
+            identifier, types = _destination_id(raw), _destination_types(raw)
+            if identifier is None or _destination_country_code(raw) != expected:
                 continue
-            city_names = [raw.get('displayName', {}).get('text', '')]
-            # Parent locality components must not make a Korean district record
-            # look like the requested city; its own display name must match.
-            if expected != 'KR':
-                city_names.extend(component.get('longText', '') for component in raw.get('addressComponents', []) if set(component.get('types', [])) & {'locality', 'administrative_area_level_1', 'administrative_area_level_2', 'postal_town'})
-            if not any(_city_name(city, expected) == _city_name(name, expected) for name in city_names):
+            if 'country' in types:
+                if not same_input or identifier != country_id:
+                    continue
+            elif not types & geographic_types:
                 continue
-            matches.append(raw)
-        try:
-            if len(matches) != 1:
-                raise ValueError('City could not be unambiguously verified')
-            viewport = matches[0]['viewport']
-            result = Destination(expected, viewport['low']['latitude'], viewport['low']['longitude'], viewport['high']['latitude'], viewport['high']['longitude'])
-            if not all(math.isfinite(value) for value in (result.south, result.west, result.north, result.east)) or not -90 <= result.south <= result.north <= 90 or not all(-180 <= value <= 180 for value in (result.west, result.east)):
-                raise ValueError('Invalid destination bounds')
-            return result
-        except (KeyError, IndexError, TypeError):
-            raise ValueError('Incomplete destination response') from None
+            bounds = _destination_bounds(raw)
+            if bounds is None:
+                continue
+            matches.append(Destination(expected, *bounds, place_id=identifier))
+        if len(matches) != 1:
+            raise ValueError('City could not be unambiguously verified')
+        return matches[0]
 
     async def search(self, candidate: Any, destination: Destination) -> VerifiedPlace:
         """Resolve a named candidate only when identity, region, and facts match."""

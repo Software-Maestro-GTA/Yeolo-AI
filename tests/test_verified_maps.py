@@ -137,7 +137,7 @@ async def test_provider_bounds_concurrent_searches_and_deduplicates(place_payloa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mutation', ['valid', 'wrong_country', 'wrong_city', 'missing_viewport', 'ambiguous_city'])
+@pytest.mark.parametrize('mutation', ['valid', 'wrong_country', 'official_name_differs', 'missing_viewport', 'ambiguous_city'])
 async def test_destination_requires_unambiguous_city_and_country(mutation):
     import json
 
@@ -151,9 +151,9 @@ async def test_destination_requires_unambiguous_city_and_country(mutation):
     }
     if mutation == 'wrong_country':
         city['addressComponents'][0]['shortText'] = 'JP'
-    elif mutation == 'wrong_city':
-        city['displayName']['text'] = '부산'
-        city['addressComponents'][1]['longText'] = '부산'
+    elif mutation == 'official_name_differs':
+        city['displayName']['text'] = '首爾'
+        city['addressComponents'][1]['longText'] = '首爾'
     elif mutation == 'missing_viewport':
         city.pop('viewport')
 
@@ -161,12 +161,12 @@ async def test_destination_requires_unambiguous_city_and_country(mutation):
         query = json.loads(request.content)['textQuery']
         assert request.url.host == 'places.googleapis.com'
         if query == '대한민국':
-            return httpx.Response(200, json={'places': [{'addressComponents': [country_component]}]})
+            return httpx.Response(200, json={'places': [{'id': 'verified-country', 'types': ['country'], 'addressComponents': [country_component]}]})
         return httpx.Response(200, json={'places': [city, copy.deepcopy(city)] if mutation == 'ambiguous_city' else [city]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         provider = VerifiedMapsProvider(client=client, api_key='offline')
-        if mutation == 'valid':
+        if mutation in {'valid', 'official_name_differs'}:
             destination = await provider.resolve_destination('대한민국', '서울')
             assert destination.country_code == 'KR'
             assert destination.contains(37.55, 126.98)
@@ -855,7 +855,7 @@ async def test_malformed_route_metrics_are_not_reused_as_success_cache():
     ('서울', '서울특별시'), ('부산', '부산광역시'),
     ('시흥', '시흥시'), ('시흥시', '시흥'),
 ])
-async def test_korean_city_administrative_suffix_is_verified_alias(requested, official):
+async def test_official_korean_administrative_name_can_differ_from_input(requested, official):
     import json
 
     from app.agent.tools.verified_maps import VerifiedMapsProvider
@@ -869,7 +869,7 @@ async def test_korean_city_administrative_suffix_is_verified_alias(requested, of
 
     def respond(request):
         query = json.loads(request.content)['textQuery']
-        return httpx.Response(200, json={'places': [{'addressComponents': [country]}] if query == '대한민국' else [city]})
+        return httpx.Response(200, json={'places': [{'id': 'verified-country', 'types': ['country'], 'addressComponents': [country]}] if query == '대한민국' else [city]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         destination = await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination('대한민국', requested)
@@ -879,7 +879,7 @@ async def test_korean_city_administrative_suffix_is_verified_alias(requested, of
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('requested_country', ['한국', 'South Korea', 'Republic of Korea', 'KR'])
-async def test_explicit_korean_country_alias_requires_provider_verified_kr(requested_country):
+async def test_country_lookup_uses_actual_country_entity_despite_input_name_difference(requested_country):
     import json
 
     from app.agent.tools.verified_maps import VerifiedMapsProvider
@@ -893,7 +893,7 @@ async def test_explicit_korean_country_alias_requires_provider_verified_kr(reque
 
     def respond(request):
         query = json.loads(request.content)['textQuery']
-        return httpx.Response(200, json={'places': [{'addressComponents': [country]}] if query == requested_country else [city]})
+        return httpx.Response(200, json={'places': [{'id': 'verified-country', 'types': ['country'], 'addressComponents': [country]}] if query == requested_country else [city]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         destination = await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination(requested_country, '수원')
@@ -901,8 +901,8 @@ async def test_explicit_korean_country_alias_requires_provider_verified_kr(reque
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('case', ['district_prefix', 'removed_internal_character', 'wrong_city_country', 'ambiguous_variants', 'ambiguous_country_name', 'alias_wrong_country_code', 'non_korean_suffix', 'district_with_matching_parent'])
-async def test_korean_destination_aliases_do_not_weaken_identity_or_ambiguity(case):
+@pytest.mark.parametrize('case', ['district_prefix', 'removed_internal_character', 'wrong_city_country', 'ambiguous_variants', 'ambiguous_country_name', 'inconsistent_country_codes', 'non_korean_suffix', 'district_with_matching_parent'])
+async def test_common_country_entity_validation_preserves_ambiguity_and_mismatch_guards(case):
     import json
 
     from app.agent.tools.verified_maps import VerifiedMapsProvider
@@ -918,10 +918,10 @@ async def test_korean_destination_aliases_do_not_weaken_identity_or_ambiguity(ca
         city_country['shortText'] = 'JP'
     elif case == 'ambiguous_country_name':
         requested_country = 'Korea'
-    elif case == 'alias_wrong_country_code':
+    elif case == 'inconsistent_country_codes':
         requested_country = '한국'
         country = {'longText': '조선민주주의인민공화국', 'shortText': 'KP', 'types': ['country']}
-        city_country = copy.deepcopy(country)
+        city_country = {'longText': '대한민국', 'shortText': 'KR', 'types': ['country']}
     elif case == 'non_korean_suffix':
         requested_country = 'Japan'
         country = {'longText': 'Japan', 'shortText': 'JP', 'types': ['country']}
@@ -945,11 +945,22 @@ async def test_korean_destination_aliases_do_not_weaken_identity_or_ambiguity(ca
 
     def respond(request):
         query = json.loads(request.content)['textQuery']
-        return httpx.Response(200, json={'places': [{'addressComponents': [country]}] if query == requested_country else cities})
+        countries = [{'id': 'verified-country', 'types': ['country'], 'addressComponents': [country]}]
+        if case == 'ambiguous_country_name':
+            countries.append({'id': 'other-country', 'types': ['country'], 'addressComponents': [{'shortText': 'KP', 'types': ['country']}]})
+        return httpx.Response(200, json={'places': countries if query == requested_country else cities})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        with pytest.raises(ValueError):
-            await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination(requested_country, requested_city)
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        # The common contract validates the provider's single geographic entity.
+        # It does not claim to prove free-text intent from display-name equality.
+        if case in {'district_prefix', 'removed_internal_character', 'non_korean_suffix', 'district_with_matching_parent'}:
+            destination = await provider.resolve_destination(requested_country, requested_city)
+            assert destination.country_code == country['shortText']
+            assert destination.place_id == city['id']
+        else:
+            with pytest.raises(ValueError):
+                await provider.resolve_destination(requested_country, requested_city)
 
 
 @pytest.mark.asyncio
