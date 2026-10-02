@@ -26,8 +26,8 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
     Returns:
         SSE iterator using only progress/complete and the existing payload fields.
     Raises:
-        HTTPException: Invalid input, missing provider configuration, or unavailable
-            course history storage before the response headers are sent.
+        HTTPException: Invalid input or missing provider configuration before
+            response headers are sent. Unavailable history permits generation.
 
     Once streaming starts, failures emit progress and close without complete.
     Cancellation closes the graph and its outstanding external operations.
@@ -44,7 +44,7 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
     try:
         await CourseHistory().ensure_available()
     except (OSError, sqlite3.Error):
-        raise HTTPException(status_code=500, detail='AI 코스 생성 저장소를 확인할 수 없습니다.') from None
+        logger.warning('Course history preflight unavailable; generating with limited duplicate protection')
 
     async def sse_generator() -> AsyncGenerator[str]:
         queue: asyncio.Queue = asyncio.Queue(maxsize=8)

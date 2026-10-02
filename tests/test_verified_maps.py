@@ -1,6 +1,7 @@
 """Reject malformed external facts instead of turning them into plausible places/routes."""
 
 import copy
+from datetime import UTC
 
 import httpx
 import pytest
@@ -536,8 +537,7 @@ async def test_failed_details_are_not_success_cached_and_metrics_count_real_send
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         provider = VerifiedMapsProvider(client=client, api_key='private-test-key')
         candidate, destination = Candidate(name='서울 미술관'), Destination('KR', 37.3, 126.7, 37.8, 127.3)
-        with pytest.raises(ValueError):
-            await provider.search(candidate, destination)
+        assert (await provider.search(candidate, destination)).place.placeId == place_payload['id']
         assert (await provider.search(candidate, destination)).place.placeId == place_payload['id']
         metrics = provider.metrics.snapshot()
     assert details == 2
@@ -595,7 +595,8 @@ async def test_actual_masks_drive_sku_cost_and_unknown_fields_keep_estimate_inco
 
     def respond(request):
         requests.append(request)
-        return httpx.Response(200, json={})
+        payload = {'routes': [{'duration': '600s', 'distanceMeters': 800}]} if request.url.host == 'routes.googleapis.com' else {}
+        return httpx.Response(200, json=payload)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         provider = VerifiedMapsProvider(client=client, api_key='private-test-key')
@@ -684,3 +685,372 @@ async def test_http_200_invalid_payload_records_response_and_error_without_succe
         sku = provider.metrics.snapshot()['skus']['place_details_enterprise']
     assert details == 2
     assert (sku['requests'], sku['responses_200'], sku['errors'], sku['cache_hits']) == (2, 2, 1, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', [429, 503, 'timeout'])
+async def test_transient_maps_request_retries_once_then_caches_only_success(failure):
+    from app.agent.tools.verified_maps import VerifiedMapsProvider, VerifiedPlace
+
+    sends = 0
+
+    def respond(request):
+        nonlocal sends
+        sends += 1
+        if sends == 1:
+            if failure == 'timeout':
+                raise httpx.ReadTimeout('temporary', request=request)
+            return httpx.Response(failure, json={'error': {'message': 'temporary'}})
+        return httpx.Response(200, json={'routes': [{'duration': '600s', 'distanceMeters': 800}]})
+
+    first = VerifiedPlace(PlaceSchema(placeId='places/a', placeName='A', category='museum', latitude=37.55, longitude=126.98))
+    second = VerifiedPlace(PlaceSchema(placeId='places/b', placeName='B', category='museum', latitude=37.551, longitude=126.98))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        assert (await provider.route(first, second)).minutes == 10
+        assert (await provider.route(first, second)).minutes == 10
+        metrics = provider.metrics.snapshot()['skus']['routes_essentials']
+    assert sends == 2
+    assert metrics['requests'] == 2
+    assert metrics['errors'] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', [401, 403, 400])
+async def test_permission_and_invalid_requests_are_typed_and_never_retried(status):
+    from app.agent.tools.verified_maps import (
+        MapsProviderError,
+        VerifiedMapsProvider,
+        VerifiedPlace,
+    )
+
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(status, json={'error': {'message': 'secret provider detail'}})
+
+    first = VerifiedPlace(PlaceSchema(placeId='places/a', placeName='A', category='museum', latitude=37.55, longitude=126.98))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(MapsProviderError) as error:
+            await VerifiedMapsProvider(client=client, api_key='private-test-key').route(first, first)
+    assert error.value.status_code == status
+    assert error.value.kind == ('unauthorized' if status in {401, 403} else 'invalid')
+    assert not error.value.transient
+    assert len(calls) == 1
+    assert 'private-test-key' not in str(error.value)
+    assert 'secret provider detail' not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_empty_routes_do_not_poison_success_cache():
+    from app.agent.tools.verified_maps import (
+        NoRouteError,
+        VerifiedMapsProvider,
+        VerifiedPlace,
+    )
+
+    sends = 0
+
+    def respond(request):
+        nonlocal sends
+        sends += 1
+        return httpx.Response(200, json={'routes': [] if sends == 1 else [{'duration': '600s', 'distanceMeters': 800}]})
+
+    first = VerifiedPlace(PlaceSchema(placeId='places/a', placeName='A', category='museum', latitude=37.55, longitude=126.98))
+    second = VerifiedPlace(PlaceSchema(placeId='places/b', placeName='B', category='museum', latitude=37.551, longitude=126.98))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        with pytest.raises(NoRouteError):
+            await provider.route(first, second)
+        assert (await provider.route(first, second)).minutes == 10
+    assert sends == 2
+
+
+@pytest.mark.asyncio
+async def test_transit_uses_supplied_trip_departure_time():
+    import json
+    from datetime import datetime
+
+    from app.agent.tools.verified_maps import VerifiedMapsProvider, VerifiedPlace
+
+    bodies = []
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={'routes': [{'duration': '600s', 'distanceMeters': 800}]})
+
+    first = VerifiedPlace(PlaceSchema(placeId='places/a', placeName='A', category='museum', latitude=37.55, longitude=126.98))
+    second = VerifiedPlace(PlaceSchema(placeId='places/b', placeName='B', category='museum', latitude=37.551, longitude=126.98))
+    departure = datetime(2026, 10, 5, 1, 0, tzinfo=UTC)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        await provider.route(first, second, mode='transit', departure_time=departure)
+        metrics = provider.metrics.snapshot()
+    assert metrics['estimate_complete']
+    assert metrics['skus']['routes_essentials']['requests'] == 1
+    assert 'unknown' not in metrics['skus']
+    assert bodies[0]['travelMode'] == 'TRANSIT'
+    actual = datetime.fromisoformat(bodies[0]['departureTime'])
+    assert actual == departure
+
+
+@pytest.mark.asyncio
+async def test_transient_outage_is_bounded_and_fresh_call_can_recover():
+    from app.agent.tools.verified_maps import (
+        MapsProviderError,
+        VerifiedMapsProvider,
+        VerifiedPlace,
+    )
+
+    sends = 0
+
+    def respond(request):
+        nonlocal sends
+        sends += 1
+        return httpx.Response(503, json={'error': {}}) if sends <= 2 else httpx.Response(200, json={'routes': [{'duration': '600s', 'distanceMeters': 800}]})
+
+    first = VerifiedPlace(PlaceSchema(placeId='places/a', placeName='A', category='museum', latitude=37.55, longitude=126.98))
+    second = VerifiedPlace(PlaceSchema(placeId='places/b', placeName='B', category='museum', latitude=37.551, longitude=126.98))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        with pytest.raises(MapsProviderError) as error:
+            await provider.route(first, second)
+        assert sends == 2
+        assert error.value.transient
+        assert (await provider.route(first, second)).minutes == 10
+    assert sends == 3
+
+
+@pytest.mark.asyncio
+async def test_malformed_route_metrics_are_not_reused_as_success_cache():
+    from app.agent.tools.verified_maps import (
+        MapsProviderError,
+        VerifiedMapsProvider,
+        VerifiedPlace,
+    )
+
+    sends = 0
+
+    def respond(request):
+        nonlocal sends
+        sends += 1
+        return httpx.Response(200, json={'routes': [{'duration': 'bad' if sends == 1 else '600s', 'distanceMeters': 800}]})
+
+    first = VerifiedPlace(PlaceSchema(placeId='places/a', placeName='A', category='museum', latitude=37.55, longitude=126.98))
+    second = VerifiedPlace(PlaceSchema(placeId='places/b', placeName='B', category='museum', latitude=37.551, longitude=126.98))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        with pytest.raises(MapsProviderError) as error:
+            await provider.route(first, second)
+        assert error.value.kind == 'invalid' and not error.value.transient
+        assert sends == 1  # Semantic invalidity is not a transient retry condition.
+        assert (await provider.route(first, second)).minutes == 10
+    assert sends == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('requested', 'official'), [
+    ('수원', '수원시'), ('수원시', '수원'),
+    ('서울', '서울특별시'), ('부산', '부산광역시'),
+    ('시흥', '시흥시'), ('시흥시', '시흥'),
+])
+async def test_korean_city_administrative_suffix_is_verified_alias(requested, official):
+    import json
+
+    from app.agent.tools.verified_maps import VerifiedMapsProvider
+
+    country = {'longText': '대한민국', 'shortText': 'KR', 'types': ['country']}
+    city = {
+        'id': 'verified-city', 'displayName': {'text': official}, 'types': ['locality'],
+        'addressComponents': [country, {'longText': official, 'types': ['locality']}],
+        'viewport': {'low': {'latitude': 37.1, 'longitude': 126.5}, 'high': {'latitude': 37.8, 'longitude': 127.5}},
+    }
+
+    def respond(request):
+        query = json.loads(request.content)['textQuery']
+        return httpx.Response(200, json={'places': [{'addressComponents': [country]}] if query == '대한민국' else [city]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        destination = await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination('대한민국', requested)
+    assert destination.country_code == 'KR'
+    assert destination.contains(37.3, 127.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('requested_country', ['한국', 'South Korea', 'Republic of Korea', 'KR'])
+async def test_explicit_korean_country_alias_requires_provider_verified_kr(requested_country):
+    import json
+
+    from app.agent.tools.verified_maps import VerifiedMapsProvider
+
+    country = {'longText': '대한민국', 'shortText': 'KR', 'types': ['country']}
+    city = {
+        'id': 'verified-suwon', 'displayName': {'text': '수원시'}, 'types': ['locality'],
+        'addressComponents': [country, {'longText': '수원시', 'types': ['locality']}],
+        'viewport': {'low': {'latitude': 37.1, 'longitude': 126.5}, 'high': {'latitude': 37.8, 'longitude': 127.5}},
+    }
+
+    def respond(request):
+        query = json.loads(request.content)['textQuery']
+        return httpx.Response(200, json={'places': [{'addressComponents': [country]}] if query == requested_country else [city]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        destination = await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination(requested_country, '수원')
+    assert destination.country_code == 'KR'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['district_prefix', 'removed_internal_character', 'wrong_city_country', 'ambiguous_variants', 'ambiguous_country_name', 'alias_wrong_country_code', 'non_korean_suffix', 'district_with_matching_parent'])
+async def test_korean_destination_aliases_do_not_weaken_identity_or_ambiguity(case):
+    import json
+
+    from app.agent.tools.verified_maps import VerifiedMapsProvider
+
+    requested_country, requested_city, official_city = '대한민국', '수원', '수원시'
+    country = {'longText': '대한민국', 'shortText': 'KR', 'types': ['country']}
+    city_country = copy.deepcopy(country)
+    if case == 'district_prefix':
+        official_city = '수원시영통구'
+    elif case == 'removed_internal_character':
+        requested_city, official_city = '흥', '시흥시'
+    elif case == 'wrong_city_country':
+        city_country['shortText'] = 'JP'
+    elif case == 'ambiguous_country_name':
+        requested_country = 'Korea'
+    elif case == 'alias_wrong_country_code':
+        requested_country = '한국'
+        country = {'longText': '조선민주주의인민공화국', 'shortText': 'KP', 'types': ['country']}
+        city_country = copy.deepcopy(country)
+    elif case == 'non_korean_suffix':
+        requested_country = 'Japan'
+        country = {'longText': 'Japan', 'shortText': 'JP', 'types': ['country']}
+        city_country = copy.deepcopy(country)
+    city = {
+        'id': 'verified-city', 'displayName': {'text': official_city}, 'types': ['locality'],
+        'addressComponents': [city_country, {'longText': official_city, 'types': ['locality']}],
+        'viewport': {'low': {'latitude': 37.1, 'longitude': 126.5}, 'high': {'latitude': 37.8, 'longitude': 127.5}},
+    }
+    if case == 'district_with_matching_parent':
+        city['displayName']['text'] = '수원시 영통구'
+        city['types'] = ['administrative_area_level_2']
+        city['addressComponents'] = [city_country, {'longText': '영통구', 'types': ['administrative_area_level_2']}, {'longText': '수원시', 'types': ['locality']}]
+    cities = [city]
+    if case == 'ambiguous_variants':
+        alternative = copy.deepcopy(city)
+        alternative['id'] = 'other-verified-city'
+        alternative['displayName']['text'] = '수원'
+        alternative['addressComponents'][1]['longText'] = '수원'
+        cities.append(alternative)
+
+    def respond(request):
+        query = json.loads(request.content)['textQuery']
+        return httpx.Response(200, json={'places': [{'addressComponents': [country]}] if query == requested_country else cities})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError):
+            await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination(requested_country, requested_city)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid', ['wrong_country', 'out_of_viewport', 'far', 'closed', 'nonmeal', 'invalid_coords', 'missing_id', 'missing_address', 'missing_name'])
+async def test_meal_discovery_filters_invalid_facts_without_inventing_venue_names(place_payload, invalid):
+    import json
+
+    from app.agent.tools.verified_maps import (
+        Destination,
+        VerifiedMapsProvider,
+        VerifiedPlace,
+    )
+
+    valid = copy.deepcopy(place_payload)
+    valid['id'] = 'official-restaurant'
+    valid['displayName']['text'] = '공식 식당명'
+    valid['primaryType'] = 'restaurant'
+    valid['types'] = ['restaurant', 'food', 'establishment']
+    invalid_place = copy.deepcopy(valid)
+    invalid_place['id'] = 'invalid-restaurant'
+    if invalid == 'wrong_country':
+        invalid_place['addressComponents'][0]['shortText'] = 'JP'
+    elif invalid == 'out_of_viewport':
+        invalid_place['location']['latitude'] = 38.0
+    elif invalid == 'far':
+        invalid_place['location']['latitude'] = 37.59
+    elif invalid == 'closed':
+        invalid_place['businessStatus'] = 'CLOSED_PERMANENTLY'
+    elif invalid == 'nonmeal':
+        invalid_place['primaryType'] = 'dessert_restaurant'
+        invalid_place['types'] = ['dessert_restaurant', 'food']
+    elif invalid == 'invalid_coords':
+        invalid_place['location']['latitude'] = 'NaN'
+    elif invalid == 'missing_id':
+        invalid_place.pop('id')
+    elif invalid == 'missing_address':
+        invalid_place.pop('formattedAddress')
+    else:
+        invalid_place['displayName']['text'] = ''
+    sends = []
+
+    def respond(request):
+        sends.append(request)
+        body = json.loads(request.content)
+        assert request.method == 'POST'
+        assert request.url.host == 'places.googleapis.com'
+        assert request.url.path == '/v1/places:searchText'
+        assert 1 <= body['pageSize'] <= 10
+        mask = set(request.headers['X-Goog-FieldMask'].split(','))
+        assert {'places.id', 'places.displayName', 'places.addressComponents', 'places.location', 'places.types', 'places.businessStatus', 'places.regularOpeningHours'} <= mask
+        return httpx.Response(200, json={'places': [valid, invalid_place, copy.deepcopy(valid)]})
+
+    anchor = VerifiedPlace(PlaceSchema(placeId='anchor', placeName='실제 명소', category='museum', latitude=37.57, longitude=126.98))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        result = await provider.discover_meals(Destination('KR', 37.3, 126.7, 37.8, 127.3), anchor)
+    assert len(sends) == 1
+    assert len(result) == 1
+    assert result[0].place.placeId == 'official-restaurant'
+    assert result[0].place.placeName == '공식 식당명'
+    assert result[0].periods == valid['regularOpeningHours']['periods']
+
+
+@pytest.mark.asyncio
+async def test_meal_discovery_bounds_results_even_if_provider_returns_more(place_payload):
+    from app.agent.tools.verified_maps import (
+        Destination,
+        VerifiedMapsProvider,
+        VerifiedPlace,
+    )
+
+    venues = []
+    for index in range(8):
+        item = copy.deepcopy(place_payload)
+        item.update({'id': f'restaurant-{index}', 'primaryType': 'restaurant', 'types': ['restaurant']})
+        item['displayName']['text'] = f'공식 식당 {index}'
+        venues.append(item)
+    anchor = VerifiedPlace(PlaceSchema(placeId='anchor', placeName='명소', category='museum', latitude=37.57, longitude=126.98))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={'places': venues}))) as client:
+        result = await VerifiedMapsProvider(client=client, api_key='offline').discover_meals(Destination('KR', 37.3, 126.7, 37.8, 127.3), anchor)
+    assert len(result) == 5
+    assert len({venue.place.placeId for venue in result}) == 5
+
+
+@pytest.mark.asyncio
+async def test_meal_discovery_filters_before_limiting_valid_results(place_payload):
+    from app.agent.tools.verified_maps import (
+        Destination,
+        VerifiedMapsProvider,
+        VerifiedPlace,
+    )
+
+    venues = []
+    for index in range(8):
+        item = copy.deepcopy(place_payload)
+        item.update({'id': f'restaurant-{index}', 'primaryType': 'restaurant', 'types': ['restaurant']})
+        item['displayName']['text'] = f'공식 식당 {index}'
+        if index < 5:
+            item['businessStatus'] = 'CLOSED_PERMANENTLY'
+        venues.append(item)
+    anchor = VerifiedPlace(PlaceSchema(placeId='anchor', placeName='명소', category='museum', latitude=37.57, longitude=126.98))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={'places': venues}))) as client:
+        result = await VerifiedMapsProvider(client=client, api_key='offline').discover_meals(Destination('KR', 37.3, 126.7, 37.8, 127.3), anchor)
+    assert {venue.place.placeId for venue in result} == {'restaurant-5', 'restaurant-6', 'restaurant-7'}

@@ -646,17 +646,20 @@ async def test_service_complete_allows_producer_to_finish_normally(mock_env, val
     sqlite3.OperationalError('attempt to write a readonly database: /private/db'),
     sqlite3.DatabaseError('file is not a database: /private/db'),
 ])
-async def test_unavailable_history_returns_sanitized_500_before_stream(
-    mock_env, valid_course_request_payload, mocker, storage_error,
+async def test_unavailable_history_keeps_verified_sse_generation_available(
+    mock_env, valid_course_request_payload, mocker, storage_error, sample_course_schema,
 ):
-    """Storage failures use the existing JSON error envelope before headers start."""
+    """Optional history storage failure must not discard a verified course."""
     from app.services.course_history import CourseHistory
 
     probe = mocker.patch.object(
         CourseHistory, 'ensure_available', new_callable=AsyncMock,
         create=True, side_effect=storage_error,
     )
-    generation = mocker.patch('app.services.course_service.stream_course_generation')
+    generation = mocker.patch(
+        'app.services.course_service.stream_course_generation',
+        side_effect=lambda request: successful_stream(sample_course_schema),
+    )
     maps_provider = mocker.patch('app.agent.course_graph.VerifiedMapsProvider')
     model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
@@ -665,15 +668,14 @@ async def test_unavailable_history_returns_sanitized_500_before_stream(
             json=valid_course_request_payload,
         )
 
-    assert response.status_code == 500
-    assert response.headers['content-type'].startswith('application/json')
-    assert response.json() == {
-        'status': 500, 'message': 'AI 코스 생성 저장소를 확인할 수 없습니다.', 'data': None,
-    }
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('text/event-stream')
+    assert response.text.count('event: complete') == 1
+    assert 'event: progress' in response.text
     assert '.data' not in response.text
     assert '/private/db' not in response.text
     probe.assert_awaited_once_with()
-    generation.assert_not_called()
+    generation.assert_called_once()
     maps_provider.assert_not_called()
     model.assert_not_called()
 

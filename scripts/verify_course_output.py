@@ -37,10 +37,12 @@ def validate_output(request: dict, result: dict) -> dict:
     from pydantic import ValidationError
 
     from app.agent.tools.verified_maps import (
+        VerifiedPlace,
         individual_place_category_supported,
         meal_category_supported,
     )
     from app.schemas.course import CourseRequestSchema, CourseSchema
+    from app.services.course_routing import is_estimated_walking, valid_route
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -121,9 +123,11 @@ def validate_output(request: dict, result: dict) -> dict:
                 if route.type != 'none' or route.minutes not in {None, 0} or route.distance not in {None, 0}:
                     errors.append(f'{label}: invalid final route')
             else:
-                if route.type == 'none' or route.minutes is None or route.minutes <= 0 or route.distance is None or not math.isfinite(route.distance) or route.distance <= 0:
+                if not valid_route(route, VerifiedPlace(place), VerifiedPlace(day.stops[seq].place)):
                     errors.append(f'{label}: invalid route')
                 else:
+                    if is_estimated_walking(route):
+                        warnings.append(f'{label}: 추정 도보 시간이며 실제 보행 경로 미확인')
                     nxt_hour, nxt_minute = map(int, day.stops[seq].arrivalTime.split(':'))
                     gap = nxt_hour * 60 + nxt_minute - departure - route.minutes - 10
                     if gap < 0:

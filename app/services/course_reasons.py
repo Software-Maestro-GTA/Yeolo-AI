@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from app.agent.tools.verified_maps import meal_category_supported
 from app.schemas.course import CourseRequestSchema, DayItinerarySchema, StopSchema
 from app.schemas.taste_profile import TasteProfileSchema
+from app.services.course_routing import is_estimated_walking
 
 CULTURE = frozenset({'museum', 'art_gallery', 'cultural_center', 'historical_landmark', 'historical_place', 'monument', 'heritage_museum', 'history_museum', 'buddhist_temple', 'hindu_temple', 'mosque', 'church', 'synagogue'})
 NATURE = frozenset({'park', 'national_park', 'state_park', 'nature_preserve', 'botanical_garden', 'garden', 'hiking_area', 'beach', 'wildlife_park'})
@@ -166,7 +167,10 @@ def apply_personalized_reasons(request: CourseRequestSchema, days: list[DayItine
                 stop.reason = f'{request.tripCondition.destinationCity} 여행 일정에 맞춰 {stop.arrivalTime}에 {stop.place.placeName}에 방문하고 {stop.stayMinutes}분 머물도록 배치했어요.'
                 transport = stop.transportToNext
                 if transport.type != 'none' and transport.minutes is not None and transport.minutes > 0:
-                    stop.reason += f' 다음 장소까지 확인된 약 {transport.minutes}분의 이동 시간도 일정에 반영했어요.'
+                    if is_estimated_walking(transport):
+                        stop.reason += f' 다음 장소까지 도보 약 {transport.minutes}분으로 추정해 여유를 두었어요. 실제 보행 경로는 방문 전 확인해 주세요.'
+                    else:
+                        stop.reason += f' 다음 장소까지 확인된 약 {transport.minutes}분의 이동 시간도 일정에 반영했어요.'
     if used:
         connections = ', '.join(f'{label}({examples[label]} 방문)' for label, _ in used.most_common(3))
         summary = f'이번 코스에 {connections} 일정을 담았어요. {request.tripCondition.destinationCity}의 {len(days)}일 일정에 최종 {len(stops)}곳을 담았어요.'
