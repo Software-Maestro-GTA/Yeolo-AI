@@ -42,7 +42,7 @@ from app.schemas.course import (
 )
 from app.services.course_history import CourseHistory, history_key
 from app.services.course_images import enrich_course_images
-from app.services.course_reasons import apply_personalized_reasons
+from app.services.course_reasons import apply_personalized_reasons, visit_tip
 from app.services.course_routing import (
     distance_meters,
     estimated_walking,
@@ -204,8 +204,10 @@ def _schedule_day(selected: list[Visit], routes: list[TransportToNextSchema], da
             raise CourseGenerationError(f'{day_number}일차 {day_date} {candidate.meal} {candidate.name}: 영업/식사 시간 안에 {candidate.stay_minutes}분 체류할 수 없습니다.')
         last = index == len(selected) - 1
         transport = TransportToNextSchema(type='none', distance=0, minutes=0, cost=0, memo='이 장소에서 오늘의 계획된 일정을 종료합니다. 숙소 이동은 포함되지 않습니다.') if last else routes[index]
-        note = '영업시간 미확인: 방문 전 확인이 필요합니다.' if venue.periods is None else '정규 영업시간 기준이며 공휴일·임시휴무·예약 가능 여부는 방문 전 확인이 필요합니다.'
-        stops.append(StopSchema(sequence=index + 1, arrivalTime=f'{arrival // 60:02d}:{arrival % 60:02d}', stayMinutes=candidate.stay_minutes, memo=f'{note} 비용은 계획용 추정치이며 실제 가격은 다를 수 있습니다.', reason=candidate.reason, cost=candidate.cost, place=venue.place, transportToNext=transport))
+        note = visit_tip(venue.place.category)
+        if venue.periods is None:
+            note += ' 영업시간 미확인: 방문 전 확인이 필요합니다.'
+        stops.append(StopSchema(sequence=index + 1, arrivalTime=f'{arrival // 60:02d}:{arrival % 60:02d}', stayMinutes=candidate.stay_minutes, memo=note, reason=candidate.reason, cost=candidate.cost, place=venue.place, transportToNext=transport))
         current = arrival + candidate.stay_minutes + (transport.minutes or 0) + (0 if last else 10)
     breakfast_note = '조식이 포함되어 있습니다.' if any(candidate.meal == 'breakfast' for candidate, _ in selected) else '조식은 별도입니다.'
     estimate_note = ' 일부 구간은 직선거리 기반 추정 도보 시간으로 실제 경로는 방문 전 확인이 필요합니다.' if any(is_estimated_walking(route) for route in routes) else ''
