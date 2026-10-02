@@ -4,9 +4,11 @@ import asyncio
 import math
 import re
 import unicodedata
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Self
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import httpx
 
@@ -114,6 +116,62 @@ class VerifiedPlace:
 
     place: PlaceSchema
     periods: list[dict] | None = None
+
+
+@dataclass(frozen=True)
+class VerifiedPhoto:
+    """Actual provider media URI and plaintext source/author attribution."""
+
+    url: str
+    credit: str
+
+
+def _photo_uri(value: Any, api_key: str, image: bool = False) -> str | None:
+    """Accept credential-free HTTPS Google image/source links only."""
+    if not isinstance(value, str) or not value or any(ord(char) < 32 or char.isspace() for char in value):
+        return None
+    value = 'https:' + value if value.startswith('//') else value
+    decoded = unquote(value)
+    if any(ord(char) < 32 for char in decoded) or (api_key and api_key in decoded):
+        return None
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname or ''
+        domains = ('googleusercontent.com',) if image else ('google.com', 'googleusercontent.com')
+        if parsed.scheme != 'https' or parsed.username or parsed.password or parsed.port not in {None, 443} or not any(host == domain or host.endswith('.' + domain) for domain in domains):
+            return None
+        secrets = {'key', 'apikey', 'api_key', 'access_token', 'token', 'credential', 'credentials'}
+        if any(key.casefold() in secrets for key, _ in parse_qsl(parsed.query)):
+            return None
+        return value
+    except ValueError:
+        return None
+
+
+def _photo_credit(raw: dict, api_key: str) -> str | None:
+    """Preserve all available source/author fields as non-executable text."""
+    source = _photo_uri(raw.get('googleMapsUri'), api_key)
+    if source is None:
+        return None
+    authors = raw.get('authorAttributions', [])
+    if not isinstance(authors, list):
+        return None
+    parts = [f'사진 출처: Google Maps · 원본 사진: {source}']
+    for author in authors:
+        if not isinstance(author, dict) or not isinstance(author.get('displayName'), str):
+            return None
+        name = ' '.join(re.sub(r'<[^>]*>', '', author['displayName']).split())
+        if not name or (api_key and api_key in name):
+            return None
+        fields = [f'작성자: {name}']
+        for key, label in [('uri', '프로필'), ('photoUri', '작성자 아바타')]:
+            if key in author:
+                uri = _photo_uri(author[key], api_key, image=key == 'photoUri')
+                if uri is None:
+                    return None
+                fields.append(f'{label}: {uri}')
+        parts.append(' · '.join(fields))
+    return ' / '.join(parts)
 
 
 def _country(components: list[dict]) -> str:
@@ -293,13 +351,14 @@ class VerifiedMapsProvider:
         if self.owns_client:
             await self.client.aclose()
 
-    async def _request(self, method: str, url: str, **kwargs: Any) -> dict:
+    async def _request(self, method: str, url: str, *, use_cache: bool = True, **kwargs: Any) -> dict:
         import json
         sku = classify_maps_sku(method, url, kwargs)
         self.metrics.record_call(sku)
-        key = json.dumps([method, url, kwargs], sort_keys=True)
-        async with self.locks.setdefault(key, asyncio.Lock()):
-            if key in self.cache:
+        key = json.dumps([method, url, kwargs], sort_keys=True) if use_cache else None
+        lock = self.locks.setdefault(key, asyncio.Lock()) if use_cache else nullcontext()
+        async with lock:
+            if use_cache and key in self.cache:
                 self.metrics.record_cache_hit(sku)
                 return self.cache[key]
             for attempt in range(2):
@@ -320,7 +379,7 @@ class VerifiedMapsProvider:
                         data = response.json()
                         if not isinstance(data, dict) or data.get('error'):
                             raise MapsProviderError('invalid', status)
-                        cacheable = _cacheable_response(data, url, kwargs)
+                        cacheable = use_cache and _cacheable_response(data, url, kwargs)
                 except asyncio.CancelledError:
                     if sent:
                         self.metrics.record_error(sku)
@@ -344,6 +403,44 @@ class VerifiedMapsProvider:
                 # Capacity is released during backoff; cancellation stays prompt.
                 await asyncio.sleep(.2)
         raise MapsProviderError('transient')
+
+    async def photo(self, place_id: str) -> VerifiedPhoto | None:
+        """Fetch one fresh actual place image with complete available attribution.
+
+        Args:
+            place_id: A final verified provider ID, optionally prefixed places/.
+        Returns:
+            Actual media URL and source text, or None for optional photo failures.
+        Raises:
+            asyncio.CancelledError: External cancellation is always propagated.
+        """
+        identifier = place_id.removeprefix('places/')
+        if not re.fullmatch(r'[A-Za-z0-9_-]+', identifier):
+            return None
+        try:
+            metadata = await self._request('GET', f'https://places.googleapis.com/v1/places/{identifier}', use_cache=False, headers={'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': 'id,photos'})
+            if metadata.get('id') != identifier or not isinstance(metadata.get('photos', []), list):
+                return None
+            for raw in metadata.get('photos', []):
+                if not isinstance(raw, dict):
+                    continue
+                name = raw.get('name', '')
+                if not isinstance(name, str) or not re.fullmatch(rf'places/{re.escape(identifier)}/photos/[A-Za-z0-9_-]+', name):
+                    continue
+                credit = _photo_credit(raw, self.api_key)
+                if credit is None:
+                    continue
+                media = await self._request('GET', f'https://places.googleapis.com/v1/{name}/media', use_cache=False, headers={'X-Goog-Api-Key': self.api_key}, params={'maxWidthPx': 1200, 'skipHttpRedirect': 'true'})
+                if 'name' in media and media['name'] != name + '/media':
+                    return None
+                uri = _photo_uri(media.get('photoUri'), self.api_key, image=True)
+                avatars = {_photo_uri(author.get('photoUri'), self.api_key, image=True) for author in raw.get('authorAttributions', [])}
+                if uri in avatars:
+                    return None
+                return VerifiedPhoto(uri, credit) if uri is not None else None
+            return None
+        except (ValueError, httpx.HTTPError, KeyError, TypeError, AttributeError):
+            return None
 
     async def resolve_destination(self, country: str, city: str) -> Destination:
         """Resolve a single actual geographic entity without comparing its names.

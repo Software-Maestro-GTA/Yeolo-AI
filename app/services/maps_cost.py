@@ -7,6 +7,7 @@ No credentials, queries, identifiers or provider responses are retained here.
 Source: https://developers.google.com/maps/billing-and-pricing/pricing
 """
 
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -16,6 +17,8 @@ UNIT_PRICES_USD = {
     'text_search_pro': 0.032,
     'text_search_enterprise': 0.035,
     'place_details_enterprise': 0.020,
+    'place_details_ids_only': 0.0,
+    'place_details_photos': 0.007,
     'routes_essentials': 0.005,
 }
 _PLACE_FIELDS = {'id', 'displayName', 'formattedAddress', 'addressComponents', 'location', 'businessStatus', 'primaryType', 'types', 'rating', 'regularOpeningHours', 'viewport'}
@@ -36,6 +39,11 @@ def classify_maps_sku(method: str, url: str, options: dict[str, Any]) -> str:
     headers = {key.lower(): value for key, value in options.get('headers', {}).items()}
     fields = set(headers.get('x-goog-fieldmask', '').split(','))
     if endpoint.netloc == 'places.googleapis.com':
+        if method == 'GET' and re.fullmatch(r'/v1/places/[A-Za-z0-9_-]+', endpoint.path) and fields == {'id', 'photos'}:
+            return 'place_details_ids_only'
+        params = options.get('params', {})
+        if method == 'GET' and re.fullmatch(r'/v1/places/[A-Za-z0-9_-]+/photos/[A-Za-z0-9_-]+/media', endpoint.path) and set(params) == {'maxWidthPx', 'skipHttpRedirect'} and params.get('maxWidthPx') == 1200 and str(params.get('skipHttpRedirect')).lower() == 'true':
+            return 'place_details_photos'
         if method == 'POST' and endpoint.path == '/v1/places:searchText':
             if fields == {'places.id'}:
                 return 'text_search_ids'
