@@ -41,7 +41,8 @@ async def enrich_course_images(course: CourseSchema, provider: VerifiedMapsProvi
     for stop in stops:
         stop.place.photoUrl = ''
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
-        enriched.recommendationReason += '\n\n사진을 준비할 추가 시간이 부족해 이번 코스는 이미지 없이 제공해요.'
+        if enriched.itinerary.days:
+            enriched.itinerary.days[0].memo += ' 사진을 준비할 추가 시간이 부족해 이번 코스는 이미지 없이 제공해요.'
         return enriched
     semaphore = asyncio.Semaphore(max(1, min(settings.COURSE_MAPS_CONCURRENCY, 8)))
     completed: dict[str, VerifiedPhoto] = {}
@@ -72,10 +73,9 @@ async def enrich_course_images(course: CourseSchema, provider: VerifiedMapsProvi
         photo = completed.get(stop.place.placeId.removeprefix('places/'))
         if photo is not None:
             stop.place.photoUrl = photo.url
-            stop.memo += '\n' + photo.credit
+            stop.memo += '\n\n' + photo.credit
             available.append((stop, photo))
     if available:
         _, cover = next((item for item in available if _cover_attraction(item[0].place.category)), available[0])
         enriched.coverImageUrl = cover.url
-        enriched.recommendationReason += '\n\n대표 이미지 ' + cover.credit
     return enriched

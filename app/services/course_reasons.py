@@ -10,9 +10,8 @@ from dataclasses import dataclass
 from app.agent.tools.verified_maps import meal_category_supported
 from app.schemas.course import CourseRequestSchema, DayItinerarySchema, StopSchema
 from app.schemas.taste_profile import TasteProfileSchema
-from app.services.course_routing import is_estimated_walking
 
-CULTURE = frozenset({'museum', 'art_gallery', 'cultural_center', 'historical_landmark', 'historical_place', 'monument', 'heritage_museum', 'history_museum', 'buddhist_temple', 'hindu_temple', 'mosque', 'church', 'synagogue'})
+CULTURE = frozenset({'museum', 'art_gallery', 'cultural_center', 'historical_landmark', 'historical_place', 'monument', 'heritage_museum', 'history_museum', 'buddhist_temple', 'shinto_shrine', 'hindu_temple', 'mosque', 'church', 'synagogue'})
 NATURE = frozenset({'park', 'national_park', 'state_park', 'nature_preserve', 'botanical_garden', 'garden', 'hiking_area', 'beach', 'wildlife_park'})
 VIEWING = CULTURE | frozenset({'aquarium', 'zoo', 'planetarium', 'observation_deck', 'botanical_garden'})
 CAFE = frozenset({'cafe', 'coffee_shop', 'tea_house', 'bakery', 'dessert_shop', 'dessert_restaurant', 'ice_cream_shop', 'chocolate_shop', 'pastry_shop'})
@@ -71,13 +70,15 @@ def _category_label(category: str) -> str:
         'museum': '박물관', 'art_gallery': '미술관', 'cultural_center': '문화 시설',
         'historical_landmark': '역사 명소', 'historical_place': '역사 장소',
         'monument': '기념물', 'heritage_museum': '문화유산 박물관', 'history_museum': '역사 박물관',
-        'buddhist_temple': '사찰', 'hindu_temple': '힌두교 사원', 'mosque': '모스크',
+        'shinto_shrine': '신사', 'buddhist_temple': '사찰', 'hindu_temple': '힌두교 사원', 'mosque': '모스크',
         'church': '교회', 'synagogue': '유대교 회당', 'library': '도서관',
         'park': '공원', 'national_park': '국립공원', 'state_park': '주립공원',
         'nature_preserve': '자연보호구역', 'botanical_garden': '식물원', 'garden': '정원',
         'hiking_area': '하이킹 구역', 'beach': '해변', 'wildlife_park': '야생동물 공원',
         'aquarium': '수족관', 'zoo': '동물원', 'planetarium': '천문관',
-        'observation_deck': '전망대', 'tourist_attraction': '관광지',
+        'observation_deck': '전망대', 'tourist_attraction': '관광지', 'convention_center': '컨벤션 센터',
+        'ramen_restaurant': '라멘 음식점', 'japanese_restaurant': '일식 음식점',
+        'hamburger_restaurant': '햄버거 음식점', 'tonkatsu_restaurant': '돈카츠 음식점', 'sushi_restaurant': '초밥 음식점',
         'cafe': '카페', 'coffee_shop': '커피 전문점', 'noodle_shop': '국수 전문점', 'sandwich_shop': '샌드위치 전문점', 'food_court': '푸드코트', 'meal_takeaway': '포장 음식점', 'tea_house': '찻집',
         'bakery': '베이커리', 'dessert_shop': '디저트 가게', 'dessert_restaurant': '디저트 음식점',
         'ice_cream_shop': '아이스크림 가게', 'chocolate_shop': '초콜릿 가게', 'pastry_shop': '제과점',
@@ -94,87 +95,137 @@ def _category_label(category: str) -> str:
     return labels.get(category, '방문 장소')
 
 
-def _supported_reason(stop: StopSchema, label: str, variant: int) -> str:
-    """Show the connection between the actual interest, verified type, and visit."""
-    name, arrival, stay = stop.place.placeName, stop.arrivalTime, stop.stayMinutes
-    venue_type = _category_label(stop.place.category)
+def _experience(category: str) -> tuple[str, str]:
+    """Return an experience label and action supported by a verified place type."""
+    if category in {'museum', 'heritage_museum', 'history_museum'}:
+        return '전시·문화 관람', '전시와 자료를 살펴보는'
+    if category == 'art_gallery':
+        return '전시·문화 관람', '작품을 둘러보는'
+    if category == 'shinto_shrine':
+        return '신사 방문', '신사 공간을 둘러보는'
+    if category == 'buddhist_temple':
+        return '사찰 방문', '사찰 공간을 둘러보는'
+    if category in CULTURE:
+        return '문화 공간 방문', '문화 공간을 직접 살펴보는'
+    if category in NATURE:
+        return '자연 산책', '산책하며 주변을 둘러보는'
+    if category == 'observation_deck':
+        return '전망 감상', '전망을 바라보는'
+    if category in VIEWING:
+        return '관람', f'{_category_label(category)}을 둘러보는'
+    if category in CAFE:
+        return '카페·디저트', '음료나 디저트를 골라 즐기는'
+    dishes = {'ramen_restaurant': '라멘', 'japanese_restaurant': '일식', 'hamburger_restaurant': '햄버거', 'tonkatsu_restaurant': '돈카츠', 'sushi_restaurant': '초밥'}
+    if category in dishes:
+        return f'{dishes[category]} 식사', f'{dishes[category]} 식사를 즐기는'
+    if meal_category_supported(category, 'lunch'):
+        return '식사', '음식점에서 먹고 싶은 음식을 골라 즐기는'
+    if category in SHOPPING:
+        return '쇼핑', '마음에 드는 상품을 직접 살펴보는'
+    if category in WELLNESS:
+        return '웰니스 공간 방문', '웰니스 공간을 방문하는'
+    if category in NIGHTLIFE:
+        return '밤문화 공간 방문', '밤문화 공간을 둘러보는'
+    if category in {'amusement_park', 'theme_park', 'water_park'}:
+        return '테마파크 방문', '테마파크를 둘러보는'
+    if category == 'convention_center':
+        return '현장 공간 방문', '현장 방문 안내를 확인하고 공간을 둘러보는'
+    if category == 'tourist_attraction':
+        return '관광 공간 방문', '관광 공간을 직접 둘러보는'
+    if category == 'library':
+        return '책 살펴보기', '책을 직접 살펴보는'
+    return '장소 방문', '장소를 직접 둘러보는'
+
+
+def visit_tip(category: str) -> str:
+    """Suggest a short visit action without inventing facilities or provider facts.
+
+    Args:
+        category: Verified provider business/place type.
+    Returns:
+        Plaintext advice; it does not establish crowding, amenities or availability.
+    """
+    if category in {'museum', 'heritage_museum', 'history_museum'}:
+        return '관람 안내를 확인하고, 보고 싶은 전시나 자료부터 둘러보세요.'
+    if category == 'art_gallery':
+        return '관람 안내를 확인하고, 보고 싶은 작품부터 둘러보세요.'
+    if category in {'shinto_shrine', 'buddhist_temple', 'hindu_temple', 'mosque', 'church', 'synagogue'}:
+        return '현장 방문 예절과 안내를 먼저 확인하고, 공간을 차분히 둘러보세요.'
+    if category in NATURE:
+        return '현장 안내를 확인한 뒤, 걸어 보고 싶은 방향을 골라 산책해 보세요.'
+    if category == 'observation_deck':
+        return '현장 안내를 확인하고, 눈에 들어오는 풍경을 바라보며 둘러보세요.'
+    if category in CAFE or meal_category_supported(category, 'lunch') or category.endswith('_restaurant'):
+        return '메뉴의 재료와 양을 확인하고, 먹고 싶은 조합으로 골라 보세요.'
+    if category in SHOPPING:
+        return '관심 있는 상품을 먼저 살펴보고, 구매 전 가격과 구성을 비교해 보세요.'
+    if category == 'convention_center':
+        return '현장 방문 안내를 확인하고, 둘러볼 수 있는 범위를 먼저 살펴보세요.'
+    if category in WELLNESS or category in NIGHTLIFE or category in {'amusement_park', 'theme_park', 'water_park'}:
+        return '현장 이용 안내를 확인한 뒤, 원하는 활동을 골라 이용해 보세요.'
+    return '방문 안내를 먼저 확인하고, 눈에 들어오는 부분부터 둘러보세요.'
+
+
+def _travel_experience(label: str) -> str:
+    """Describe strong survey evidence as a travel experience, not a direct choice."""
     experiences = {
-        '문화 체험': '문화 공간을 둘러보는 여행',
-        '관람': '관람을 즐기는 여행',
-        '카페·디저트': '카페와 디저트를 즐기는 여행',
-        '자연 탐방': '자연을 둘러보는 여행',
-        '미식': '먹는 즐거움을 더하는 여행',
-        '미식 탐방': '음식점을 찾아가는 여행',
-        '쇼핑': '쇼핑을 즐기는 여행',
-        '휴식': '쉬어 가는 여행',
-        '웰니스': '웰니스 시간을 갖는 여행',
-        '밤문화': '밤문화를 즐기는 여행',
-        '관광': '관광지를 둘러보는 여행',
-        '배움': '배움을 더하는 여행',
-        '해변 방문': '해변을 둘러보는 여행',
-        '역사 공간 방문': '역사 공간을 둘러보는 여행',
+        '문화 체험': '문화 공간을 둘러보는 여행', '관람': '관람을 즐기는 여행',
+        '카페·디저트': '카페와 디저트를 즐기는 여행', '자연 탐방': '자연을 둘러보는 여행',
+        '미식': '먹는 즐거움을 더하는 여행', '미식 탐방': '음식점을 찾아가는 여행',
+        '쇼핑': '쇼핑을 즐기는 여행', '휴식': '쉬어 가는 여행',
+        '웰니스': '웰니스 시간을 갖는 여행', '밤문화': '밤문화를 즐기는 여행',
+        '관광': '관광 공간을 둘러보는 여행', '배움': '배움을 더하는 여행',
+        '해변 방문': '해변을 둘러보는 여행', '역사 공간 방문': '역사 공간을 둘러보는 여행',
         '테마파크 방문': '테마파크를 즐기는 여행',
     }
-    experience = experiences[label]
+    return experiences[label]
+
+
+def _supported_reason(stop: StopSchema, label: str, variant: int) -> str:
+    """Connect an actual strong preference to a supported venue experience."""
+    name = stop.place.placeName
+    _, action = _experience(stop.place.category)
+    experience = _travel_experience(label)
     templates = (
-        f'{experience}에 어울리도록 {venue_type}인 {name} 방문을 추천했어요. {arrival}에 방문해 {stay}분 머무는 시간을 마련했어요.',
-        f'{experience} 중에 {venue_type}인 {name}에 들를 수 있도록 일정에 넣었어요. {arrival}부터 {stay}분 머물도록 구성했어요.',
-        f'이번 일정에는 {venue_type}인 {name} 방문을 더했어요. {experience}에 맞춰 {arrival}부터 {stay}분 머무는 시간을 잡았어요.',
+        f'{experience}에 어울리도록 {name}에서 {action} 경험을 더했어요.',
+        f'{name}에서 {action} 경험을 {experience}과 연결해 추천했어요.',
+        f'{experience}에 맞춰 {name}에서 {action} 방문을 담았어요.',
     )
     return templates[variant % len(templates)]
 
 
 def apply_personalized_reasons(request: CourseRequestSchema, days: list[DayItinerarySchema]) -> str:
-    """Replace final stop reasons and return a summary based on selected stops only.
+    """Explain verified experiences and supplied strong preferences without schedule.
 
     Args:
-        request: Actual supplied taste profile and explicit trip conditions.
-        days: Final verified places, arrival/stay times and confirmed route estimates.
+        request: Original supplied preferences; MBTI traits are never inferred.
+        days: Final verified places; each stop reason is updated in place.
     Returns:
-        Course recommendation reason, with supported preferences and final venues.
-        Each stop's reason is updated in place. No external calls are performed.
-
-    Scores below four, incompatible or unknown categories, and unsupported claims
-    use schedule facts. Cuisine origin, atmosphere, photographic merit, dietary
-    safety, accessibility, popularity and price value are not inferred from a type.
+        A summary of selected experiences and actual supported preferences.
+        No external calls, itinerary values or price estimates are changed.
     """
     used: Counter[str] = Counter()
+    experiences: Counter[str] = Counter()
     examples: dict[str, str] = {}
-    stops = [stop for day in days for stop in day.stops]
     profile = request.tasteProfile
     for day in days:
-        pace_used = False
         for stop in day.stops:
+            label, action = _experience(stop.place.category)
+            experiences[label] += 1
+            examples.setdefault(label, stop.place.placeName)
             evidence = _evidence(profile, stop.place.category) if profile else []
             if evidence:
-                # Preserve stronger evidence; vary compatible equally strong interests.
                 evidence.sort(key=lambda item: (-item[0], used[item[1].label]))
                 _, rule = evidence[0]
                 stop.reason = _supported_reason(stop, rule.label, used[rule.label])
                 used[rule.label] += 1
-                examples.setdefault(rule.label, stop.place.placeName)
-            elif profile and not pace_used and profile.travelPaceDensity in {'slow_stay', 'long_stay'} and stop.stayMinutes >= 90:
-                stop.reason = f'한 곳에 천천히 머무는 여행이 되도록 {stop.place.placeName}에 {stop.arrivalTime}부터 {stop.stayMinutes}분의 체류 시간을 마련했어요.'
-                used['천천히 머무는 일정'] += 1
-                examples.setdefault('천천히 머무는 일정', stop.place.placeName)
-                pace_used = True
-            elif profile and not pace_used and profile.travelPaceDensity == 'dense_schedule' and len(day.stops) >= 6:
-                stop.reason = f'하루에 여러 곳을 둘러볼 수 있도록 {len(day.stops)}곳을 계획했고, 그중 한 곳으로 {stop.place.placeName} 방문을 넣었어요. {stop.arrivalTime}부터 {stop.stayMinutes}분 방문할 계획이에요.'
-                used['촘촘한 일정'] += 1
-                examples.setdefault('촘촘한 일정', stop.place.placeName)
-                pace_used = True
             else:
-                stop.reason = f'{request.tripCondition.destinationCity} 여행 일정에 맞춰 {stop.arrivalTime}에 {stop.place.placeName}에 방문하고 {stop.stayMinutes}분 머물도록 배치했어요.'
-                transport = stop.transportToNext
-                if transport.type != 'none' and transport.minutes is not None and transport.minutes > 0:
-                    if is_estimated_walking(transport):
-                        stop.reason += f' 다음 장소까지 도보 약 {transport.minutes}분으로 추정해 여유를 두었어요. 실제 보행 경로는 방문 전 확인해 주세요.'
-                    else:
-                        stop.reason += f' 다음 장소까지 확인된 약 {transport.minutes}분의 이동 시간도 일정에 반영했어요.'
+                stop.reason = f'{stop.place.placeName}에서 {action} 경험을 여행에 더할 수 있도록 추천했어요.'
+    if not experiences:
+        return '직접 장소를 둘러보는 경험을 담은 여행이에요.'
+    connections = ', '.join(f'{label}({examples[label]})' for label, _ in experiences.most_common(3))
+    summary = f'이번 여행에는 {connections} 경험을 함께 담았어요.'
     if used:
-        connections = ', '.join(f'{label}({examples[label]} 방문)' for label, _ in used.most_common(3))
-        summary = f'이번 코스에 {connections} 일정을 담았어요. {request.tripCondition.destinationCity}의 {len(days)}일 일정에 최종 {len(stops)}곳을 담았어요.'
-    else:
-        summary = f'{request.tripCondition.destinationCity}의 {len(days)}일 여행 조건에 맞춰 최종 {len(stops)}곳을 방문하도록 구성했어요.'
-    budget = {'cost_effective': '가성비', 'moderate': '보통', 'luxury': '고급'}[request.tripCondition.budgetType]
-    return f'{summary} 최종 방문 시간과 장소 간 이동 시간을 반영했어요. 비용은 요청하신 {budget} 예산 유형을 참고한 추정치예요.'
+        travel_experiences = ', '.join(_travel_experience(label) for label, _ in used.most_common(3))
+        summary += f' 취향에 맞춰 {travel_experiences}이 이어지도록 구성했어요.'
+    return summary

@@ -325,8 +325,8 @@ async def test_low_preference_scores_do_not_become_positive_reasons(request_data
     request_data.tasteProfile = preference_profile(travelPurpose__culturalExperience=low_score)
     result = await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
     reason = result['course'].itinerary.days[0].stops[0].reason
-    assert '문화' not in reason
-    assert '선호' not in reason
+    assert not any(claim in reason for claim in ['선호', '취향', '좋아하', '관심이 많'])
+    assert any(experience in reason for experience in ['관람', '둘러', '살펴'])
     assert reason.strip()
 
 
@@ -351,7 +351,7 @@ async def test_reasons_use_provider_category_and_discard_untrusted_draft_prose(r
 
 
 @pytest.mark.asyncio
-async def test_explanations_reflect_final_opening_time_and_visit_duration(request_data, graph_dependencies):
+async def test_explanations_describe_experience_without_repeating_verified_schedule(request_data, graph_dependencies):
     from app.agent.course_graph import build_course_graph
     from app.agent.tools.verified_maps import VerifiedPlace
 
@@ -365,8 +365,8 @@ async def test_explanations_reflect_final_opening_time_and_visit_duration(reques
     stop = result['course'].itinerary.days[0].stops[0]
     assert stop.arrivalTime == '10:00' and stop.stayMinutes == 75
     assert '문화' in stop.reason
-    assert '10:00' in stop.reason and '75분' in stop.reason
-    assert '09:00' not in stop.reason and '60분' not in stop.reason
+    assert any(experience in stop.reason for experience in ['관람', '둘러', '살펴'])
+    assert not any(fact in stop.reason for fact in ['10:00', '75분', '09:00', '60분'])
 
 
 @pytest.mark.asyncio
@@ -385,7 +385,7 @@ async def test_course_summary_only_uses_selected_verified_places(request_data, g
 
 
 @pytest.mark.asyncio
-async def test_mbti_only_reason_uses_honest_schedule_fallback(request_data, graph_dependencies):
+async def test_mbti_only_reason_uses_verified_experience_fallback(request_data, graph_dependencies):
     from app.agent.course_graph import build_course_graph
 
     provider, history, _, draft, _ = graph_dependencies
@@ -1246,7 +1246,8 @@ async def test_missing_named_dinner_discovers_actual_nearby_meal_venue_before_ll
     discovered_stop = next(stop for stop in stops if stop.place.placeId == official.place.placeId)
     assert discovered_stop.stayMinutes == 45
     assert discovered_stop.cost == 17500
-    assert '계획용 추정치' in discovered_stop.memo
+    assert not any(phrase in discovered_stop.memo for phrase in ['계획용 추정치', '실제 가격은 다를'])
+    assert any(action in discovered_stop.memo for action in ['메뉴', '주문', '식사'])
     provider.discover_meals.assert_awaited_once()
     llm.assert_awaited_once()
     # Discovery returns actual provider facts directly rather than making another
@@ -1406,7 +1407,9 @@ async def test_final_selected_places_only_receive_images_after_validation_and_on
     assert provider.photo.await_count == len(selected)
     assert course['coverImageUrl']
     assert all(stop['place']['photoUrl'] and '사진 출처: Google Maps' in stop['memo'] for day in course['itinerary']['days'] for stop in day['stops'])
-    assert '사진 출처: Google Maps' in course['recommendationReason']
+    assert '사진 출처: Google Maps' not in course['recommendationReason']
+    cover_stop = next(stop for day in course['itinerary']['days'] for stop in day['stops'] if stop['place']['photoUrl'] == course['coverImageUrl'])
+    assert '\n\n사진 출처: Google Maps' in cover_stop['memo']
     llm.assert_awaited_once()
     provider.__aexit__.assert_awaited_once()
 
@@ -1421,7 +1424,8 @@ async def test_graph_skips_images_when_final_phase_has_no_reserved_time(request_
     assert len(course.itinerary.days[0].stops) == 4
     provider.photo.assert_not_awaited()
     assert not course.coverImageUrl
-    assert '사진' in course.recommendationReason or any('사진' in day.memo for day in course.itinerary.days)
+    assert '사진' not in course.recommendationReason
+    assert '사진' in course.itinerary.days[0].memo
 
 
 @pytest.mark.asyncio
