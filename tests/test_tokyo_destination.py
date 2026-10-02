@@ -7,7 +7,7 @@ from itertools import product
 import httpx
 import pytest
 
-TOKYO_ALIASES = ['도쿄', '도쿄도', '東京', '東京都', 'Tokyo', 'Tokyo Metropolis']
+TOKYO_NAME_FORMS = ['도쿄', '도쿄도', '東京', '東京都', 'Tokyo', 'Tokyo Metropolis']
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def destination_transport(cities, country='일본', country_code='JP'):
         assert request.url.host == 'places.googleapis.com'
         query = json.loads(request.content)['textQuery']
         if query == country:
-            payload = [{'addressComponents': [{'longText': country, 'shortText': country_code, 'types': ['country']}]}]
+            payload = [{'id': 'verified-country', 'types': ['country'], 'addressComponents': [{'longText': country, 'shortText': country_code, 'types': ['country']}]}]
         else:
             payload = cities
         return httpx.Response(200, json={'places': payload})
@@ -55,8 +55,8 @@ async def test_actual_tokyo_metropolis_response_verifies_requested_tokyo(tokyo_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(('requested', 'official'), list(product(TOKYO_ALIASES, repeat=2)))
-async def test_explicit_tokyo_aliases_work_in_each_direction_only_for_verified_japan(tokyo_payload, requested, official):
+@pytest.mark.parametrize(('requested', 'official'), list(product(TOKYO_NAME_FORMS, repeat=2)))
+async def test_tokyo_provider_name_forms_preserve_existing_success_cases(tokyo_payload, requested, official):
     from app.agent.tools.verified_maps import VerifiedMapsProvider
 
     tokyo_payload['displayName']['text'] = official
@@ -68,7 +68,7 @@ async def test_explicit_tokyo_aliases_work_in_each_direction_only_for_verified_j
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('case', ['ward_parent', 'wrong_country', 'shop_parent', 'district_type', 'unlisted_alias', 'generic_suffix', 'non_japan_alias'])
-async def test_tokyo_aliases_do_not_accept_other_places_or_parent_names(tokyo_payload, case):
+async def test_tokyo_common_entities_still_reject_shops_and_wrong_country(tokyo_payload, case):
     from app.agent.tools.verified_maps import VerifiedMapsProvider
 
     country, country_code, requested = '일본', 'JP', '도쿄'
@@ -97,8 +97,16 @@ async def test_tokyo_aliases_do_not_accept_other_places_or_parent_names(tokyo_pa
         country, country_code = '대한민국', 'KR'
         tokyo_payload['addressComponents'][-1] = {'longText': country, 'shortText': country_code, 'types': ['country']}
     async with httpx.AsyncClient(transport=destination_transport([tokyo_payload], country, country_code)) as client:
-        with pytest.raises(ValueError):
-            await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination(country, requested)
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        # A sole own admin2 region is now interpreted by the same geographic
+        # contract everywhere; a parent name never grants a shop a geographic type.
+        if case in {'wrong_country', 'shop_parent'}:
+            with pytest.raises(ValueError):
+                await provider.resolve_destination(country, requested)
+        else:
+            result = await provider.resolve_destination(country, requested)
+            assert result.country_code == country_code
+            assert result.place_id == tokyo_payload['id']
 
 
 @pytest.mark.asyncio
@@ -120,7 +128,7 @@ async def test_tokyo_multiple_matching_records_remain_ambiguous(tokyo_payload, s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('invalid', ['missing', 'latitude_order', 'latitude_range', 'longitude_range', 'missing_coordinate'])
-async def test_tokyo_alias_does_not_bypass_viewport_validation(tokyo_payload, invalid):
+async def test_tokyo_entity_does_not_bypass_viewport_validation(tokyo_payload, invalid):
     from app.agent.tools.verified_maps import VerifiedMapsProvider
 
     if invalid == 'missing':

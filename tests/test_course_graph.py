@@ -1311,7 +1311,8 @@ async def test_meal_discovery_uses_actual_meal_roles_and_visit_day_hours(request
 
 
 @pytest.mark.asyncio
-async def test_tokyo_real_destination_resolution_preserves_requested_name_in_complete(request_data, graph_dependencies, mocker):
+@pytest.mark.parametrize(('country_input', 'city_input'), [('일본', '도쿄'), ('Japan', 'Tokyo'), ('  Ｊａｐａｎ  ', '  Ｔｏｋｙｏ  ')])
+async def test_tokyo_real_destination_resolution_preserves_requested_name_in_complete(request_data, graph_dependencies, mocker, country_input, city_input):
     """Run actual HTTP destination verification and LangGraph/SSE with fake paid boundaries."""
     import json
 
@@ -1321,8 +1322,8 @@ async def test_tokyo_real_destination_resolution_preserves_requested_name_in_com
     from app.agent.tools.verified_maps import VerifiedMapsProvider, VerifiedPlace
 
     provider, history, llm, draft, places = graph_dependencies
-    request_data.tripCondition.destinationCountry = '일본'
-    request_data.tripCondition.destinationCity = '도쿄'
+    request_data.tripCondition.destinationCountry = country_input
+    request_data.tripCondition.destinationCity = city_input
     request_data.tripCondition.startDate = '2026-10-17'
     request_data.tripCondition.totalDays = 3
     original_candidates = list(draft.days[0].candidates)
@@ -1349,7 +1350,7 @@ async def test_tokyo_real_destination_resolution_preserves_requested_name_in_com
     def respond(request):
         query = json.loads(request.content)['textQuery']
         destination_queries.append(query)
-        return httpx.Response(200, json={'places': [{'addressComponents': [country]}] if query == '일본' else [tokyo]})
+        return httpx.Response(200, json={'places': [{'id': 'verified-country', 'types': ['country'], 'addressComponents': [country]}] if ', ' not in query else [tokyo]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         destination_provider = VerifiedMapsProvider(client=client, api_key='offline')
@@ -1362,9 +1363,11 @@ async def test_tokyo_real_destination_resolution_preserves_requested_name_in_com
     complete = [data for event, data in events if event == 'complete']
     assert len(complete) == 1
     assert events[-1][0] == 'complete'
-    assert complete[0]['course']['destinationCity'] == '도쿄'
-    assert complete[0]['course']['destinationCountry'] == '일본'
+    assert complete[0]['course']['destinationCity'] == city_input
+    assert complete[0]['course']['destinationCountry'] == country_input
     assert complete[0]['course']['totalDays'] == 3
     assert len(complete[0]['course']['itinerary']['days']) == 3
-    assert set(destination_queries) == {'일본', '도쿄, 일본'}
+    country_query = '일본' if country_input == '일본' else 'Japan'
+    city_query = '도쿄' if city_input == '도쿄' else 'Tokyo'
+    assert set(destination_queries) == {country_query, f'{city_query}, {country_query}'}
     llm.assert_awaited_once()
