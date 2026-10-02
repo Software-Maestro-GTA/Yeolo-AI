@@ -1,6 +1,7 @@
-import httpx
+import asyncio
+import json
+
 import pytest
-from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
@@ -16,13 +17,24 @@ from app.schemas.course import (
 TEST_API_KEY = "test_internal_secret_key"
 
 
+async def successful_stream(course):
+    """Represent the public graph event boundary for API-only tests."""
+    yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '검증 중'}
+    yield 'complete', {'course': course.model_dump()}
+
+
+async def failed_stream(error):
+    """Raise after one event so the HTTP response has already started."""
+    yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '검증 중'}
+    raise error
+
+
+
 @pytest.fixture
 def mock_env(mocker):
     mocker.patch("app.core.config.settings.INTERNAL_API_KEY", TEST_API_KEY)
-    mocker.patch(
-        "app.services.course_service.enrich_course_with_google_maps",
-        side_effect=lambda c: c,
-    )
+    mocker.patch("app.core.config.settings.GEMINI_API_KEY", "offline-gemini")
+    mocker.patch("app.core.config.settings.GOOGLE_MAPS_API_KEY", "offline-maps")
 
 
 @pytest.fixture
@@ -198,8 +210,8 @@ async def test_generate_course_success(mock_env, valid_course_request_payload, s
     정상적인 성향 프로필, MBTI 및 여행 조건 요청 시 API-AI-2 SSE 스트리밍 (progress, complete) 응답 검증
     """
     mocker.patch(
-        "app.services.course_service.run_course_generation_chain",
-        return_value=sample_course_schema,
+        "app.services.course_service.stream_course_generation",
+        side_effect=lambda request: successful_stream(sample_course_schema),
     )
 
     async with AsyncClient(
@@ -226,8 +238,8 @@ async def test_generate_course_with_mbti_only(mock_env, valid_trip_condition, sa
     mbti만 전달되고 tasteProfile은 null/누락된 요청 시 200 OK 정상 처리 검증 (API-AI-2 준수)
     """
     mocker.patch(
-        "app.services.course_service.run_course_generation_chain",
-        return_value=sample_course_schema,
+        "app.services.course_service.stream_course_generation",
+        side_effect=lambda request: successful_stream(sample_course_schema),
     )
 
     payload = {
@@ -256,8 +268,8 @@ async def test_generate_course_with_taste_profile_only(mock_env, valid_taste_pro
     tasteProfile만 전달되고 mbti는 null/누락된 요청 시 200 OK 정상 처리 검증 (API-AI-2 준수)
     """
     mocker.patch(
-        "app.services.course_service.run_course_generation_chain",
-        return_value=sample_course_schema,
+        "app.services.course_service.stream_course_generation",
+        side_effect=lambda request: successful_stream(sample_course_schema),
     )
 
     payload = {
@@ -286,8 +298,8 @@ async def test_generate_course_with_both_mbti_and_taste_profile(mock_env, valid_
     mbti와 tasteProfile이 둘 다 전달되는 요청 시 200 OK 정상 처리 검증
     """
     mocker.patch(
-        "app.services.course_service.run_course_generation_chain",
-        return_value=sample_course_schema,
+        "app.services.course_service.stream_course_generation",
+        side_effect=lambda request: successful_stream(sample_course_schema),
     )
 
     payload = {
@@ -376,11 +388,11 @@ async def test_generate_course_bad_request(mock_env):
 @pytest.mark.asyncio
 async def test_generate_course_not_found(mock_env, valid_course_request_payload, mocker):
     """
-    조건에 맞는 장소 데이터가 부족하여 404 예외 발생 케이스 검증
+    실시간 스트림 시작 후 장소 부족은 progress 안내 후 complete 없이 종료한다.
     """
     mocker.patch(
-        "app.services.course_service.run_course_generation_chain",
-        return_value=None,
+        "app.services.course_service.stream_course_generation",
+        side_effect=lambda request: failed_stream(ValueError("조건에 맞는 장소가 없습니다.")),
     )
 
     async with AsyncClient(
@@ -392,19 +404,19 @@ async def test_generate_course_not_found(mock_env, valid_course_request_payload,
             json=valid_course_request_payload,
         )
 
-    assert response.status_code == 404
-    assert response.json()["status"] == 404
-    assert "조건에 맞는 장소" in response.json()["message"]
+    assert response.status_code == 200
+    assert "event: progress" in response.text
+    assert "event: complete" not in response.text
 
 
 @pytest.mark.asyncio
 async def test_generate_course_ai_error(mock_env, valid_course_request_payload, mocker):
     """
-    AI 모델 호출 중 서버 예외 발생 시 500 Internal Error 반환 검증
+    스트림 시작 이후 모델 오류는 HTTP 200 스트림에서 complete 없이 종료한다.
     """
     mocker.patch(
-        "app.services.course_service.run_course_generation_chain",
-        side_effect=HTTPException(status_code=500, detail="AI 코스 생성 중 오류가 발생했습니다."),
+        "app.services.course_service.stream_course_generation",
+        side_effect=lambda request: failed_stream(RuntimeError("provider unavailable")),
     )
 
     async with AsyncClient(
@@ -416,9 +428,9 @@ async def test_generate_course_ai_error(mock_env, valid_course_request_payload, 
             json=valid_course_request_payload,
         )
 
-    assert response.status_code == 500
-    assert response.json()["status"] == 500
-    assert "AI 코스 생성 중 오류" in response.json()["message"]
+    assert response.status_code == 200
+    assert "event: progress" in response.text
+    assert "event: complete" not in response.text
 
 
 def test_course_prompt_requirements():
@@ -493,26 +505,132 @@ def test_stop_schema_cost_field_validation():
         )
 
 
+
 @pytest.mark.asyncio
-async def test_enrich_course_preserves_llm_place_data_on_search_failure(mocker, sample_course_schema):
-    """
-    Google Places API 검색 실패 시에도 LLM이 사전에 생성했던 유효한 위경도/사진/카테고리 등이 소실(0.0/빈값)되지 않고 보존되는지 검증
-    """
-    from app.services.course_service import enrich_course_with_google_maps
+async def test_service_emits_progress_before_generation_finishes(mock_env, valid_course_request_payload, sample_course_schema, mocker):
+    from app.schemas.course import CourseRequestSchema
+    from app.services.course_service import generate_course_service
 
-    # Google Maps API 호출 시 빈 결과/실패 모킹
-    mocker.patch(
-        "httpx.AsyncClient.post",
-        side_effect=httpx.HTTPError("API Call Failed"),
-    )
+    release = asyncio.Event()
 
-    enriched_course = await enrich_course_with_google_maps(sample_course_schema)
+    async def blocked_generation(request):
+        yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '후보 생성 중'}
+        await release.wait()
+        yield 'complete', {'course': sample_course_schema.model_dump()}
 
-    # 1일차 1번째 스톱의 위경도 및 사진 정보가 0.0이나 빈값으로 초기화되지 않고 유지되는지 확인
-    first_stop_place = enriched_course.itinerary.days[0].stops[0].place
-    assert first_stop_place.latitude == 33.5126
-    assert first_stop_place.longitude == 126.5283
-    assert first_stop_place.placeName == "제주 동문시장"
-    assert "https://places.googleapis.com" in first_stop_place.photoUrl
+    mocker.patch('app.services.course_service.stream_course_generation', side_effect=blocked_generation)
+    stream = await asyncio.wait_for(generate_course_service(CourseRequestSchema.model_validate(valid_course_request_payload)), timeout=.5)
+    first = await asyncio.wait_for(anext(stream), timeout=.5)
+    assert 'event: progress' in first
+    assert not release.is_set()
+    release.set()
+    events = [first, *[event async for event in stream]]
+    for event in events:
+        data = json.loads(event.split('data: ', 1)[1])
+        if event.startswith('event: progress'):
+            assert set(data) == {'step', 'message'}
+            assert data['step'] == 'GENERATING_ROUTE'
+        else:
+            assert set(data) == {'course'}
+            CourseSchema.model_validate(data['course'])
+    assert sum(event.startswith('event: complete') for event in events) == 1
 
 
+@pytest.mark.asyncio
+async def test_service_cancellation_closes_pending_generation(mock_env, valid_course_request_payload, mocker):
+    from app.schemas.course import CourseRequestSchema
+    from app.services.course_service import generate_course_service
+
+    entered = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def pending_generation(request):
+        try:
+            yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '생성 중'}
+            entered.set()
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+
+    mocker.patch('app.services.course_service.stream_course_generation', side_effect=pending_generation)
+    stream = await generate_course_service(CourseRequestSchema.model_validate(valid_course_request_payload))
+    await anext(stream)
+    task = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(entered.wait(), timeout=.5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(cleaned.wait(), timeout=.5)
+
+
+@pytest.mark.asyncio
+async def test_invalid_calendar_date_fails_before_stream(mock_env, valid_course_request_payload):
+    valid_course_request_payload['tripCondition']['startDate'] = '2026-02-30'
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY}, json=valid_course_request_payload)
+    assert response.status_code == 400
+    assert response.json()['status'] == 400
+
+
+@pytest.mark.asyncio
+async def test_service_preserves_source_timeout_across_progress_events(mock_env, valid_course_request_payload, mocker):
+    """A timeout opened before progress must still cancel later generation work."""
+    from app.schemas.course import CourseRequestSchema
+    from app.services.course_service import generate_course_service
+
+    cleaned = asyncio.Event()
+
+    async def timed_generation(request):
+        try:
+            async with asyncio.timeout(.03):
+                yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '후보 생성 중'}
+                await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+
+    mocker.patch('app.services.course_service.stream_course_generation', side_effect=timed_generation)
+    stream = await generate_course_service(CourseRequestSchema.model_validate(valid_course_request_payload))
+
+    async def consume():
+        return [event async for event in stream]
+
+    events = await asyncio.wait_for(consume(), timeout=.5)
+    assert cleaned.is_set()
+    assert len(events) >= 2
+    assert all(event.startswith('event: progress') for event in events)
+    assert all('event: complete' not in event for event in events)
+
+
+@pytest.mark.asyncio
+async def test_service_complete_allows_producer_to_finish_normally(mock_env, valid_course_request_payload, sample_course_schema, mocker):
+    """Receiving complete must not cancel the producer during its normal exit."""
+    from app.schemas.course import CourseRequestSchema
+    from app.services.course_service import generate_course_service
+
+    normal_exit = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def finishing_generation(request):
+        try:
+            yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '생성 중'}
+            yield 'complete', {'course': sample_course_schema.model_dump()}
+            await asyncio.sleep(.01)
+            normal_exit.set()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    mocker.patch('app.services.course_service.stream_course_generation', side_effect=finishing_generation)
+    stream = await generate_course_service(CourseRequestSchema.model_validate(valid_course_request_payload))
+    events = []
+    try:
+        async for event in stream:
+            events.append(event)
+            if event.startswith('event: complete'):
+                assert normal_exit.is_set()
+                break
+    finally:
+        await stream.aclose()
+    assert sum(event.startswith('event: complete') for event in events) == 1
+    assert normal_exit.is_set()
+    assert not cancelled.is_set()
