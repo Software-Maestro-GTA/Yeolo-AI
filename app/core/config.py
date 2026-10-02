@@ -23,4 +23,9 @@ class Settings:
     # 로깅 레벨 (DEV: DEBUG, PROD: INFO)
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # Internal pipeline controls; public API schemas remain unchanged.
+    COURSE_HISTORY_PATH: str = os.getenv("COURSE_HISTORY_PATH", ".data/course_history.sqlite3")
+    COURSE_TIMEOUT_SECONDS: float = float(os.getenv("COURSE_TIMEOUT_SECONDS", "120"))
+    COURSE_MAPS_CONCURRENCY: int = int(os.getenv("COURSE_MAPS_CONCURRENCY", "6"))
+
 settings = Settings()

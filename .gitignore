@@ -211,3 +211,7 @@ progress.md
 generated*
 
 # End of https://www.toptal.com/developers/gitignore/api/python,macos
+# Local course diversity history (identifiers only; never commit runtime state)
+.data/
+*.sqlite3-wal
+*.sqlite3-shm
