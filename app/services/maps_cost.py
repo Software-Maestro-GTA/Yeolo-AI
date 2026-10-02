@@ -47,7 +47,7 @@ def classify_maps_sku(method: str, url: str, options: dict[str, Any]) -> str:
             return 'place_details_enterprise'
     if endpoint.netloc == 'routes.googleapis.com' and endpoint.path == '/directions/v2:computeRoutes' and method == 'POST':
         body = options.get('json', {})
-        if fields == {'routes.duration', 'routes.distanceMeters'} and set(body) <= {'origin', 'destination', 'travelMode'} and body.get('travelMode') in {'WALK', 'TRANSIT', 'DRIVE'}:
+        if fields == {'routes.duration', 'routes.distanceMeters'} and set(body) <= {'origin', 'destination', 'travelMode', 'departureTime'} and body.get('travelMode') in {'WALK', 'TRANSIT', 'DRIVE'}:
             return 'routes_essentials'
     return 'unknown'
 
