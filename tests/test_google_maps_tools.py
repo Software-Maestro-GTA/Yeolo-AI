@@ -51,6 +51,7 @@ async def test_search_place_detail_success(mocker):
     assert place_detail.longitude == 126.988227
     assert place_detail.rating == 4.5
     assert len(place_detail.openingHours) == 2
+    assert place_detail.photoUrl == ""  # Legacy path cannot return a key-bearing media URL.
     mock_post.assert_called_once()
 
 
@@ -262,3 +263,14 @@ async def test_search_place_detail_preserves_fallback_place_on_failure(mocker):
     assert place_detail.photoUrl == "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4"
     assert place_detail.rating == 4.3
 
+
+
+@pytest.mark.asyncio
+async def test_legacy_fallback_photo_does_not_expose_configured_api_key(mocker):
+    mocker.patch('app.core.config.settings.GOOGLE_MAPS_API_KEY', 'private-test-key')
+    mocker.patch('httpx.AsyncClient.post', side_effect=httpx.HTTPError('offline'))
+    fallback = PlaceSchema(placeId='verified-place', placeName='실제 장소', category='museum', latitude=37.55, longitude=126.98,
+                           photoUrl='https://places.googleapis.com/v1/places/verified-place/photos/resource/media?key=private-test-key')
+    result = await search_place_detail('실제 장소', '서울', fallback_place=fallback)
+    assert result.photoUrl == ''
+    assert 'private-test-key' not in str(result.model_dump())
