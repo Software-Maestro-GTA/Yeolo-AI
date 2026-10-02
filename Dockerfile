@@ -29,9 +29,15 @@ COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 # Copy application source code
 COPY --chown=appuser:appuser app /app/app
 
+# Provision SQLite storage while root can create children of /app.
+RUN mkdir -p /app/.data && \
+    chown appuser:appuser /app/.data && \
+    chmod 0700 /app/.data
+
 # Configure PATH to use the virtual environment
 ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    COURSE_HISTORY_PATH=/app/.data/course_history.sqlite3
 
 USER appuser
 
