@@ -47,9 +47,13 @@ async def test_actual_media_uri_and_all_available_author_fields_are_returned_wit
         metrics = provider.metrics.snapshot()
     assert first.url == second.url == IMAGE_URL
     assert first.url != AVATAR_URL
-    for value in ('사진 출처: Google Maps', '실제 작성자', SOURCE_URL, PROFILE_URL, AVATAR_URL):
-        assert value in first.credit
-    assert 'private-test-key' not in first.url + first.credit + json.dumps(metrics)
+    assert first.attribution.provider == 'Google Maps'
+    assert first.attribution.googleMapsUri == SOURCE_URL
+    assert len(first.attribution.authorAttributions) == 1
+    author = first.attribution.authorAttributions[0]
+    assert (author.displayName, author.uri, author.photoUri) == ('실제 작성자', PROFILE_URL, AVATAR_URL)
+    assert first.attribution == second.attribution
+    assert 'private-test-key' not in first.url + first.attribution.model_dump_json() + json.dumps(metrics)
     assert len(sends) == 4  # Fetch fresh metadata/media each time; photo names expire.
     assert not provider.cache
     assert not provider.locks
@@ -60,7 +64,7 @@ async def test_actual_media_uri_and_all_available_author_fields_are_returned_wit
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('failure', ['no_photos', 'wrong_id', 'wrong_photo_place', 'nested_resource', 'missing_source', 'unsafe_source', 'unsafe_author', 'key_author', 'key_author_name', 'missing_author_name', 'avatar_only', 'wrong_media_name', 'unsafe_image', 'userinfo_image', 'key_image', 'control_image', 'endpoint_image', 'broken_json', 'permission', 'timeout'])
+@pytest.mark.parametrize('failure', ['no_photos', 'wrong_id', 'wrong_photo_place', 'nested_resource', 'missing_source', 'unsafe_source', 'unsafe_author', 'key_author', 'key_author_name', 'missing_author_name', 'avatar_only', 'avatar_as_media', 'wrong_media_name', 'unsafe_image', 'userinfo_image', 'key_image', 'control_image', 'endpoint_image', 'broken_json', 'permission', 'timeout'])
 async def test_photo_failure_returns_none_without_exposing_or_replacing_image(photo_metadata, failure, caplog):
     metadata = copy.deepcopy(photo_metadata)
     media = {'name': 'places/verified-place/photos/current-resource/media', 'photoUri': IMAGE_URL}
@@ -86,6 +90,8 @@ async def test_photo_failure_returns_none_without_exposing_or_replacing_image(ph
         metadata['photos'][0]['authorAttributions'][0].pop('displayName')
     elif failure == 'avatar_only':
         media.pop('photoUri')
+    elif failure == 'avatar_as_media':
+        media['photoUri'] = AVATAR_URL
     elif failure == 'wrong_media_name':
         media['name'] = 'places/another-place/photos/current-resource/media'
     elif failure == 'unsafe_image':
@@ -118,7 +124,7 @@ async def test_photo_failure_returns_none_without_exposing_or_replacing_image(ph
 
 
 @pytest.mark.asyncio
-async def test_photo_source_protocol_relative_links_are_normalized_and_credit_is_plaintext(photo_metadata):
+async def test_photo_source_protocol_relative_links_are_normalized_and_author_name_is_plaintext(photo_metadata):
     author = photo_metadata['photos'][0]['authorAttributions'][0]
     author['uri'] = '//www.google.com/maps/contrib/123'
     author['displayName'] = '<script>作成者</script>'
@@ -127,9 +133,33 @@ async def test_photo_source_protocol_relative_links_are_normalized_and_credit_is
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         photo = await VerifiedMapsProvider(client=client, api_key='offline').photo('verified-place')
     assert photo.url == IMAGE_URL
-    assert PROFILE_URL in photo.credit
-    assert '<script>' not in photo.credit
-    assert '作成者' in photo.credit
+    assert photo.attribution.authorAttributions[0].uri == PROFILE_URL
+    assert '<script>' not in photo.attribution.authorAttributions[0].displayName
+    assert '作成者' in photo.attribution.authorAttributions[0].displayName
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('has_authors', [True, False])
+async def test_provider_preserves_all_available_authors_without_inventing_missing_links(photo_metadata, has_authors):
+    expected = [
+        {'displayName': '작성자 A', 'uri': PROFILE_URL, 'photoUri': AVATAR_URL},
+        {'displayName': '작성자 B', 'uri': None, 'photoUri': None},
+    ] if has_authors else []
+    photo_metadata['photos'][0]['authorAttributions'] = [
+        {key: value for key, value in author.items() if value is not None} for author in expected
+    ]
+    sends = []
+    def respond(request):
+        sends.append(request)
+        return httpx.Response(200, json={'photoUri': IMAGE_URL} if request.url.path.endswith('/media') else photo_metadata)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        photo = await provider.photo('verified-place')
+    assert photo.url == IMAGE_URL
+    assert photo.attribution.googleMapsUri == SOURCE_URL
+    assert [author.model_dump() for author in photo.attribution.authorAttributions] == expected
+    assert len(sends) == 2
+    assert not provider.cache and not provider.locks
 
 
 @pytest.mark.asyncio

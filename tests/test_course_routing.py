@@ -25,6 +25,11 @@ def test_estimate_has_null_route_distance_and_conservative_formula():
     assert result.minutes == math.ceil(distance_meters(first, second) / 1000 * 1.5 / 3 * 60 + 5)
     assert result.type == 'walking' and result.distance is None and result.cost == 0
     assert '[추정 도보]' in result.memo
+    assert second.place.placeName in result.memo
+    assert f'{result.minutes}분' in result.memo
+    assert '거리' in result.memo and ('예상' in result.memo or '추정' in result.memo)
+    assert '보행 경로' in result.memo and any(word in result.memo for word in ['미제공', '포함되지', '제공하지'])
+    assert not any(formula in result.memo for formula in ['우회 계수', '3km/h', '여유 5분'])
     assert is_estimated_walking(result)
     assert valid_route(result, first, second)
     assert set(result.model_dump()) == set(TransportToNextSchema.model_fields)

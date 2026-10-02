@@ -6,6 +6,22 @@ from pydantic import BaseModel, Field, model_validator
 from app.schemas.taste_profile import TasteProfileSchema
 
 
+class PhotoAuthorSchema(BaseModel):
+    """A supplied photo author's name, profile link and distinct avatar link."""
+
+    displayName: str = Field(..., description="사진 작성자 표시 이름")
+    uri: str | None = Field(None, description="작성자 Google Maps 프로필 URL")
+    photoUri: str | None = Field(None, description="작성자 아바타 URL (장소 사진이 아님)")
+
+
+class PhotoAttributionSchema(BaseModel):
+    """Source information for the exact selected place photo."""
+
+    provider: Literal["Google Maps"] = Field(default="Google Maps", description="사진 공급자")
+    googleMapsUri: str = Field(..., description="선택한 개별 사진의 Google Maps 원본 URL")
+    authorAttributions: list[PhotoAuthorSchema] = Field(default_factory=list, description="제공된 사진 작성자 정보")
+
+
 class TripConditionSchema(BaseModel):
     destinationCountry: str = Field(..., description="목적지 국가")
     destinationCity: str = Field(..., description="목적지 도시")
@@ -37,6 +53,7 @@ class PlaceSchema(BaseModel):
     longitude: float = Field(..., description="경도")
     rating: float | None = Field(None, description="장소 평점")
     photoUrl: str = Field(default="", description="대표 사진 URL")
+    photoAttribution: PhotoAttributionSchema | None = Field(None, description="대표 사진의 원본 및 작성자 출처")
     openingHours: list[str] = Field(default_factory=list, description="영업시간 정보 목록")
 
 
@@ -75,6 +92,7 @@ class CourseSchema(BaseModel):
     destinationCountry: str = Field(..., description="목적지 국가")
     destinationCity: str = Field(..., description="목적지 도시")
     coverImageUrl: str = Field(default="", description="코스 커버 이미지 URL")
+    coverImageAttribution: PhotoAttributionSchema | None = Field(None, description="코스 커버 이미지의 원본 및 작성자 출처")
     startDate: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="시작일 (YYYY-MM-DD)")
     totalDays: int = Field(..., ge=1, description="총 여행 일수")
     tags: list[str] = Field(default_factory=list, description="코스 태그 목록")

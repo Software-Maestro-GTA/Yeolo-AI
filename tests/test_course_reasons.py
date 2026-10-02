@@ -59,7 +59,7 @@ def content_day(*categories):
 def assert_experience_only(text):
     assert not re.search(r'\d{2}:\d{2}|\d+\s*(분|일|곳)|17000', text)
     assert not any(phrase in text for phrase in ['도착', '체류', '이동 시간', '예산', '비용', '가격', '촘촘한 일정'])
-    assert not any(claim in text for claim in ['외향', '모험적', 'ENFP', '관심이 많은', '숨은 명소', '유명', '조용', '무료 입장', '예약 없이'])
+    assert not any(claim in text for claim in ['외향', '모험적', 'ENFP', '관심이 많은', '숨은 명소', '유명', '조용', '무료 입장', '예약 없이', '선택하신', '직접 선택한'])
 
 
 @pytest.mark.parametrize(('category', 'experience_words'), [
@@ -110,6 +110,14 @@ def test_strongest_actual_preference_explains_verified_museum_experience(content
     assert '관람' in day.stops[0].reason
     assert any(word in day.stops[0].reason for word in ['전시', '작품', '박물관'])
     assert_experience_only(day.stops[0].reason)
+    content_request.tasteProfile = profile_with_scores(activityPreference__viewing=5)
+    viewing_only = content_day('museum')
+    apply_personalized_reasons(content_request, [viewing_only])
+    assert day.stops[0].reason == viewing_only.stops[0].reason
+    content_request.tasteProfile = profile_with_scores(travelPurpose__culturalExperience=5, activityPreference__viewing=4)
+    culture_first = content_day('museum')
+    apply_personalized_reasons(content_request, [culture_first])
+    assert culture_first.stops[0].reason != viewing_only.stops[0].reason
 
 
 def test_unknown_category_and_unmatched_preferences_do_not_invent_experience(content_request):
@@ -130,6 +138,35 @@ def test_general_restaurant_does_not_infer_cuisine_or_other_absent_experiences(c
         assert_experience_only(text)
         assert not any(claim in text for claim in ['현지 음식', '일식', '라멘', '초밥', '시그니처', '산책', '전시', '전망'])
         assert any(word in text for word in ['미식', '식사', '음식'])
+
+
+@pytest.mark.parametrize(('category', 'experience_words', 'tip_actions'), [
+    ('museum', ('전시', '자료', '작품'), ('관람', '전시', '자료', '작품')),
+    ('park', ('산책',), ('방향', '동선', '길', '안내')),
+    ('ramen_restaurant', ('라멘',), ('재료', '양', '메뉴', '주문')),
+    ('buddhist_temple', ('사찰',), ('예절', '안내', '공간')),
+])
+def test_concrete_guidance_connects_visit_purpose_and_multiple_useful_actions(content_request, category, experience_words, tip_actions):
+    from app.services.course_reasons import visit_tip
+
+    content_request.tasteProfile = profile_with_scores(travelPurpose__culturalExperience=5, travelPurpose__natureExploration=5, travelPurpose__gourmet=5)
+    day = content_day(category)
+    summary = apply_personalized_reasons(content_request, [day])
+    reason = day.stops[0].reason
+    tip = visit_tip(category)
+    for text in [reason, summary]:
+        assert_experience_only(text)
+        assert any(word in text for word in experience_words)
+        sentences = [sentence.strip() for sentence in re.split(r'[.!?]+', text) if sentence.strip()]
+        assert 2 <= len(sentences) <= 3
+        assert len(set(sentences)) == len(sentences)
+    tip_sentences = [sentence.strip() for sentence in re.split(r'[.!?]+', tip) if sentence.strip()]
+    assert 2 <= len(tip_sentences) <= 3
+    assert len(set(tip_sentences)) == len(tip_sentences)
+    assert sum(word in tip for word in tip_actions) >= 2
+    assert any(action in tip for action in ['확인', '살펴', '보고', '읽'])
+    assert any(action in tip for action in ['선택', '골라', '고르', '먼저', '정해'])
+    assert not any(claim in tip for claim in ['인기', '혼잡', '무료', '예약 필수', '현지 음식', '촬영 가능', '시그니처', '전용 출구'])
 
 
 @pytest.mark.parametrize(('category', 'action_words'), [
@@ -171,4 +208,3 @@ def test_known_hours_do_not_repeat_blanket_reservation_or_false_closing_notice(p
     memo = day.stops[0].memo
     assert any(action in memo for action in ['관람', '전시'])
     assert not any(blanket in memo for blanket in ['예약 가능 여부', '공휴일·임시휴무', '영업시간 미확인', '마감', '최종 입장'])
-

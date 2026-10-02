@@ -13,7 +13,12 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 import httpx
 
 from app.core.config import settings
-from app.schemas.course import PlaceSchema, TransportToNextSchema
+from app.schemas.course import (
+    PhotoAttributionSchema,
+    PhotoAuthorSchema,
+    PlaceSchema,
+    TransportToNextSchema,
+)
 from app.services.maps_cost import MapsCostMetrics, classify_maps_sku
 
 PLACE_DETAIL_FIELDS = 'id,displayName,formattedAddress,addressComponents,location,businessStatus,primaryType,types,rating,regularOpeningHours'
@@ -120,10 +125,10 @@ class VerifiedPlace:
 
 @dataclass(frozen=True)
 class VerifiedPhoto:
-    """Actual provider media URI and plaintext source/author attribution."""
+    """Actual provider media URI and structured source/author attribution."""
 
     url: str
-    credit: str
+    attribution: PhotoAttributionSchema
 
 
 def _photo_uri(value: Any, api_key: str, image: bool = False) -> str | None:
@@ -148,30 +153,30 @@ def _photo_uri(value: Any, api_key: str, image: bool = False) -> str | None:
         return None
 
 
-def _photo_credit(raw: dict, api_key: str) -> str | None:
-    """Preserve all available source/author fields as non-executable text."""
+def _photo_attribution(raw: dict, api_key: str) -> PhotoAttributionSchema | None:
+    """Validate supplied source/author fields and retain them in dedicated DTOs."""
     source = _photo_uri(raw.get('googleMapsUri'), api_key)
     if source is None:
         return None
     authors = raw.get('authorAttributions', [])
     if not isinstance(authors, list):
         return None
-    parts = [f'사진 출처: Google Maps · 원본 사진: {source}']
+    validated_authors = []
     for author in authors:
         if not isinstance(author, dict) or not isinstance(author.get('displayName'), str):
             return None
         name = ' '.join(re.sub(r'<[^>]*>', '', author['displayName']).split())
         if not name or (api_key and api_key in name):
             return None
-        fields = [f'작성자: {name}']
-        for key, label in [('uri', '프로필'), ('photoUri', '작성자 아바타')]:
+        fields = {'displayName': name}
+        for key in ('uri', 'photoUri'):
             if key in author:
                 uri = _photo_uri(author[key], api_key, image=key == 'photoUri')
                 if uri is None:
                     return None
-                fields.append(f'{label}: {uri}')
-        parts.append(' · '.join(fields))
-    return ' / '.join(parts)
+                fields[key] = uri
+        validated_authors.append(PhotoAuthorSchema(**fields))
+    return PhotoAttributionSchema(googleMapsUri=source, authorAttributions=validated_authors)
 
 
 def _country(components: list[dict]) -> str:
@@ -410,7 +415,7 @@ class VerifiedMapsProvider:
         Args:
             place_id: A final verified provider ID, optionally prefixed places/.
         Returns:
-            Actual media URL and source text, or None for optional photo failures.
+            Actual media URL and source DTO, or None for optional photo failures.
         Raises:
             asyncio.CancelledError: External cancellation is always propagated.
         """
@@ -427,8 +432,8 @@ class VerifiedMapsProvider:
                 name = raw.get('name', '')
                 if not isinstance(name, str) or not re.fullmatch(rf'places/{re.escape(identifier)}/photos/[A-Za-z0-9_-]+', name):
                     continue
-                credit = _photo_credit(raw, self.api_key)
-                if credit is None:
+                attribution = _photo_attribution(raw, self.api_key)
+                if attribution is None:
                     continue
                 media = await self._request('GET', f'https://places.googleapis.com/v1/{name}/media', use_cache=False, headers={'X-Goog-Api-Key': self.api_key}, params={'maxWidthPx': 1200, 'skipHttpRedirect': 'true'})
                 if 'name' in media and media['name'] != name + '/media':
@@ -437,7 +442,7 @@ class VerifiedMapsProvider:
                 avatars = {_photo_uri(author.get('photoUri'), self.api_key, image=True) for author in raw.get('authorAttributions', [])}
                 if uri in avatars:
                     return None
-                return VerifiedPhoto(uri, credit) if uri is not None else None
+                return VerifiedPhoto(uri, attribution) if uri is not None else None
             return None
         except (ValueError, httpx.HTTPError, KeyError, TypeError, AttributeError):
             return None
@@ -617,5 +622,9 @@ class VerifiedMapsProvider:
         }, json=body)
         seconds, distance = _route_metrics(data)
         label = {'walking': '도보', 'transit': '대중교통', 'driving': '차량', 'taxi': '택시'}[mode]
-        timing = '여행일 출발 시각 기준' if mode == 'transit' and departure_time is not None else '조회 시점 기준'
-        return TransportToNextSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=f'{origin.place.placeName} → {destination.place.placeName}: {label}. {timing} 경로 예상치이며 여행일 운행·혼잡·요금은 재확인이 필요합니다.')
+        timing = '조회 시점 기준'
+        if mode == 'transit' and departure_time is not None:
+            timestamp = departure_time.isoformat(sep=' ', timespec='minutes')
+            timing = f'{timestamp[:16]} (UTC{timestamp[16:]}) 출발 기준'
+        minutes = math.ceil(seconds / 60)
+        return TransportToNextSchema(type=mode, distance=distance, minutes=minutes, cost=0 if mode == 'walking' else None, memo=f'{destination.place.placeName}까지 {label}로 약 {distance:g}m, 약 {minutes}분 이동하는 경로입니다. {timing} 예상 소요 시간입니다.')
