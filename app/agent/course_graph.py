@@ -41,6 +41,7 @@ from app.schemas.course import (
     TransportToNextSchema,
 )
 from app.services.course_history import CourseHistory, history_key
+from app.services.course_images import enrich_course_images
 from app.services.course_reasons import apply_personalized_reasons
 from app.services.course_routing import (
     distance_meters,
@@ -102,6 +103,7 @@ class CourseState(TypedDict, total=False):
     history_unavailable: bool
     repeated: bool
     discovered_days: set[int]
+    deadline: float
 
 
 async def draft_candidates(request: CourseRequestSchema, recent_ids: list[str], feedback: str = '') -> CourseDraft:
@@ -574,6 +576,15 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             course.recommendationReason += ' 확인 가능한 장소와 일정 조건이 제한되어 이전 코스와 같은 장소가 포함되어 있어요.'
         return {'course': course, 'feedback': ''}
 
+    async def enrich_images(state: CourseState) -> dict:
+        """Use only residual optional time for final-place photos and attribution."""
+        _progress('확정한 장소의 실제 사진과 대표 이미지를 준비하고 있습니다.')
+        budget = 5.0
+        if 'deadline' in state:
+            budget = min(budget, state['deadline'] - asyncio.get_running_loop().time() - 1)
+        course = await enrich_course_images(state['course'], provider, timeout_seconds=max(0, budget))
+        return {'course': course}
+
     async def repair(state: CourseState) -> dict:
         """Use retained real venues for one final bounded, less dense schedule."""
         _progress('확인한 장소로 이동과 식사에 여유가 있는 대안 일정을 구성하고 있습니다.')
@@ -605,14 +616,15 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         return decide
 
     graph = StateGraph(CourseState)
-    for name, node in [('prepare', prepare), ('draft', draft), ('verify_places', verify_places), ('verify_routes', verify_routes), ('schedule', schedule), ('finalize', finalize), ('repair', repair)]:
+    for name, node in [('prepare', prepare), ('draft', draft), ('verify_places', verify_places), ('verify_routes', verify_routes), ('schedule', schedule), ('finalize', finalize), ('repair', repair), ('enrich_images', enrich_images)]:
         graph.add_node(name, node)
     graph.add_edge(START, 'prepare')
     graph.add_edge('prepare', 'draft')
     graph.add_conditional_edges('draft', next_node('verify_places'), ['verify_places', 'draft', 'repair'])
     graph.add_edge('repair', 'verify_routes')
-    for node, successor in [('verify_places', 'verify_routes'), ('verify_routes', 'schedule'), ('schedule', 'finalize'), ('finalize', END)]:
+    for node, successor in [('verify_places', 'verify_routes'), ('verify_routes', 'schedule'), ('schedule', 'finalize'), ('finalize', 'enrich_images')]:
         graph.add_conditional_edges(node, next_node(successor), [successor, 'draft', 'repair'])
+    graph.add_edge('enrich_images', END)
     return graph.compile()
 
 
@@ -625,15 +637,15 @@ async def stream_course_generation(request: CourseRequestSchema) -> AsyncGenerat
     completed: dict | None = None
     provider = VerifiedMapsProvider(concurrency=settings.COURSE_MAPS_CONCURRENCY)
     try:
-        async with asyncio.timeout(settings.COURSE_TIMEOUT_SECONDS):
+        async with asyncio.timeout(settings.COURSE_TIMEOUT_SECONDS) as timeout:
             async with provider:
                 graph = build_course_graph(provider, CourseHistory())
-                async with aclosing(graph.astream({'request': request, 'attempt': 0}, stream_mode=['custom', 'updates'])) as events:
+                async with aclosing(graph.astream({'request': request, 'attempt': 0, 'deadline': timeout.when()}, stream_mode=['custom', 'updates'])) as events:
                     async for mode, value in events:
                         if mode == 'custom':
                             yield 'progress', value
-                        elif 'finalize' in value and value['finalize'].get('course'):
-                            completed = {'course': value['finalize']['course'].model_dump()}
+                        elif 'enrich_images' in value and value['enrich_images'].get('course'):
+                            completed = {'course': value['enrich_images']['course'].model_dump()}
     finally:
         metrics = getattr(provider, 'metrics', None)
         if isinstance(metrics, MapsCostMetrics):

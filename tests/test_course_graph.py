@@ -48,6 +48,7 @@ def graph_dependencies(mocker, tmp_path):
     }
     provider.search = AsyncMock(side_effect=lambda candidate, destination: places[candidate.name])
     provider.discover_meals = AsyncMock(return_value=[])
+    provider.photo = AsyncMock(return_value=None)
     provider.route = AsyncMock(return_value=TransportToNextSchema(type='walking', distance=700, minutes=12, cost=0, memo='검증된 도보 경로'))
     history = CourseHistory(path=tmp_path / 'history.sqlite3')
     return provider, history, llm, draft, places
@@ -61,8 +62,8 @@ async def test_actual_graph_verifies_and_schedules_before_complete(request_data,
     graph = build_course_graph(provider, history)
     updates = [update async for update in graph.astream({'request': request_data, 'attempt': 0}, stream_mode='updates')]
     names = [name for update in updates for name in update]
-    assert names[:6] == ['prepare', 'draft', 'verify_places', 'verify_routes', 'schedule', 'finalize']
-    result = updates[-1]['finalize']['course']
+    assert names == ['prepare', 'draft', 'verify_places', 'verify_routes', 'schedule', 'finalize', 'enrich_images']
+    result = updates[-1]['enrich_images']['course']
     assert result.totalDays == 1
     assert result.startDate == request_data.tripCondition.startDate
     assert result.destinationCity == '서울'
@@ -675,7 +676,8 @@ async def test_complete_waits_for_graph_natural_exhaustion_and_cleanup(request_d
     async def graph_events(*args, **kwargs):
         try:
             yield 'custom', {'step': 'GENERATING_ROUTE', 'message': '최종 검증 중'}
-            yield 'updates', {'finalize': {'course': course}}
+            yield 'updates', {'finalize': {'course': course.model_copy(deep=True)}}
+            yield 'updates', {'enrich_images': {'course': course}}
             await asyncio.sleep(0)
             exhausted.set()
         except (asyncio.CancelledError, GeneratorExit):
@@ -706,8 +708,8 @@ async def test_complete_waits_for_graph_natural_exhaustion_and_cleanup(request_d
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('terminal_failure', ['error', 'timeout'])
-async def test_graph_failure_after_finalize_update_does_not_emit_complete(request_data, graph_dependencies, mocker, terminal_failure):
-    """A finalize update alone is not proof that the graph run finished successfully."""
+async def test_graph_failure_after_image_update_does_not_emit_complete(request_data, graph_dependencies, mocker, terminal_failure):
+    """An image-enriched update alone is not proof that the graph run finished successfully."""
     from app.agent.course_graph import build_course_graph, stream_course_generation
 
     provider, history, _, _, _ = graph_dependencies
@@ -718,6 +720,7 @@ async def test_graph_failure_after_finalize_update_does_not_emit_complete(reques
     async def graph_events(*args, **kwargs):
         yield 'custom', {'step': 'GENERATING_ROUTE', 'message': '검증 중'}
         yield 'updates', {'finalize': {'course': course}}
+        yield 'updates', {'enrich_images': {'course': course}}
         if terminal_failure == 'timeout':
             await asyncio.Event().wait()
         raise RuntimeError('Graph failed before reaching normal termination')
@@ -1371,3 +1374,78 @@ async def test_tokyo_real_destination_resolution_preserves_requested_name_in_com
     city_query = '도쿄' if city_input == '도쿄' else 'Tokyo'
     assert set(destination_queries) == {country_query, f'{city_query}, {country_query}'}
     llm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_final_selected_places_only_receive_images_after_validation_and_one_complete(request_data, graph_dependencies, mocker):
+    from app.agent.course_graph import (
+        Candidate,
+        build_course_graph,
+        stream_course_generation,
+    )
+    from app.agent.tools.verified_maps import VerifiedPhoto
+
+    provider, history, llm, draft, places = graph_dependencies
+    draft.days[0].candidates.append(Candidate(name='검증되지 않은 후보'))
+    async def photo(identifier):
+        assert identifier in {venue.place.placeId for venue in places.values()}
+        return VerifiedPhoto(f'https://lh3.googleusercontent.com/p/{identifier.rsplit("/", 1)[-1]}', f'사진 출처: Google Maps; {identifier}')
+    provider.photo.side_effect = photo
+    graph = build_course_graph(provider, history)
+    provider.__aenter__ = AsyncMock(return_value=provider)
+    provider.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch('app.agent.course_graph.VerifiedMapsProvider', return_value=provider)
+    mocker.patch('app.agent.course_graph.CourseHistory', return_value=history)
+    mocker.patch('app.agent.course_graph.build_course_graph', return_value=graph)
+    events = [event async for event in stream_course_generation(request_data)]
+    complete = [payload for event, payload in events if event == 'complete']
+    assert len(complete) == 1 and events[-1][0] == 'complete'
+    course = complete[0]['course']
+    selected = {stop['place']['placeId'] for day in course['itinerary']['days'] for stop in day['stops']}
+    assert {call.args[0] for call in provider.photo.await_args_list} == selected
+    assert provider.photo.await_count == len(selected)
+    assert course['coverImageUrl']
+    assert all(stop['place']['photoUrl'] and '사진 출처: Google Maps' in stop['memo'] for day in course['itinerary']['days'] for stop in day['stops'])
+    assert '사진 출처: Google Maps' in course['recommendationReason']
+    llm.assert_awaited_once()
+    provider.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_graph_skips_images_when_final_phase_has_no_reserved_time(request_data, graph_dependencies):
+    from app.agent.course_graph import build_course_graph
+
+    provider, history, _, _, _ = graph_dependencies
+    deadline = asyncio.get_running_loop().time() + .5
+    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0, 'deadline': deadline}))['course']
+    assert len(course.itinerary.days[0].stops) == 4
+    provider.photo.assert_not_awaited()
+    assert not course.coverImageUrl
+    assert '사진' in course.recommendationReason or any('사진' in day.memo for day in course.itinerary.days)
+
+
+@pytest.mark.asyncio
+async def test_stream_passes_outer_deadline_to_graph_and_publishes_image_update(request_data, graph_dependencies, mocker):
+    from app.agent.course_graph import build_course_graph, stream_course_generation
+
+    provider, history, _, _, _ = graph_dependencies
+    original = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
+    enriched = original.model_copy(deep=True)
+    enriched.coverImageUrl = 'https://lh3.googleusercontent.com/p/final-cover'
+    captured = []
+    async def graph_events(state, **kwargs):
+        captured.append(state)
+        yield 'updates', {'finalize': {'course': original}}
+        yield 'updates', {'enrich_images': {'course': enriched}}
+    graph = mocker.Mock()
+    graph.astream.side_effect = graph_events
+    provider.__aenter__ = AsyncMock(return_value=provider)
+    provider.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch('app.agent.course_graph.VerifiedMapsProvider', return_value=provider)
+    mocker.patch('app.agent.course_graph.CourseHistory', return_value=history)
+    mocker.patch('app.agent.course_graph.build_course_graph', return_value=graph)
+    before = asyncio.get_running_loop().time()
+    events = [event async for event in stream_course_generation(request_data)]
+    assert len(events) == 1 and events[0][0] == 'complete'
+    assert events[0][1]['course']['coverImageUrl'] == enriched.coverImageUrl
+    assert before < captured[0]['deadline'] <= before + 121
