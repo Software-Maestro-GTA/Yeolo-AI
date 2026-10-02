@@ -146,24 +146,65 @@ def visit_tip(category: str) -> str:
         Plaintext advice; it does not establish crowding, amenities or availability.
     """
     if category in {'museum', 'heritage_museum', 'history_museum'}:
-        return '관람 안내를 확인하고, 보고 싶은 전시나 자료부터 둘러보세요.'
+        return '관람 안내를 보고 궁금한 주제부터 골라 보세요. 전시의 설명과 자료를 함께 살펴보고, 눈에 들어오는 내용에 집중해 보세요.'
     if category == 'art_gallery':
-        return '관람 안내를 확인하고, 보고 싶은 작품부터 둘러보세요.'
-    if category in {'shinto_shrine', 'buddhist_temple', 'hindu_temple', 'mosque', 'church', 'synagogue'}:
-        return '현장 방문 예절과 안내를 먼저 확인하고, 공간을 차분히 둘러보세요.'
+        return '관람 안내를 보고 살펴보고 싶은 작품부터 골라 보세요. 눈에 들어오는 색과 형태를 먼저 보고, 작품 설명이 있다면 함께 읽어 보세요.'
+    if category in {'shinto_shrine', 'buddhist_temple'}:
+        venue_type = _category_label(category)
+        return f'현장 방문 예절과 안내를 먼저 확인해 주세요. 이동 가능한 범위를 살펴본 뒤, {venue_type} 공간의 모습과 주변을 둘러보세요.'
+    if category in {'hindu_temple', 'mosque', 'church', 'synagogue'}:
+        return '현장 방문 예절과 안내를 먼저 확인해 주세요. 다른 방문자의 활동을 존중하며 공간을 둘러보세요.'
     if category in NATURE:
-        return '현장 안내를 확인한 뒤, 걸어 보고 싶은 방향을 골라 산책해 보세요.'
+        return '현장 안내를 보고 걸어 보고 싶은 방향을 골라 보세요. 산책 중 눈에 들어오는 풍경을 살펴보고, 돌아올 동선도 함께 생각해 보세요.'
     if category == 'observation_deck':
-        return '현장 안내를 확인하고, 눈에 들어오는 풍경을 바라보며 둘러보세요.'
+        return '현장 안내를 확인하고 바라보고 싶은 방향부터 골라 보세요. 가까이 보이는 부분과 먼 풍경을 번갈아 살펴보며 전망을 감상해 보세요.'
+    meal_tips = {
+        'ramen_restaurant': '메뉴에서 면·국물 구성과 양을 먼저 살펴보세요. 추가 메뉴가 있다면 한 끼로 먹고 싶은 조합인지 확인한 뒤 주문해 보세요.',
+        'sushi_restaurant': '초밥 메뉴의 재료와 구성을 살펴보세요. 먹고 싶은 종류를 고른 뒤, 제공되는 양도 확인해 주문해 보세요.',
+        'tonkatsu_restaurant': '돈카츠 메뉴의 구성과 양을 먼저 살펴보세요. 메뉴에 곁들이는 음식이 있다면 함께 먹고 싶은 조합인지 확인해 보세요.',
+        'hamburger_restaurant': '햄버거 메뉴의 속재료와 구성을 살펴보세요. 추가 음식이나 음료가 있다면 원하는 조합과 양을 확인해 주문해 보세요.',
+        'japanese_restaurant': '일식 메뉴의 재료와 구성을 살펴보세요. 한 끼로 먹고 싶은 조합을 고른 뒤, 제공되는 양을 확인해 주문해 보세요.',
+    }
+    if category in meal_tips:
+        return meal_tips[category]
     if category in CAFE or meal_category_supported(category, 'lunch') or category.endswith('_restaurant'):
-        return '메뉴의 재료와 양을 확인하고, 먹고 싶은 조합으로 골라 보세요.'
+        return '메뉴의 재료와 양을 먼저 살펴보세요. 먹고 싶은 조합을 고른 뒤, 주문할 구성을 확인해 보세요.'
     if category in SHOPPING:
-        return '관심 있는 상품을 먼저 살펴보고, 구매 전 가격과 구성을 비교해 보세요.'
+        return '관심 있는 상품부터 골라 살펴보세요. 구매하려는 상품의 구성을 비교하고, 필요한 물건인지 생각해 보세요.'
     if category == 'convention_center':
-        return '현장 방문 안내를 확인하고, 둘러볼 수 있는 범위를 먼저 살펴보세요.'
+        return '현장 방문 안내에서 현재 방문할 수 있는 범위를 확인해 주세요. 둘러보고 싶은 부분을 고르고, 이동 중 현장 안내를 따라 살펴보세요.'
     if category in WELLNESS or category in NIGHTLIFE or category in {'amusement_park', 'theme_park', 'water_park'}:
-        return '현장 이용 안내를 확인한 뒤, 원하는 활동을 골라 이용해 보세요.'
-    return '방문 안내를 먼저 확인하고, 눈에 들어오는 부분부터 둘러보세요.'
+        return '현장 이용 안내를 먼저 확인해 주세요. 해 보고 싶은 활동을 고르고, 필요한 이용 조건을 살펴보세요.'
+    return '방문 안내를 먼저 확인해 주세요. 눈에 들어오는 부분을 고르고, 둘러볼 수 있는 범위에서 살펴보세요.'
+
+
+def _experience_value(category: str) -> str:
+    """Explain a type-supported visit purpose without inventing venue amenities."""
+    if category in {'museum', 'heritage_museum', 'history_museum', 'art_gallery'}:
+        return '전시의 구성과 눈에 들어오는 내용을 연결해 보며 관람의 초점을 찾을 수 있어요.'
+    if category in {'shinto_shrine', 'buddhist_temple'}:
+        return '공간의 구성과 방문 예절을 직접 접하며 문화가 드러나는 모습을 살펴볼 수 있어요.'
+    if category in NATURE:
+        return '걷는 방향에 따라 달라지는 시야와 주변 풍경을 살펴보는 데 초점을 두었어요.'
+    if category == 'observation_deck':
+        return '가까운 곳과 먼 곳의 모습을 비교하며 주변 풍경을 넓게 살펴볼 수 있어요.'
+    if category == 'ramen_restaurant':
+        return '면과 국물의 조합을 맛보며 라멘 식사의 즐거움을 느끼는 데 초점을 두었어요.'
+    if category == 'sushi_restaurant':
+        return '초밥의 재료와 한 끼 구성을 살펴보며 먹고 싶은 조합을 찾아볼 수 있어요.'
+    if category == 'tonkatsu_restaurant':
+        return '돈카츠 메뉴의 구성과 제공되는 양을 살펴보며 원하는 한 끼를 고르는 데 초점을 두었어요.'
+    if category == 'hamburger_restaurant':
+        return '햄버거의 속재료와 조합을 살펴보며 먹고 싶은 구성을 찾아볼 수 있어요.'
+    if category == 'japanese_restaurant':
+        return '일식 메뉴에 담긴 재료와 구성을 비교하며 먹고 싶은 맛의 조합을 찾아볼 수 있어요.'
+    if meal_category_supported(category, 'lunch') or category in CAFE:
+        return '메뉴의 재료와 양을 비교하며 먹고 싶은 조합을 찾는 데 초점을 두었어요.'
+    if category == 'convention_center':
+        return '현장 안내와 공간의 구성을 연결해 보며 둘러보고 싶은 부분을 찾아볼 수 있어요.'
+    if category in SHOPPING:
+        return '상품의 구성을 비교하며 자신에게 필요한 물건인지 생각해 볼 수 있어요.'
+    return '방문 안내와 현장의 모습을 참고해 자신이 보고 싶은 부분에 초점을 맞출 수 있어요.'
 
 
 def _travel_experience(label: str) -> str:
@@ -191,7 +232,7 @@ def _supported_reason(stop: StopSchema, label: str, variant: int) -> str:
         f'{name}에서 {action} 경험을 {experience}과 연결해 추천했어요.',
         f'{experience}에 맞춰 {name}에서 {action} 방문을 담았어요.',
     )
-    return templates[variant % len(templates)]
+    return templates[variant % len(templates)] + ' ' + _experience_value(stop.place.category)
 
 
 def apply_personalized_reasons(request: CourseRequestSchema, days: list[DayItinerarySchema]) -> str:
@@ -207,12 +248,14 @@ def apply_personalized_reasons(request: CourseRequestSchema, days: list[DayItine
     used: Counter[str] = Counter()
     experiences: Counter[str] = Counter()
     examples: dict[str, str] = {}
+    example_categories: dict[str, str] = {}
     profile = request.tasteProfile
     for day in days:
         for stop in day.stops:
             label, action = _experience(stop.place.category)
             experiences[label] += 1
             examples.setdefault(label, stop.place.placeName)
+            example_categories.setdefault(label, stop.place.category)
             evidence = _evidence(profile, stop.place.category) if profile else []
             if evidence:
                 evidence.sort(key=lambda item: (-item[0], used[item[1].label]))
@@ -220,12 +263,15 @@ def apply_personalized_reasons(request: CourseRequestSchema, days: list[DayItine
                 stop.reason = _supported_reason(stop, rule.label, used[rule.label])
                 used[rule.label] += 1
             else:
-                stop.reason = f'{stop.place.placeName}에서 {action} 경험을 여행에 더할 수 있도록 추천했어요.'
+                stop.reason = f'{stop.place.placeName}에서 {action} 경험을 여행에 더할 수 있도록 추천했어요. {_experience_value(stop.place.category)}'
     if not experiences:
-        return '직접 장소를 둘러보는 경험을 담은 여행이에요.'
+        return '직접 장소를 둘러보는 경험을 담은 여행이에요. 눈에 들어오는 부분을 스스로 살펴보는 방문을 더했어요.'
     connections = ', '.join(f'{label}({examples[label]})' for label, _ in experiences.most_common(3))
     summary = f'이번 여행에는 {connections} 경험을 함께 담았어요.'
     if used:
         travel_experiences = ', '.join(_travel_experience(label) for label, _ in used.most_common(3))
         summary += f' 취향에 맞춰 {travel_experiences}이 이어지도록 구성했어요.'
+    else:
+        main_experience = experiences.most_common(1)[0][0]
+        summary += ' ' + _experience_value(example_categories[main_experience])
     return summary
