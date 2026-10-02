@@ -1385,12 +1385,13 @@ async def test_final_selected_places_only_receive_images_after_validation_and_on
         stream_course_generation,
     )
     from app.agent.tools.verified_maps import VerifiedPhoto
+    from app.schemas.course import PhotoAttributionSchema
 
     provider, history, llm, draft, places = graph_dependencies
     draft.days[0].candidates.append(Candidate(name='검증되지 않은 후보'))
     async def photo(identifier):
         assert identifier in {venue.place.placeId for venue in places.values()}
-        return VerifiedPhoto(f'https://lh3.googleusercontent.com/p/{identifier.rsplit("/", 1)[-1]}', f'사진 출처: Google Maps; {identifier}')
+        return VerifiedPhoto(f'https://lh3.googleusercontent.com/p/{identifier.rsplit("/", 1)[-1]}', PhotoAttributionSchema(googleMapsUri=f'https://www.google.com/maps/place/?cid={identifier.rsplit("/", 1)[-1]}'))
     provider.photo.side_effect = photo
     graph = build_course_graph(provider, history)
     provider.__aenter__ = AsyncMock(return_value=provider)
@@ -1406,10 +1407,11 @@ async def test_final_selected_places_only_receive_images_after_validation_and_on
     assert {call.args[0] for call in provider.photo.await_args_list} == selected
     assert provider.photo.await_count == len(selected)
     assert course['coverImageUrl']
-    assert all(stop['place']['photoUrl'] and '사진 출처: Google Maps' in stop['memo'] for day in course['itinerary']['days'] for stop in day['stops'])
+    assert all(stop['place']['photoUrl'] and stop['place']['photoAttribution']['provider'] == 'Google Maps' for day in course['itinerary']['days'] for stop in day['stops'])
+    assert all('사진 출처' not in stop['memo'] and 'google.com/maps' not in stop['memo'] for day in course['itinerary']['days'] for stop in day['stops'])
     assert '사진 출처: Google Maps' not in course['recommendationReason']
     cover_stop = next(stop for day in course['itinerary']['days'] for stop in day['stops'] if stop['place']['photoUrl'] == course['coverImageUrl'])
-    assert '\n\n사진 출처: Google Maps' in cover_stop['memo']
+    assert course['coverImageAttribution'] == cover_stop['place']['photoAttribution']
     llm.assert_awaited_once()
     provider.__aexit__.assert_awaited_once()
 

@@ -1,4 +1,4 @@
-"""Freeze the existing course request and SSE payload schemas during refactoring."""
+"""Freeze requests/SSE and the approved nullable response attribution additions."""
 
 import json
 from pathlib import Path
@@ -10,8 +10,8 @@ from app.schemas.course import (
 )
 
 
-def test_course_api_schemas_match_pre_refactor_contract():
-    """Internal graph changes must not add, remove, or constrain public fields."""
+def test_course_api_schemas_match_approved_attribution_contract():
+    """Only the explicitly approved photo attribution response extension is allowed."""
     expected = json.loads(
         (Path(__file__).parent / 'fixtures/course_api_schema_baseline.json').read_text()
     )

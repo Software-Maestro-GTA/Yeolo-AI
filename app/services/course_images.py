@@ -30,16 +30,18 @@ async def enrich_course_images(course: CourseSchema, provider: VerifiedMapsProvi
         provider: Request-scoped Maps provider with optional fresh photo lookup.
         timeout_seconds: Remaining optional phase budget, capped at five seconds.
     Returns:
-        An independent course with completed fresh images and matching credits.
+        An independent course with completed fresh images and matching attribution.
         Missing/failed photos stay empty; phase timeout preserves partial results.
     Raises:
         asyncio.CancelledError: External cancellation propagates after task cleanup.
     """
     enriched = course.model_copy(deep=True)
     enriched.coverImageUrl = ''
+    enriched.coverImageAttribution = None
     stops = [stop for day in enriched.itinerary.days for stop in day.stops]
     for stop in stops:
         stop.place.photoUrl = ''
+        stop.place.photoAttribution = None
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         if enriched.itinerary.days:
             enriched.itinerary.days[0].memo += ' 사진을 준비할 추가 시간이 부족해 이번 코스는 이미지 없이 제공해요.'
@@ -73,9 +75,10 @@ async def enrich_course_images(course: CourseSchema, provider: VerifiedMapsProvi
         photo = completed.get(stop.place.placeId.removeprefix('places/'))
         if photo is not None:
             stop.place.photoUrl = photo.url
-            stop.memo += '\n\n' + photo.credit
+            stop.place.photoAttribution = photo.attribution.model_copy(deep=True)
             available.append((stop, photo))
     if available:
         _, cover = next((item for item in available if _cover_attraction(item[0].place.category)), available[0])
         enriched.coverImageUrl = cover.url
+        enriched.coverImageAttribution = cover.attribution.model_copy(deep=True)
     return enriched
