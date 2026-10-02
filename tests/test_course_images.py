@@ -26,24 +26,31 @@ def course_for_images():
 
 @pytest.mark.asyncio
 async def test_images_are_copied_and_cover_prefers_attraction_with_matching_credit(course_for_images, mocker):
+    from app.agent.tools.verified_maps import VerifiedPhoto
     from app.services.course_images import enrich_course_images
 
-    from app.agent.tools.verified_maps import VerifiedPhoto
-
     provider = mocker.Mock()
-    provider.photo = AsyncMock(side_effect=lambda identifier: VerifiedPhoto(f'https://lh3.googleusercontent.com/p/{identifier}', f'사진 출처: Google Maps; 작성자 {identifier}; https://www.google.com/maps/place/?cid={identifier}'))
+    def credit(identifier):
+        return (f'사진 출처: Google Maps; 작성자 {identifier}; '
+                f'프로필 https://www.google.com/maps/contrib/{identifier}; '
+                f'아바타 https://lh3.googleusercontent.com/a/{identifier}; '
+                f'원본 https://www.google.com/maps/place/?cid={identifier}')
+    provider.photo = AsyncMock(side_effect=lambda identifier: VerifiedPhoto(f'https://lh3.googleusercontent.com/p/{identifier}', credit(identifier)))
     original = course_for_images.model_dump()
     result = await enrich_course_images(course_for_images, provider)
     assert result is not course_for_images
     assert course_for_images.model_dump() == original
     assert result.coverImageUrl == 'https://lh3.googleusercontent.com/p/museum'
-    assert '작성자 museum' in result.recommendationReason
-    assert result.recommendationReason.startswith(original['recommendationReason'])
+    assert result.recommendationReason == original['recommendationReason']
+    cover_stop = next(stop for stop in result.itinerary.days[0].stops if stop.place.photoUrl == result.coverImageUrl)
+    assert '작성자 museum' in cover_stop.memo
+    assert 'https://www.google.com/maps/place/?cid=museum' in cover_stop.memo
     assert {call.args[0] for call in provider.photo.await_args_list} == {'meal', 'museum', 'park'}
     for stop in result.itinerary.days[0].stops:
         assert stop.place.photoUrl == f'https://lh3.googleusercontent.com/p/{stop.place.placeId}'
-        assert stop.memo.startswith('기존 방문 안내')
+        assert stop.memo.startswith('기존 방문 안내\n\n사진 출처: Google Maps')
         assert f'작성자 {stop.place.placeId}' in stop.memo
+        assert credit(stop.place.placeId) in stop.memo
         assert stop.reason == '기존 장소 추천 이유'
         assert stop.stayMinutes == 60 and stop.cost == 15000
     assert result.model_dump().keys() == original.keys()
@@ -51,9 +58,8 @@ async def test_images_are_copied_and_cover_prefers_attraction_with_matching_cred
 
 @pytest.mark.asyncio
 async def test_no_attraction_photo_uses_first_available_place_image_without_substitution(course_for_images, mocker):
-    from app.services.course_images import enrich_course_images
-
     from app.agent.tools.verified_maps import VerifiedPhoto
+    from app.services.course_images import enrich_course_images
 
     provider = mocker.Mock()
     provider.photo = AsyncMock(side_effect=lambda identifier: VerifiedPhoto('https://lh3.googleusercontent.com/p/meal', '사진 출처: Google Maps meal') if identifier == 'meal' else None)
@@ -64,9 +70,8 @@ async def test_no_attraction_photo_uses_first_available_place_image_without_subs
 
 @pytest.mark.asyncio
 async def test_duplicate_place_ids_fetch_once_and_concurrency_is_bounded(course_for_images, mocker):
-    from app.services.course_images import enrich_course_images
-
     from app.agent.tools.verified_maps import VerifiedPhoto
+    from app.services.course_images import enrich_course_images
 
     course_for_images.itinerary.days[0].stops.append(course_for_images.itinerary.days[0].stops[1].model_copy(deep=True))
     provider = mocker.Mock()
@@ -92,9 +97,8 @@ async def test_duplicate_place_ids_fetch_once_and_concurrency_is_bounded(course_
 
 @pytest.mark.asyncio
 async def test_phase_timeout_keeps_completed_images_and_joins_cancelled_tasks(course_for_images, mocker):
-    from app.services.course_images import enrich_course_images
-
     from app.agent.tools.verified_maps import VerifiedPhoto
+    from app.services.course_images import enrich_course_images
 
     provider = mocker.Mock()
     cancelled = []
@@ -123,6 +127,10 @@ async def test_no_remaining_budget_skips_photo_calls_and_returns_course(course_f
     provider.photo.assert_not_awaited()
     assert result.title == course_for_images.title
     assert not result.coverImageUrl
+    assert result.recommendationReason == course_for_images.recommendationReason
+    assert result.itinerary.days[0].memo.startswith(course_for_images.itinerary.days[0].memo)
+    assert '사진' in result.itinerary.days[0].memo
+    assert course_for_images.itinerary.days[0].memo == '확정된 일정'
 
 
 @pytest.mark.asyncio

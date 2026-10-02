@@ -1407,7 +1407,9 @@ async def test_final_selected_places_only_receive_images_after_validation_and_on
     assert provider.photo.await_count == len(selected)
     assert course['coverImageUrl']
     assert all(stop['place']['photoUrl'] and '사진 출처: Google Maps' in stop['memo'] for day in course['itinerary']['days'] for stop in day['stops'])
-    assert '사진 출처: Google Maps' in course['recommendationReason']
+    assert '사진 출처: Google Maps' not in course['recommendationReason']
+    cover_stop = next(stop for day in course['itinerary']['days'] for stop in day['stops'] if stop['place']['photoUrl'] == course['coverImageUrl'])
+    assert '\n\n사진 출처: Google Maps' in cover_stop['memo']
     llm.assert_awaited_once()
     provider.__aexit__.assert_awaited_once()
 
@@ -1422,7 +1424,8 @@ async def test_graph_skips_images_when_final_phase_has_no_reserved_time(request_
     assert len(course.itinerary.days[0].stops) == 4
     provider.photo.assert_not_awaited()
     assert not course.coverImageUrl
-    assert '사진' in course.recommendationReason or any('사진' in day.memo for day in course.itinerary.days)
+    assert '사진' not in course.recommendationReason
+    assert '사진' in course.itinerary.days[0].memo
 
 
 @pytest.mark.asyncio
