@@ -259,3 +259,38 @@ async def test_live_wrapper_collects_real_graph_and_checks_exact_remote_root(arc
     else:
         assert report['errors']
         assert report['langsmith']['status'] != 'success'
+
+
+def test_explicit_formula_estimate_passes_with_quality_warning(archived_output):
+    from app.agent.tools.verified_maps import VerifiedPlace
+    from app.schemas.course import PlaceSchema
+    from app.services.course_routing import estimated_walking
+
+    request, result = archived_output
+    first, following = result['course']['itinerary']['days'][0]['stops'][:2]
+    following['place']['latitude'] = 37.551
+    route = estimated_walking(VerifiedPlace(PlaceSchema.model_validate(first['place'])), VerifiedPlace(PlaceSchema.model_validate(following['place'])))
+    first['transportToNext'] = route.model_dump()
+    report = validate(request, result)
+    assert report['passed']
+    assert any('추정' in warning for warning in report['warnings'])
+
+
+@pytest.mark.parametrize('invalid', ['arbitrary_time', 'too_far', 'transit'])
+def test_estimate_marker_does_not_accept_arbitrary_unverified_metrics(archived_output, invalid):
+    from app.agent.tools.verified_maps import VerifiedPlace
+    from app.schemas.course import PlaceSchema
+    from app.services.course_routing import estimated_walking
+
+    request, result = archived_output
+    first, following = result['course']['itinerary']['days'][0]['stops'][:2]
+    following['place']['latitude'] = 37.551
+    route = estimated_walking(VerifiedPlace(PlaceSchema.model_validate(first['place'])), VerifiedPlace(PlaceSchema.model_validate(following['place']))).model_dump()
+    if invalid == 'arbitrary_time':
+        route['minutes'] = 1
+    elif invalid == 'too_far':
+        following['place']['latitude'] = 37.60
+    else:
+        route['type'] = 'transit'
+    first['transportToNext'] = route
+    assert not validate(request, result)['passed']
