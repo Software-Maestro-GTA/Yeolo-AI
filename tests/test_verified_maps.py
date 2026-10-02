@@ -796,6 +796,44 @@ async def test_transit_uses_supplied_trip_departure_time():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(('mode', 'label', 'departure_supplied'), [
+    ('walking', '도보', False), ('transit', '대중교통', False),
+    ('transit', '대중교통', True), ('driving', '차량', True), ('taxi', '택시', False),
+])
+async def test_route_guidance_explains_provider_metrics_and_actual_departure_basis(mode, label, departure_supplied):
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from app.agent.tools.verified_maps import VerifiedMapsProvider, VerifiedPlace
+
+    bodies = []
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={'routes': [{'duration': '601s', 'distanceMeters': 1250}]})
+    origin = VerifiedPlace(PlaceSchema(placeId='origin', placeName='출발 장소', category='museum', latitude=35.67, longitude=139.76))
+    destination = VerifiedPlace(PlaceSchema(placeId='destination', placeName='다음 방문 장소', category='park', latitude=35.68, longitude=139.76))
+    departure = datetime(2026, 10, 5, 14, 25, tzinfo=timezone(timedelta(hours=9))) if departure_supplied else None
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await VerifiedMapsProvider(client=client, api_key='offline').route(origin, destination, mode=mode, departure_time=departure)
+    assert len(bodies) == 1
+    assert result.type == mode and result.distance == 1250 and result.minutes == 11
+    assert result.cost == (0 if mode == 'walking' else None)
+    assert destination.place.placeName in result.memo and label in result.memo
+    assert '11분' in result.memo
+    assert '1250m' in result.memo or '1,250m' in result.memo or '1.25km' in result.memo
+    assert not any(blanket in result.memo for blanket in ['재확인이 필요', '운행·혼잡·요금', '확정 운행', '승차장', '환승'])
+    if mode == 'transit' and departure_supplied:
+        assert 'departureTime' in bodies[0]
+        assert '2026-10-05' in result.memo and '14:25' in result.memo
+        assert any(zone in result.memo for zone in ['+09:00', 'UTC+9', 'UTC+09', 'KST'])
+        assert '예상' in result.memo
+    else:
+        assert 'departureTime' not in bodies[0]
+        assert '조회 시점' in result.memo
+        assert '14:25' not in result.memo
+
+
+@pytest.mark.asyncio
 async def test_transient_outage_is_bounded_and_fresh_call_can_recover():
     from app.agent.tools.verified_maps import (
         MapsProviderError,

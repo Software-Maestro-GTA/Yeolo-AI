@@ -617,5 +617,9 @@ class VerifiedMapsProvider:
         }, json=body)
         seconds, distance = _route_metrics(data)
         label = {'walking': '도보', 'transit': '대중교통', 'driving': '차량', 'taxi': '택시'}[mode]
-        timing = '여행일 출발 시각 기준' if mode == 'transit' and departure_time is not None else '조회 시점 기준'
-        return TransportToNextSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=f'{origin.place.placeName} → {destination.place.placeName}: {label}. {timing} 경로 예상치이며 여행일 운행·혼잡·요금은 재확인이 필요합니다.')
+        timing = '조회 시점 기준'
+        if mode == 'transit' and departure_time is not None:
+            timestamp = departure_time.isoformat(sep=' ', timespec='minutes')
+            timing = f'{timestamp[:16]} (UTC{timestamp[16:]}) 출발 기준'
+        minutes = math.ceil(seconds / 60)
+        return TransportToNextSchema(type=mode, distance=distance, minutes=minutes, cost=0 if mode == 'walking' else None, memo=f'{destination.place.placeName}까지 {label}로 약 {distance:g}m, 약 {minutes}분 이동하는 경로입니다. {timing} 예상 소요 시간입니다.')

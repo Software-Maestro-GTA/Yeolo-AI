@@ -42,7 +42,7 @@ def estimated_walking(origin: VerifiedPlace, destination: VerifiedPlace) -> Tran
         raise NoRouteError()
     minutes = math.ceil(distance / 1000 * 1.5 / 3 * 60 + 5)
     return TransportToNextSchema(type='walking', distance=None, minutes=minutes, cost=0,
-        memo=f'{ESTIMATE_MARKER} 직선거리 약 {round(distance)}m에 우회 계수 1.5, 보행 속도 3km/h, 여유 5분을 적용한 약 {minutes}분입니다. 실제 보행 경로·횡단 가능 여부·장애물은 미확인이므로 방문 전 지도에서 확인해 주세요.')
+        memo=f'{ESTIMATE_MARKER} {destination.place.placeName}까지 직선거리 약 {round(distance)}m를 바탕으로 도보 약 {minutes}분으로 예상했어요. 실제 보행 경로 안내는 포함되지 않으며, 횡단 가능 여부·장애물은 미확인입니다.')
 
 
 def is_estimated_walking(route: TransportToNextSchema) -> bool:
