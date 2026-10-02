@@ -15,6 +15,7 @@ from app.schemas.course import PlaceSchema, TransportToNextSchema
 from app.services.maps_cost import MapsCostMetrics, classify_maps_sku
 
 PLACE_DETAIL_FIELDS = 'id,displayName,formattedAddress,addressComponents,location,businessStatus,primaryType,types,rating,regularOpeningHours'
+TOKYO_CITY_ALIASES = frozenset({'도쿄', '도쿄도', '東京', '東京都', 'tokyo', 'tokyometropolis'})
 
 
 class MapsProviderError(ValueError):
@@ -127,8 +128,10 @@ def _normalized(value: str) -> str:
 
 
 def _city_name(value: str, country_code: str) -> str:
-    """Canonicalize one Korean city suffix without broadening venue matching."""
+    """Canonicalize explicit destination aliases without broadening venue names."""
     name = _normalized(value)
+    if country_code == 'JP' and name in TOKYO_CITY_ALIASES:
+        return 'tokyo'
     if country_code == 'KR':
         for suffix in ('특별자치시', '특별시', '광역시', '시'):
             if name.endswith(suffix) and len(name.removesuffix(suffix)) >= 2:
@@ -336,10 +339,12 @@ class VerifiedMapsProvider:
         for raw in city_data.get('places', []):
             if _country(raw.get('addressComponents', [])) != expected or not set(raw.get('types', [])) & {'locality', 'administrative_area_level_1', 'administrative_area_level_2', 'postal_town'}:
                 continue
+            if expected == 'JP' and _city_name(city, expected) == 'tokyo' and 'administrative_area_level_1' not in raw.get('types', []):
+                continue
             city_names = [raw.get('displayName', {}).get('text', '')]
-            # Parent locality components must not make a Korean district record
+            # Parent locality components must not make a Korean/Japanese district
             # look like the requested city; its own display name must match.
-            if expected != 'KR':
+            if expected not in {'KR', 'JP'}:
                 city_names.extend(component.get('longText', '') for component in raw.get('addressComponents', []) if set(component.get('types', [])) & {'locality', 'administrative_area_level_1', 'administrative_area_level_2', 'postal_town'})
             if not any(_city_name(city, expected) == _city_name(name, expected) for name in city_names):
                 continue

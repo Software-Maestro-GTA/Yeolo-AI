@@ -1308,3 +1308,63 @@ async def test_meal_discovery_uses_actual_meal_roles_and_visit_day_hours(request
     provider.discover_meals.assert_awaited_once()
     llm.assert_awaited_once()
     assert course.itinerary.days[0].stops[-1].place.category == 'restaurant'
+
+
+@pytest.mark.asyncio
+async def test_tokyo_real_destination_resolution_preserves_requested_name_in_complete(request_data, graph_dependencies, mocker):
+    """Run actual HTTP destination verification and LangGraph/SSE with fake paid boundaries."""
+    import json
+
+    import httpx
+
+    from app.agent.course_graph import DraftDay, stream_course_generation
+    from app.agent.tools.verified_maps import VerifiedMapsProvider, VerifiedPlace
+
+    provider, history, llm, draft, places = graph_dependencies
+    request_data.tripCondition.destinationCountry = '일본'
+    request_data.tripCondition.destinationCity = '도쿄'
+    request_data.tripCondition.startDate = '2026-10-17'
+    request_data.tripCondition.totalDays = 3
+    original_candidates = list(draft.days[0].candidates)
+    for number in (2, 3):
+        additions = []
+        for candidate in original_candidates:
+            addition = candidate.model_copy(update={'name': f'{candidate.name}-tokyo-{number}'})
+            additions.append(addition)
+            places[addition.name] = VerifiedPlace(places[candidate.name].place.model_copy(update={
+                'placeId': f'{places[candidate.name].place.placeId}-tokyo-{number}', 'placeName': addition.name,
+            }))
+        draft.days.append(DraftDay(candidates=additions))
+    for index, (name, venue) in enumerate(list(places.items())):
+        places[name] = VerifiedPlace(venue.place.model_copy(update={'latitude': 35.68 + index * .001, 'longitude': 139.76, 'address': '일본 도쿄'}))
+    country = {'longText': '일본', 'shortText': 'JP', 'types': ['country']}
+    tokyo = {
+        'id': 'ChIJ51cu8IcbXWARiRtXIothAS4', 'displayName': {'text': '도쿄도'},
+        'types': ['administrative_area_level_1', 'political'],
+        'addressComponents': [{'longText': '도쿄도', 'types': ['administrative_area_level_1']}, country],
+        'viewport': {'low': {'latitude': 34.5776326, 'longitude': 138.2991098}, 'high': {'latitude': 36.4408483, 'longitude': 141.2405144}},
+    }
+    destination_queries = []
+
+    def respond(request):
+        query = json.loads(request.content)['textQuery']
+        destination_queries.append(query)
+        return httpx.Response(200, json={'places': [{'addressComponents': [country]}] if query == '일본' else [tokyo]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        destination_provider = VerifiedMapsProvider(client=client, api_key='offline')
+        provider.resolve_destination.side_effect = destination_provider.resolve_destination
+        provider.__aenter__ = AsyncMock(return_value=provider)
+        provider.__aexit__ = AsyncMock(return_value=False)
+        mocker.patch('app.agent.course_graph.VerifiedMapsProvider', return_value=provider)
+        mocker.patch('app.agent.course_graph.CourseHistory', return_value=history)
+        events = [event async for event in stream_course_generation(request_data)]
+    complete = [data for event, data in events if event == 'complete']
+    assert len(complete) == 1
+    assert events[-1][0] == 'complete'
+    assert complete[0]['course']['destinationCity'] == '도쿄'
+    assert complete[0]['course']['destinationCountry'] == '일본'
+    assert complete[0]['course']['totalDays'] == 3
+    assert len(complete[0]['course']['itinerary']['days']) == 3
+    assert set(destination_queries) == {'일본', '도쿄, 일본'}
+    llm.assert_awaited_once()
