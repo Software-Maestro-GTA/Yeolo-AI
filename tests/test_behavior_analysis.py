@@ -180,11 +180,12 @@ async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload
         assert "tasteProfile" in complete_data
         
         profile = complete_data["tasteProfile"]
-        assert profile["travelPurpose"]["relaxation"] == 4
+        assert profile["travelPurpose"]["relaxation"] == 3
         assert profile["travelPaceDensity"] == "balanced"
         assert profile["spendingTendency"] == "moderate"
-        assert profile["companionType"] == "friends"
-        assert "warm_region" in profile["seasonalEnvironmentPreference"]
+        assert profile["companionType"] == "solo"  # Compatibility default, not observed companion.
+        assert "warm_region" not in profile["seasonalEnvironmentPreference"]
+        assert "analysisMetadata" in complete_data
 
 @pytest.mark.asyncio
 async def test_behavior_analysis_invalid_format(mock_env):

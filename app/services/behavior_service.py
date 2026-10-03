@@ -1,6 +1,6 @@
 import asyncio
+import json
 import logging
-from collections import Counter
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -14,52 +14,43 @@ from app.agent.taste_profile_chains import (
 )
 from app.schemas.behavior import BehaviorAnalysisRequest, BehaviorItemSchema
 from app.schemas.taste_profile import TasteProfileSchema
+from app.services.behavior_evidence import guard_taste_profile
+from app.services.behavior_statistics import build_behavior_statistics
 
 logger = logging.getLogger(__name__)
 
-def summarize_raw_metadata(items: list[BehaviorItemSchema]) -> str:
-    """수십~수백 개의 메타데이터 목록을 파이썬 규칙에 따라 1차 통계 축약 처리하여 텍스트 리포트로 생성합니다."""
-    total_count = len(items)
-    
-    # 1. 요일 통계
-    day_counter = Counter([item.timeContext.dayOfWeek for item in items])
-    weekend_count = sum(1 for item in items if item.timeContext.isWeekend)
-    weekday_count = total_count - weekend_count
-    
-    # 2. 시간대 통계
-    time_bucket_counter = Counter([item.timeContext.timeBucket for item in items])
-    
-    # 3. 계절 통계
-    season_counter = Counter([item.timeContext.season for item in items])
-    
-    # 4. 장소 및 장소 유형 통계
-    place_names = [item.location.placeName for item in items if item.location.placeName]
-    place_name_counter = Counter(place_names)
-    
-    place_types = []
-    for item in items:
-        place_types.extend(item.location.placeTypes)
-    place_type_counter = Counter(place_types)
-    
-    # 5. 자주 간 도시/지역 통계
-    cities = [item.location.city for item in items if item.location.city]
-    city_counter = Counter(cities)
-    
-    # 정량 통계 분석 리포트 마크다운 문서 생성
-    report_lines = [
-        f"- 분석된 총 사진 수: {total_count}장",
-        f"- 활동 요일 비율: 평일 {weekday_count}회 ({weekday_count/total_count*100:.1f}%), 주말 {weekend_count}회 ({weekend_count/total_count*100:.1f}%)",
-        "- 요일 분포: " + ", ".join([f"{k}({v}회)" for k, v in day_counter.most_common()]),
-        "- 시간대 분포: " + ", ".join([f"{k}({v}회)" for k, v in time_bucket_counter.most_common()]),
-        "- 계절 분포: " + ", ".join([f"{k}({v}회)" for k, v in season_counter.most_common()]),
-        "- 주요 방문 지역(도시): " + ", ".join([f"{k}({v}회)" for k, v in city_counter.most_common(5)]),
-        "- 가장 자주 방문한 장소명: " + ", ".join([f"{k}({v}회)" for k, v in place_name_counter.most_common(5)]),
-        "- 자주 노출된 장소 유형 카테고리: " + ", ".join([f"{k}({v}회)" for k, v in place_type_counter.most_common(10)])
-    ]
-    
-    return "\n".join(report_lines)
 
-async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGenerator[dict[str, Any]]:
+def summarize_raw_metadata(items: list[BehaviorItemSchema]) -> str:
+    """Return structured visit statistics JSON for compatibility with callers.
+
+    Args:
+        items: Preprocessed photo metadata.
+    Returns:
+        Deterministic JSON statistics, without user or photo identifiers.
+    """
+    return json.dumps(
+        build_behavior_statistics(items), ensure_ascii=False, sort_keys=True
+    )
+
+
+def _summary_text(content: Any) -> str:
+    """Accept provider text or text blocks, ignoring non-text content."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "\n".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ).strip()
+    return ""
+
+
+async def analyze_behavior_stream(
+    request: BehaviorAnalysisRequest,
+) -> AsyncGenerator[dict[str, Any]]:
     """위치 및 시간 데이터를 통계 축약하고 2단계 LLM 병렬 분석 파이프라인을 거쳐 Taste Profile을 생성 및 SSE 스트리밍으로 반환합니다.
 
     Args:
@@ -69,60 +60,107 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
         Dict[str, Any]: SSE 스트림 이벤트 데이터 (progress 및 complete).
 
     Raises:
-        HTTPException: 입력 메타데이터 개수가 0개이거나 부족한 경우 400 에러 발생.
+        HTTPException: 유효한 장소·timezone 촬영 시각 데이터가 없으면 400 에러 발생.
     """
     # 1. 예외 처리: 입력 메타데이터 목록이 비어 있거나 부족한 경우
     if not request.items:
-        logger.warning(f"[behavior_service] Empty items list for userId={request.userId}")
+        logger.warning(
+            f"[behavior_service] Empty items list for userId={request.userId}"
+        )
         raise HTTPException(
-            status_code=400,
-            detail="분석 가능한 전처리 메타데이터가 부족합니다."
+            status_code=400, detail="분석 가능한 전처리 메타데이터가 부족합니다."
         )
 
-    logger.info(f"[behavior_service] Starting behavior analysis stream for userId={request.userId}")
+    statistics = build_behavior_statistics(request.items)
+    if not statistics["validPhotoCount"]:
+        raise HTTPException(
+            status_code=400, detail="분석 가능한 위치·촬영 시각 메타데이터가 없습니다."
+        )
+
+    logger.info(
+        f"[behavior_service] Starting behavior analysis stream for userId={request.userId}"
+    )
 
     # 1차 진행 상황 반환
     yield {
         "event": "progress",
         "data": {
             "step": "ANALYZING_PREFERENCE",
-            "message": "위치·시간 패턴으로 여행 성향을 분석 중입니다."
-        }
+            "message": "위치·시간 패턴으로 여행 성향을 분석 중입니다.",
+        },
     }
 
     # 2. 1단계: 파이썬 기반 데이터 축약 및 정성적 특징 요약
-    logger.info(f"[behavior_service] Summarizing raw metadata for userId={request.userId} ({len(request.items)} items)")
-    statistics_report = summarize_raw_metadata(request.items)
-    
+    logger.info(
+        f"[behavior_service] Summarizing raw metadata for userId={request.userId} ({len(request.items)} items)"
+    )
+    statistics_report = json.dumps(statistics, ensure_ascii=False, sort_keys=True)
+
     try:
-        logger.info(f"[behavior_service] Stage 1 LLM invoke (summarize_chain) for userId={request.userId}")
-        fact_sheet_response = await summarize_chain.ainvoke({"statistics_report": statistics_report})
-        fact_sheet = fact_sheet_response.content
-        logger.info(f"[behavior_service] Stage 1 LLM invoke completed for userId={request.userId}")
-    except Exception as e:
-        logger.exception(f"[behavior_service] Stage 1 LLM error for userId={request.userId}")
-        raise HTTPException(status_code=500, detail=f"1단계 요약본 생성 중 AI 엔진 오류 발생: {e!s}")
+        logger.info(
+            f"[behavior_service] Stage 1 LLM invoke (summarize_chain) for userId={request.userId}"
+        )
+        fact_sheet_response = await summarize_chain.ainvoke(
+            {"statistics_report": statistics_report}
+        )
+        fact_sheet = (
+            _summary_text(fact_sheet_response.content)
+            or "요약이 없어 구조화 방문 통계를 직접 사용합니다."
+        )
+        logger.info(
+            f"[behavior_service] Stage 1 LLM invoke completed for userId={request.userId}"
+        )
+    except Exception:  # noqa: BLE001 -- optional provider summary must not abort scoring
+        logger.warning("Behavior summary unavailable; continuing from visit statistics")
+        fact_sheet = "요약이 없어 구조화 방문 통계를 직접 사용합니다."
 
     # 3. 2단계: 도메인별 병렬 채점 (asyncio.gather 활용 병렬 구동)
     try:
-        logger.info(f"[behavior_service] Stage 2 parallel LLM chains invoke for userId={request.userId}")
-        purpose_pace_result, location_env_result, activity_food_result = await asyncio.gather(
-            purpose_pace_companion_chain.ainvoke({"fact_sheet": fact_sheet}),
-            location_environment_chain.ainvoke({"fact_sheet": fact_sheet}),
-            activity_food_spending_chain.ainvoke({"fact_sheet": fact_sheet})
+        logger.info(
+            f"[behavior_service] Stage 2 parallel LLM chains invoke for userId={request.userId}"
         )
-        logger.info(f"[behavior_service] Stage 2 parallel LLM chains completed for userId={request.userId}")
+        (
+            purpose_pace_result,
+            location_env_result,
+            activity_food_result,
+        ) = await asyncio.gather(
+            purpose_pace_companion_chain.ainvoke(
+                {"fact_sheet": fact_sheet, "statistics_report": statistics_report}
+            ),
+            location_environment_chain.ainvoke(
+                {"fact_sheet": fact_sheet, "statistics_report": statistics_report}
+            ),
+            activity_food_spending_chain.ainvoke(
+                {"fact_sheet": fact_sheet, "statistics_report": statistics_report}
+            ),
+        )
+        logger.info(
+            f"[behavior_service] Stage 2 parallel LLM chains completed for userId={request.userId}"
+        )
     except Exception as e:
-        logger.exception(f"[behavior_service] Stage 2 LLM error for userId={request.userId}")
-        raise HTTPException(status_code=500, detail=f"2단계 도메인 병렬 채점 중 AI 엔진 오류 발생: {e!s}")
+        logger.exception(
+            f"[behavior_service] Stage 2 LLM error for userId={request.userId}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"2단계 도메인 병렬 채점 중 AI 엔진 오류 발생: {e!s}",
+        )
 
     # 4. 결과 취합 및 데이터 변환 (Structured Output 가공)
     # location_environment_chain의 Boolean 결과 중 True인 키값들만 추려 seasonalEnvironmentPreference 목록 구성
     seasonal_keys = [
-        "warm_region", "cold_region", "summer_resort", "winter_sports",
-        "spring_flower_autumn_foliage", "dry_weather", "off_season", "peak_season"
+        "warm_region",
+        "cold_region",
+        "summer_resort",
+        "winter_sports",
+        "spring_flower_autumn_foliage",
+        "dry_weather",
+        "off_season",
+        "peak_season",
     ]
-    seasonal_preferences = [key for key in seasonal_keys if getattr(location_env_result, key, False)]
+    seasonal_preferences = [
+        key for key in seasonal_keys if getattr(location_env_result, key, False)
+    ]
 
     # TasteProfileSchema에 맞게 각 컴포넌트 조립
     taste_profile = TasteProfileSchema(
@@ -136,7 +174,7 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
             "shopping": purpose_pace_result.shopping,
             "festivalEvent": purpose_pace_result.festivalEvent,
             "wellness": purpose_pace_result.wellness,
-            "selfDevelopment": purpose_pace_result.selfDevelopment
+            "selfDevelopment": purpose_pace_result.selfDevelopment,
         },
         travelPaceDensity=purpose_pace_result.travelPaceDensity,
         preferredLocationType={
@@ -148,7 +186,7 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
             "historicalCity": location_env_result.historicalCity,
             "themeParkResort": location_env_result.themeParkResort,
             "famousSpotPreferred": location_env_result.famousSpotPreferred,
-            "hiddenSpotPreferred": location_env_result.hiddenSpotPreferred
+            "hiddenSpotPreferred": location_env_result.hiddenSpotPreferred,
         },
         activityPreference={
             "viewing": activity_food_result.viewing,
@@ -159,7 +197,7 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
             "nightlife": activity_food_result.nightlife,
             "shopping": activity_food_result.shopping,
             "relaxation": activity_food_result.relaxation,
-            "localInteraction": activity_food_result.localInteraction
+            "localInteraction": activity_food_result.localInteraction,
         },
         spendingTendency=activity_food_result.spendingTendency,
         companionType=purpose_pace_result.companionType,
@@ -171,15 +209,18 @@ async def analyze_behavior_stream(request: BehaviorAnalysisRequest) -> AsyncGene
             "fineDining": activity_food_result.fineDining,
             "familiarFoodPreferred": activity_food_result.familiarFoodPreferred,
             "dietaryRestriction": activity_food_result.dietaryRestriction,
-            "sightseeingOverFood": activity_food_result.sightseeingOverFood
+            "sightseeingOverFood": activity_food_result.sightseeingOverFood,
         },
-        seasonalEnvironmentPreference=seasonal_preferences
+        seasonalEnvironmentPreference=seasonal_preferences,
     )
+
+    taste_profile, analysis_metadata = guard_taste_profile(taste_profile, statistics)
 
     # 최종 조립 결과 스트림 반환
     yield {
         "event": "complete",
         "data": {
-            "tasteProfile": taste_profile.model_dump()
-        }
+            "tasteProfile": taste_profile.model_dump(),
+            "analysisMetadata": analysis_metadata.model_dump(),
+        },
     }
