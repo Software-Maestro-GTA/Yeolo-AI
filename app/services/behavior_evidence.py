@@ -75,6 +75,7 @@ FIELD_TYPES: dict[str, set[str]] = {
 ENVIRONMENT_TYPES = {
     "summer_resort": ({"beach", "resort_hotel"}, {"summer"}),
     "winter_sports": ({"ski_resort"}, {"winter"}),
+    "spring_flower_autumn_foliage": ({"botanical_garden"}, {"spring", "autumn"}),
 }
 COMPATIBILITY_DEFAULTS = {
     "companionType": "solo",
@@ -142,32 +143,66 @@ def guard_taste_profile(
         fallbacks.append(path)
         confirmations.append(path)
 
-    allowed = []
-    for key in (
-        "warm_region",
-        "cold_region",
-        "summer_resort",
-        "winter_sports",
-        "spring_flower_autumn_foliage",
-        "dry_weather",
-        "off_season",
-        "peak_season",
-    ):
+    seasonal_keys = (
+        "warm_region", "cold_region", "summer_resort", "winter_sports",
+        "spring_flower_autumn_foliage", "dry_weather", "off_season", "peak_season",
+    )
+    for key in seasonal_keys:
         path = f"seasonalEnvironmentPreference.{key}"
-        item_evidence = evidence(path)
-        fields[path] = item_evidence
-        if (
-            not item_evidence.insufficientEvidence
-            and key in result["seasonalEnvironmentPreference"]
-        ):
-            allowed.append(key)
-        elif item_evidence.insufficientEvidence:
+        fields[path] = evidence(path)
+        if fields[path].insufficientEvidence:
             fallbacks.append(path)
             confirmations.append(path)
-    result["seasonalEnvironmentPreference"] = allowed
+
+    # Model choices do not determine evidence support or the minimum UI selection.
+    strong = [
+        key for key in ENVIRONMENT_TYPES
+        if not fields[f"seasonalEnvironmentPreference.{key}"].insufficientEvidence
+    ]
+    weak = [
+        key for key in ENVIRONMENT_TYPES
+        if visits.get(f"seasonalEnvironmentPreference.{key}", 0) > 0
+    ]
+    if strong:
+        selected = strong
+        selection_reason = "Repeated seasonal activity observed on at least 3 visits and 2 days."
+    elif weak:
+        selected = [max(
+            weak,
+            key=lambda key: (
+                visits.get(f"seasonalEnvironmentPreference.{key}", 0),
+                days.get(f"seasonalEnvironmentPreference.{key}", 0),
+                -seasonal_keys.index(key),
+            ),
+        )]
+        selection_reason = "Provisional activity choice; observations do not meet repetition threshold."
+    else:
+        seasons = statistics.get("distributions", {}).get("season", {})
+        # Fixed order also supplies a deterministic UI placeholder for defensive callers.
+        season = max(("spring", "summer", "autumn", "winter"), key=lambda key: seasons.get(key, 0))
+        selected = [{
+            "spring": "spring_flower_autumn_foliage",
+            "summer": "warm_region",
+            "autumn": "spring_flower_autumn_foliage",
+            "winter": "cold_region",
+        }[season]]
+        selection_reason = "UI placeholder from dominant capture season; climate or activity preference is unconfirmed."
+        selected_evidence = fields[f"seasonalEnvironmentPreference.{selected[0]}"]
+        selected_evidence.evidence.update(
+            selectedSeason=season,
+            seasonVisitCount=seasons.get(season, 0),
+            seasonDistribution=seasons,
+        )
+
+    for key in selected:
+        field = fields[f"seasonalEnvironmentPreference.{key}"]
+        field.evidence["selectionReason"] = selection_reason
+        if field.insufficientEvidence:
+            field.evidence["fallbackReason"] = selection_reason
+    result["seasonalEnvironmentPreference"] = selected
     return TasteProfileSchema.model_validate(result), AnalysisMetadataSchema(
         statistics=statistics,
         fieldEvidence=fields,
-        fallbackFields=sorted(fallbacks),
-        requiresUserConfirmation=sorted(confirmations),
+        fallbackFields=sorted(set(fallbacks)),
+        requiresUserConfirmation=sorted(set(confirmations)),
     )
