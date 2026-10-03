@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -65,8 +65,26 @@ class TasteProfileSchema(BaseModel):
         ]
     ] = Field(default_factory=list, description="계절/환경 취향")
 
+class FieldEvidenceSchema(BaseModel):
+    """항목별 관측 근거와 휴리스틱 신뢰도. 확률로 해석하지 않습니다."""
+
+    evidence: dict[str, Any] = Field(default_factory=dict, description="관측 방문 수 또는 근거 부족 이유")
+    confidence: Literal["low", "medium"] = Field(..., description="검증되지 않은 근거 강도")
+    insufficientEvidence: bool = Field(..., description="사용자 확인이 필요한 근거 부족 여부")
+
+
+class AnalysisMetadataSchema(BaseModel):
+    """취향 결과의 통계와 기본값을 구분하는 추가 메타데이터."""
+
+    statistics: dict[str, Any] = Field(..., description="방문 기반 통계 및 표본 충분성")
+    fieldEvidence: dict[str, FieldEvidenceSchema] = Field(..., description="프로필 경로별 근거")
+    fallbackFields: list[str] = Field(default_factory=list, description="중립값 또는 호환용 기본값을 적용한 경로")
+    requiresUserConfirmation: list[str] = Field(default_factory=list, description="확정 취향으로 사용하기 전에 확인할 경로")
+
+
 class BehaviorAnalysisResponse(BaseModel):
     tasteProfile: TasteProfileSchema = Field(..., description="조립된 성향 프로필 결과")
+    analysisMetadata: AnalysisMetadataSchema = Field(..., description="분석 근거 및 사용자 확인 대상")
 
 # ----------------- 2. LLM 병렬 채점 체인용 Pydantic Outputs -----------------
 
