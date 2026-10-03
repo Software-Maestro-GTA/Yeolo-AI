@@ -1,0 +1,840 @@
+{
+  "userId": "550e8400-e29b-41d4-a716-446655440000",
+  "items": [
+    {
+      "sourceImageId": "cafe-0",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:00:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-1",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 1",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-02T10:00:00+09:00",
+        "dayOfWeek": "thu",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-2",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 2",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-03T10:00:00+09:00",
+        "dayOfWeek": "fri",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-3",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 3",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-04T10:00:00+09:00",
+        "dayOfWeek": "sat",
+        "isWeekend": true,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-4",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 4",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-05T10:00:00+09:00",
+        "dayOfWeek": "sun",
+        "isWeekend": true,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-5",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 5",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-06T10:00:00+09:00",
+        "dayOfWeek": "mon",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-6",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 6",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-07T10:00:00+09:00",
+        "dayOfWeek": "tue",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-7",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 7",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-08T10:00:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-8",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 8",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-09T10:00:00+09:00",
+        "dayOfWeek": "thu",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-9",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 9",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-10T10:00:00+09:00",
+        "dayOfWeek": "fri",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-10",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 10",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-11T10:00:00+09:00",
+        "dayOfWeek": "sat",
+        "isWeekend": true,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-11",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 11",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-12T10:00:00+09:00",
+        "dayOfWeek": "sun",
+        "isWeekend": true,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "park-0",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Park 0",
+        "placeTypes": [
+          "park"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:00:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "park-1",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Park 1",
+        "placeTypes": [
+          "park"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-02T10:00:00+09:00",
+        "dayOfWeek": "thu",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "park-2",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Park 2",
+        "placeTypes": [
+          "park"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-03T10:00:00+09:00",
+        "dayOfWeek": "fri",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "park-3",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Park 3",
+        "placeTypes": [
+          "park"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-04T10:00:00+09:00",
+        "dayOfWeek": "sat",
+        "isWeekend": true,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "park-4",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Park 4",
+        "placeTypes": [
+          "park"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-05T10:00:00+09:00",
+        "dayOfWeek": "sun",
+        "isWeekend": true,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-0",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:00:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-1",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:01:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-2",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:02:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-3",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:03:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-4",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:04:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-5",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:05:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-6",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:06:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-7",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:07:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-8",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:08:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-9",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:09:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-10",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:10:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-11",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:11:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-12",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:12:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-13",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:13:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-14",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:14:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-15",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:15:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-16",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:16:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-17",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:17:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-18",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:18:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "burst-19",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:19:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-0",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:00:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-0",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:00:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    },
+    {
+      "sourceImageId": "cafe-0",
+      "location": {
+        "country": "South Korea",
+        "city": "Seoul",
+        "region": "Mapo-gu",
+        "district": "Yeonnam-dong",
+        "placeName": "Synthetic Cafe 0",
+        "placeTypes": [
+          "cafe",
+          "food"
+        ]
+      },
+      "timeContext": {
+        "capturedAt": "2026-07-01T10:00:00+09:00",
+        "dayOfWeek": "wed",
+        "isWeekend": false,
+        "timeBucket": "morning",
+        "season": "summer"
+      }
+    }
+  ]
+}
