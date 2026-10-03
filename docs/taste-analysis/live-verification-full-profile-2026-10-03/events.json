@@ -1,0 +1,68 @@
+[
+  {
+    "event": "progress",
+    "data": {
+      "step": "ANALYZING_PREFERENCE",
+      "message": "위치·시간 패턴으로 여행 성향을 분석 중입니다."
+    }
+  },
+  {
+    "event": "complete",
+    "data": {
+      "tasteProfile": {
+        "travelPurpose": {
+          "relaxation": 4,
+          "sightseeing": 4,
+          "culturalExperience": 4,
+          "gourmet": 5,
+          "natureExploration": 4,
+          "activity": 4,
+          "shopping": 4,
+          "festivalEvent": 3,
+          "wellness": 4,
+          "selfDevelopment": 3
+        },
+        "travelPaceDensity": "balanced",
+        "preferredLocationType": {
+          "bigCity": 3,
+          "smallTownAlley": 3,
+          "natureHinterland": 3,
+          "beachResort": 4,
+          "mountainPlateau": 4,
+          "historicalCity": 3,
+          "themeParkResort": 3,
+          "famousSpotPreferred": 3,
+          "hiddenSpotPreferred": 3
+        },
+        "activityPreference": {
+          "viewing": 4,
+          "experience": 3,
+          "adventure": 4,
+          "photographyVideo": 3,
+          "gourmetExploration": 5,
+          "nightlife": 4,
+          "shopping": 4,
+          "relaxation": 4,
+          "localInteraction": 3
+        },
+        "spendingTendency": "moderate",
+        "companionType": "solo",
+        "foodPreference": {
+          "localFoodActive": 3,
+          "famousRestaurantCentered": 3,
+          "streetFood": 3,
+          "cafeDessert": 5,
+          "fineDining": 3,
+          "familiarFoodPreferred": 3,
+          "dietaryRestriction": 3,
+          "sightseeingOverFood": 3
+        },
+        "seasonalEnvironmentPreference": [
+          "summer_resort",
+          "winter_sports",
+          "spring_flower_autumn_foliage"
+        ]
+      }
+    }
+  }
+]
