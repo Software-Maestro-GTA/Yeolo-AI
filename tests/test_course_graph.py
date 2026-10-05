@@ -1190,6 +1190,137 @@ async def test_nearby_route_transient_exhaustion_can_use_disclosed_formula_estim
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['no_route', 'route_data', 'transient'])
+async def test_transit_analysis_failure_tries_real_walk_before_formula_or_redraft(request_data, graph_dependencies, failure):
+    from collections import Counter
+
+    from app.agent.course_graph import build_course_graph
+    from app.agent.tools.verified_maps import (
+        MapsProviderError,
+        NoRouteError,
+        VerifiedPlace,
+    )
+    from app.services.course_routing import distance_meters
+
+    provider, history, llm, _, places = graph_dependencies
+    for index, (name, venue) in enumerate(list(places.items())):
+        places[name] = VerifiedPlace(venue.place.model_copy(update={'latitude': 37.55 + index * .01}), periods=venue.periods)
+    queried = []
+
+    async def route(origin, destination, mode='walking', departure_time=None):
+        queried.append((origin, destination, mode, departure_time))
+        if mode == 'transit':
+            raise NoRouteError() if failure == 'no_route' else MapsProviderError(kind=failure)
+        assert departure_time is None
+        assert distance_meters(origin, destination) <= 3000
+        return TransportToNextSchema(type='walking', distance=1500, minutes=20, cost=0, memo='세종대로에서 오른쪽으로 이동하세요')
+
+    provider.route.side_effect = route
+    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
+    assert len(course.itinerary.days[0].stops) == 5
+    assert all(stop.transportToNext.distance == 1500 for stop in course.itinerary.days[0].stops[:-1])
+    assert all('[추정 도보]' not in stop.transportToNext.memo for stop in course.itinerary.days[0].stops[:-1])
+    walks = [(left.place.placeId, right.place.placeId) for left, right, mode, _ in queried if mode == 'walking']
+    assert len(walks) == 4 and max(Counter(walks).values()) == 1
+    assert any(distance_meters(left, right) > 1000 for left, right, mode, _ in queried if mode == 'walking')
+    llm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_real_walk_over_duration_cap_is_not_replaced_by_optimistic_formula(request_data, graph_dependencies):
+    from app.agent.course_graph import build_course_graph
+    from app.agent.tools.verified_maps import NoRouteError
+    from app.services.course_history import history_key
+
+    provider, history, llm, _, _ = graph_dependencies
+
+    async def route(origin, destination, mode='walking', departure_time=None):
+        if mode == 'transit':
+            raise NoRouteError()
+        return TransportToNextSchema(type='walking', distance=900, minutes=91, cost=0)
+
+    provider.route.side_effect = route
+    with pytest.raises(ValueError):
+        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
+    assert llm.await_count <= 2
+    assert await history.recent(history_key(request_data)) == []
+    assert any(call.kwargs['mode'] == 'walking' for call in provider.route.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_route_cancellation_still_propagates_without_history_or_redraft(request_data, graph_dependencies):
+    from app.agent.course_graph import build_course_graph
+    from app.services.course_history import history_key
+
+    provider, history, llm, _, _ = graph_dependencies
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def blocking_route(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+
+    provider.route.side_effect = blocking_route
+    task = asyncio.create_task(build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert cleaned.is_set()
+    llm.assert_awaited_once()
+    provider.route.assert_awaited_once()
+    assert await history.recent(history_key(request_data)) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('formatter_raises', [False, True])
+async def test_optional_navigation_failure_still_completes_actual_graph_and_sse(request_data, graph_dependencies, mocker, formatter_raises):
+    import httpx
+
+    from app.agent.course_graph import build_course_graph, stream_course_generation
+    from app.agent.tools.verified_maps import VerifiedMapsProvider
+
+    provider, history, llm, _, _ = graph_dependencies
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={'routes': [{
+            'duration': '720s', 'distanceMeters': 700,
+            'legs': [{'steps': [None, {'travelMode': 'TRANSIT', 'transitDetails': {'stopDetails': 42}}]}],
+        }]})
+
+    if formatter_raises:
+        mocker.patch('app.agent.tools.verified_maps.format_route_guidance', side_effect=RuntimeError('optional formatter failed'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        actual_provider = VerifiedMapsProvider(client=client, api_key='offline')
+        provider.route.side_effect = actual_provider.route
+        graph = build_course_graph(provider, history)
+        provider.__aenter__ = AsyncMock(return_value=provider)
+        provider.__aexit__ = AsyncMock(return_value=False)
+        mocker.patch('app.agent.course_graph.VerifiedMapsProvider', return_value=provider)
+        mocker.patch('app.agent.course_graph.CourseHistory', return_value=history)
+        mocker.patch('app.agent.course_graph.build_course_graph', return_value=graph)
+        events = [event async for event in stream_course_generation(request_data)]
+    completed = [data for event, data in events if event == 'complete']
+    assert len(completed) == 1 and events[-1][0] == 'complete'
+    stops = completed[0]['course']['itinerary']['days'][0]['stops']
+    assert len(stops) == 5
+    assert all(stop['transportToNext']['minutes'] == 12 and stop['transportToNext']['distance'] == 700 for stop in stops[:-1])
+    assert all('optional formatter failed' not in (stop['transportToNext']['memo'] or '') for stop in stops)
+    assert len(calls) == 4
+    llm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_same_temporary_route_failure_is_deduplicated_per_stage_and_retried_next_draft(request_data, graph_dependencies):
     from collections import Counter
 

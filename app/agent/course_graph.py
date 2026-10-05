@@ -26,7 +26,6 @@ from app.agent.prompts import COURSE_CANDIDATE_PROMPT
 from app.agent.tools.verified_maps import (
     Destination,
     MapsProviderError,
-    NoRouteError,
     VerifiedMapsProvider,
     VerifiedPlace,
     individual_place_category_supported,
@@ -550,47 +549,56 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         # Share one failed lookup within this validation pass only. A fresh draft
         # can retry a transient edge; failures never enter the successful cache.
         pass_failures: dict[tuple, MapsProviderError] = {}
-        def route_key(left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None) -> tuple:
-            mode = 'transit' if state['destination'].country_code == 'KR' or _distance(left, right) > 1500 else 'walking'
+        def route_key(left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None, mode: str | None = None) -> tuple:
+            mode = mode or ('transit' if state['destination'].country_code == 'KR' or _distance(left, right) > 1500 else 'walking')
             return (left.place.placeId, right.place.placeId, mode, departure.isoformat() if departure and mode == 'transit' else None)
 
-        async def fetch_route(left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None) -> TransportToNextSchema:
-            key = route_key(left, right, departure)
-            mode = key[2]
+        async def actual_route(left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None, mode: str) -> TransportToNextSchema:
+            """Share successful and failed actual mode lookups within their bounds."""
+            key = route_key(left, right, departure, mode)
             if key in cache:
                 return cache[key]
+            if key in pass_failures:
+                raise pass_failures[key]
             try:
                 route = await provider.route(left, right, mode=mode, departure_time=departure if mode == 'transit' else None)
-            except (NoRouteError, MapsProviderError) as error:
-                if not isinstance(error, NoRouteError) and not error.transient:
-                    raise
-                # Missing walking coverage can still have a real transit route.
-                if mode == 'walking' and isinstance(error, NoRouteError):
-                    try:
-                        route = await provider.route(left, right, mode='transit', departure_time=departure)
-                    except (NoRouteError, MapsProviderError) as transit_error:
-                        if not isinstance(transit_error, NoRouteError) and not transit_error.transient:
-                            raise
-                        if _distance(left, right) > 1000:
-                            raise
-                        route = estimated_walking(left, right)
-                else:
-                    if _distance(left, right) > 1000:
-                        raise
-                    route = estimated_walking(left, right)
+            except MapsProviderError as error:
+                pass_failures[key] = error
+                raise
             if valid_route(route, left, right):
                 cache[key] = route
             return route
 
         async def lookup(left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None) -> TransportToNextSchema:
             key = route_key(left, right, departure)
-            if key in pass_failures:
-                raise pass_failures[key]
+            mode = key[2]
+            if key in cache:
+                return cache[key]
             try:
-                return await fetch_route(left, right, departure)
+                return await actual_route(left, right, departure, mode)
             except MapsProviderError as error:
-                pass_failures[key] = error
-                raise
+                if error.kind not in {'no_route', 'route_data', 'transient'}:
+                    raise
+                alternative = None
+                if mode == 'transit' and _distance(left, right) <= 3000:
+                    alternative = 'walking'
+                elif mode == 'walking' and error.kind in {'no_route', 'route_data'}:
+                    alternative = 'transit'
+                if alternative:
+                    try:
+                        # A valid but overlong route must remain a failed plan;
+                        # its successful response cannot become a short estimate.
+                        return await actual_route(left, right, departure, alternative)
+                    except MapsProviderError as alternative_error:
+                        if alternative_error.kind not in {'no_route', 'route_data', 'transient'}:
+                            raise
+                        if _distance(left, right) > 1000:
+                            raise
+                if _distance(left, right) > 1000:
+                    raise
+                route = estimated_walking(left, right)
+                cache[key] = route
+                return route
 
         for index, plans in enumerate(state['day_plans']):
             if index in validated or not plans:
