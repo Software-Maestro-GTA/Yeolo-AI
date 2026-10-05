@@ -11,6 +11,8 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
+from app.services.route_guidance import ROUTE_GUIDANCE_FIELDS, ROUTE_METRIC_FIELDS
+
 PRICING_DATE = '2026-10-02'
 UNIT_PRICES_USD = {
     'text_search_ids': 0.0,
@@ -55,7 +57,7 @@ def classify_maps_sku(method: str, url: str, options: dict[str, Any]) -> str:
             return 'place_details_enterprise'
     if endpoint.netloc == 'routes.googleapis.com' and endpoint.path == '/directions/v2:computeRoutes' and method == 'POST':
         body = options.get('json', {})
-        if fields == {'routes.duration', 'routes.distanceMeters'} and set(body) <= {'origin', 'destination', 'travelMode', 'departureTime'} and body.get('travelMode') in {'WALK', 'TRANSIT', 'DRIVE'}:
+        if fields in (ROUTE_METRIC_FIELDS, ROUTE_METRIC_FIELDS | ROUTE_GUIDANCE_FIELDS) and set(body) <= {'origin', 'destination', 'travelMode', 'departureTime', 'languageCode'} and body.get('travelMode') in {'WALK', 'TRANSIT', 'DRIVE'} and ('languageCode' not in body or body['languageCode'] == 'ko'):
             return 'routes_essentials'
     return 'unknown'
 
