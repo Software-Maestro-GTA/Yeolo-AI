@@ -20,6 +20,12 @@ from app.schemas.course import (
     TransportToNextSchema,
 )
 from app.services.maps_cost import MapsCostMetrics, classify_maps_sku
+from app.services.route_guidance import (
+    MAX_MEMO_LENGTH,
+    ROUTE_FIELD_MASK,
+    fallback_route_guidance,
+    format_route_guidance,
+)
 
 PLACE_DETAIL_FIELDS = 'id,displayName,formattedAddress,addressComponents,location,businessStatus,primaryType,types,rating,regularOpeningHours'
 
@@ -29,11 +35,12 @@ class MapsProviderError(ValueError):
 
     Args:
         kind: Transient outage, authorization failure, invalid response/request,
-            or a valid response that supplies no route.
+            or a valid response that supplies no route. ``route_data`` means
+            unusable route facts and permits safe alternatives, unlike config errors.
         status_code: HTTP status when available; provider text is never retained.
     """
 
-    def __init__(self, kind: Literal['transient', 'unauthorized', 'invalid', 'no_route'], status_code: int | None = None) -> None:
+    def __init__(self, kind: Literal['transient', 'unauthorized', 'invalid', 'no_route', 'route_data'], status_code: int | None = None) -> None:
         self.kind = kind
         self.status_code = status_code
         super().__init__(f'Maps provider {kind} failure')
@@ -52,10 +59,10 @@ class NoRouteError(MapsProviderError):
 
 
 def _route_metrics(data: dict) -> tuple[float, float]:
-    """Validate actual route metrics; distinguish no route from malformed facts."""
+    """Validate actual route facts, separate from configuration and optional steps."""
     routes = data.get('routes', [])
     if not isinstance(routes, list):
-        raise MapsProviderError('invalid')
+        raise MapsProviderError('route_data')
     if not routes:
         raise NoRouteError()
     try:
@@ -63,13 +70,13 @@ def _route_metrics(data: dict) -> tuple[float, float]:
         duration = raw['duration']
         distance_raw = raw['distanceMeters']
         if not isinstance(duration, str) or not re.fullmatch(r'\d+(?:\.\d+)?s', duration) or isinstance(distance_raw, bool) or not isinstance(distance_raw, (int, float)):
-            raise MapsProviderError('invalid')
+            raise MapsProviderError('route_data')
         seconds, distance = float(duration[:-1]), float(distance_raw)
         if not math.isfinite(seconds) or not math.isfinite(distance) or seconds <= 0 or distance <= 0:
-            raise MapsProviderError('invalid')
+            raise MapsProviderError('route_data')
         return seconds, distance
     except (KeyError, IndexError, TypeError, OverflowError):
-        raise MapsProviderError('invalid') from None
+        raise MapsProviderError('route_data') from None
 
 
 def _cacheable_response(data: dict, url: str, options: dict[str, Any]) -> bool:
@@ -381,9 +388,16 @@ class VerifiedMapsProvider:
                             raise MapsProviderError('transient', status)
                         if status >= 400 or status < 200 or status >= 300:
                             raise MapsProviderError('invalid', status)
-                        data = response.json()
-                        if not isinstance(data, dict) or data.get('error'):
+                        try:
+                            data = response.json()
+                        except ValueError:
+                            kind = 'route_data' if url.endswith(':computeRoutes') else 'invalid'
+                            raise MapsProviderError(kind, status) from None
+                        if isinstance(data, dict) and 'error' in data:
                             raise MapsProviderError('invalid', status)
+                        if not isinstance(data, dict):
+                            kind = 'route_data' if url.endswith(':computeRoutes') else 'invalid'
+                            raise MapsProviderError(kind, status)
                         cacheable = use_cache and _cacheable_response(data, url, kwargs)
                 except asyncio.CancelledError:
                     if sent:
@@ -603,7 +617,7 @@ class VerifiedMapsProvider:
             mode: Existing public transport type.
             departure_time: Aware travel-date timestamp for transit, if known.
         Returns:
-            Actual provider distance and rounded-up duration, with a caveat.
+            Actual provider metrics and optional, sanitized navigation guidance.
         Raises:
             NoRouteError: Valid provider response supplies no route.
             MapsProviderError: Authorization, request, response, or outage error.
@@ -611,20 +625,22 @@ class VerifiedMapsProvider:
         modes = {'walking': 'WALK', 'transit': 'TRANSIT', 'driving': 'DRIVE', 'taxi': 'DRIVE'}
         if mode not in modes:
             raise MapsProviderError('invalid')
-        body = {'origin': {'placeId': origin.place.placeId.removeprefix('places/')}, 'destination': {'placeId': destination.place.placeId.removeprefix('places/')}, 'travelMode': modes[mode]}
+        body = {'origin': {'placeId': origin.place.placeId.removeprefix('places/')}, 'destination': {'placeId': destination.place.placeId.removeprefix('places/')}, 'travelMode': modes[mode], 'languageCode': 'ko'}
         if departure_time is not None:
             if departure_time.tzinfo is None or departure_time.utcoffset() is None:
                 raise MapsProviderError('invalid')
             if mode == 'transit':
                 body['departureTime'] = departure_time.astimezone(UTC).isoformat().replace('+00:00', 'Z')
         data = await self._request('POST', 'https://routes.googleapis.com/directions/v2:computeRoutes', headers={
-            'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': 'routes.duration,routes.distanceMeters',
+            'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': ROUTE_FIELD_MASK,
         }, json=body)
         seconds, distance = _route_metrics(data)
-        label = {'walking': '도보', 'transit': '대중교통', 'driving': '차량', 'taxi': '택시'}[mode]
-        timing = '조회 시점 기준'
-        if mode == 'transit' and departure_time is not None:
-            timestamp = departure_time.isoformat(sep=' ', timespec='minutes')
-            timing = f'{timestamp[:16]} (UTC{timestamp[16:]}) 출발 기준'
-        minutes = math.ceil(seconds / 60)
-        return TransportToNextSchema(type=mode, distance=distance, minutes=minutes, cost=0 if mode == 'walking' else None, memo=f'{destination.place.placeName}까지 {label}로 약 {distance:g}m, 약 {minutes}분 이동하는 경로입니다. {timing} 예상 소요 시간입니다.')
+        # Guidance is optional: only validated numeric route facts determine
+        # feasibility. Cancellation remains observable (it is BaseException).
+        try:
+            memo = format_route_guidance(data, mode, destination.place.placeName, departure_time)
+            if not isinstance(memo, str) or not memo.strip() or len(memo) > MAX_MEMO_LENGTH:
+                raise ValueError('Unusable optional route guidance')
+        except Exception:  # noqa: BLE001 - optional presentation must not invalidate verified metrics
+            memo = fallback_route_guidance(mode, destination.place.placeName, departure_time)
+        return TransportToNextSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=memo)

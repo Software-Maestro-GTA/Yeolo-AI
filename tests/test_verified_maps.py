@@ -819,8 +819,7 @@ async def test_route_guidance_explains_provider_metrics_and_actual_departure_bas
     assert result.type == mode and result.distance == 1250 and result.minutes == 11
     assert result.cost == (0 if mode == 'walking' else None)
     assert destination.place.placeName in result.memo and label in result.memo
-    assert '11분' in result.memo
-    assert '1250m' in result.memo or '1,250m' in result.memo or '1.25km' in result.memo
+    assert '11분' not in result.memo and '1250' not in result.memo
     assert not any(blanket in result.memo for blanket in ['재확인이 필요', '운행·혼잡·요금', '확정 운행', '승차장', '환승'])
     if mode == 'transit' and departure_supplied:
         assert 'departureTime' in bodies[0]
@@ -881,7 +880,7 @@ async def test_malformed_route_metrics_are_not_reused_as_success_cache():
         provider = VerifiedMapsProvider(client=client, api_key='offline')
         with pytest.raises(MapsProviderError) as error:
             await provider.route(first, second)
-        assert error.value.kind == 'invalid' and not error.value.transient
+        assert error.value.kind == 'route_data' and not error.value.transient
         assert sends == 1  # Semantic invalidity is not a transient retry condition.
         assert (await provider.route(first, second)).minutes == 10
     assert sends == 2
