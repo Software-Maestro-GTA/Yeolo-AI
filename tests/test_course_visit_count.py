@@ -246,8 +246,8 @@ async def test_food_inflated_five_fallback_explains_core_deficit_without_fake_re
     course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
     day = course.itinerary.days[0]
     assert len(day.stops) == 5 and len(core_ids(day)) == 2
-    assert '관광' in day.memo or '체험' in day.memo or '명소' in day.memo
-    assert '2' in day.memo
+    assert '5곳' in day.memo or '5 곳' in day.memo
+    assert not any(internal in day.memo for internal in ['최소 5', '명소 3', '목표', '축소'])
     assert '이전 코스' not in course.recommendationReason
     assert llm.await_count == 2
 
