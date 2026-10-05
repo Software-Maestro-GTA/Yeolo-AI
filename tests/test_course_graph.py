@@ -1316,6 +1316,7 @@ async def test_optional_navigation_failure_still_completes_actual_graph_and_sse(
     assert len(stops) == 5
     assert all(stop['transportToNext']['minutes'] == 12 and stop['transportToNext']['distance'] == 700 for stop in stops[:-1])
     assert all('optional formatter failed' not in (stop['transportToNext']['memo'] or '') for stop in stops)
+    assert all(len(stop['transportToNext']['memo']) <= 120 and '조회 시점' not in stop['transportToNext']['memo'] for stop in stops[:-1])
     assert len(calls) == 4
     llm.assert_awaited_once()
 

@@ -77,7 +77,8 @@ async def test_transit_memo_connects_boarding_transfer_alighting_and_final_walk(
     assert any(word in result.memo for word in ('승차', '탑승', '타세요'))
     assert any(word in result.memo for word in ('하차', '내리', '내려'))
     assert '환승' in result.memo
-    assert '2026-10-05' in result.memo and '출발' in result.memo
+    assert not any(repeated in result.memo for repeated in ('목적지까지 이동 안내', '2026-10-05', '출발 기준', '조회 시점', '전체 이동은 지도'))
+    assert len(result.memo) <= 240 and len(result.memo.splitlines()) <= 3
     assert (result.minutes, result.distance, result.cost) == (21, 1250, None)
     assert '출구' not in result.memo and '승강장' not in result.memo
 
@@ -93,6 +94,7 @@ async def test_malformed_optional_steps_preserve_metrics_and_generic_action(endp
     assert route == cached
     assert (route.minutes, route.distance) == (21, 1250)
     assert route.memo and '1250' not in route.memo and '21분' not in route.memo
+    assert len(route.memo) <= 120 and len(route.memo.splitlines()) <= 3
     assert not any(word in route.memo for word in ('1호선', '출구', '승강장', '재확인이 필요'))
 
 
@@ -104,6 +106,7 @@ async def test_formatter_exception_is_optional_but_cancellation_is_not(endpoints
         route = await provider.route(*endpoints)
         assert (route.minutes, route.distance) == (21, 1250)
         assert 'optional guidance' not in route.memo
+        assert len(route.memo) <= 120 and '조회 시점' not in route.memo
         formatter.side_effect = asyncio.CancelledError()
         with pytest.raises(asyncio.CancelledError):
             await provider.route(*endpoints)
@@ -123,7 +126,8 @@ async def test_invalid_optional_formatter_return_cannot_break_verified_route(end
         route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints)
     assert (route.minutes, route.distance, route.cost) == (21, 1250, 0)
     assert isinstance(route.memo, str) and route.memo.strip()
-    assert endpoints[1].place.placeName in route.memo
+    assert len(route.memo) <= 120 and len(route.memo.splitlines()) <= 3
+    assert not any(repeated in route.memo for repeated in ('목적지까지', '조회 시점', '출발 기준'))
     assert len(requests) == 1
 
 
@@ -132,9 +136,9 @@ async def test_incomplete_transit_details_are_an_honest_summary_not_invented_con
     payload = response([walking('세종대로에서 시청역으로 이동하세요'), {'travelMode': 'TRANSIT'}, walking('북촌로에서 목적지로 이동하세요')])
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
         route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
-    assert '세종대로' in route.memo and '북촌로' in route.memo
-    assert any(word in route.memo for word in ('요약', '주요', '일부'))
-    assert not any(invented in route.memo for invented in ('1호선', '3호선', '몇 번 출구'))
+    assert len(route.memo) <= 120
+    assert not any(fragment in route.memo for fragment in ('세종대로', '북촌로', '1호선', '3호선', '몇 번 출구'))
+    assert (route.minutes, route.distance) == (21, 1250)
 
 
 @pytest.mark.asyncio
@@ -146,8 +150,8 @@ async def test_external_instruction_markup_controls_and_long_steps_are_sanitized
     assert '세종대로' in route.memo and '오른쪽' in route.memo
     assert '<b>' not in route.memo and '&amp;' not in route.memo
     assert not any(ord(char) < 32 and char not in '\n\t' for char in route.memo)
-    assert len(route.memo) <= 1400
-    assert any(word in route.memo for word in ('요약', '주요', '일부'))
+    assert len(route.memo) <= 240 and len(route.memo.splitlines()) <= 3
+    assert '주요 이동' in route.memo
 
 
 @pytest.mark.asyncio
@@ -161,12 +165,93 @@ async def test_long_transit_route_keeps_connections_or_identifies_navigation_as_
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response(steps)))) as client:
         route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
     assert (route.minutes, route.distance) == (21, 1250)
-    assert len(route.memo) <= 1400
-    connections = ('시청역', '종로3가역', '1호선', '소요산', '안국역', '3호선', '대화', '북촌로')
-    if not all(fact in route.memo for fact in connections):
-        assert any(word in route.memo for word in ('일부', '요약', '주요'))
-        assert '지도' in route.memo
+    assert len(route.memo) <= 240 and len(route.memo.splitlines()) <= 3
+    connections = ('시청역', '종로3가역', '1호선', '소요산', '안국역', '3호선', '대화')
+    assert all(fact in route.memo for fact in connections)
+    assert '환승' in route.memo
     assert '출구' not in route.memo and '승강장' not in route.memo
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('arrival', 'line', 'headsign'), [
+    ('후암약수터', '402', '장지공영차고지'),
+    ('청와대', '472', '신촌역'),
+])
+async def test_screenshot_direct_bus_is_two_short_actions_without_card_duplicates(endpoints, arrival, line, headsign):
+    payload = response([transit('시청앞', arrival, line, headsign)])
+    departure = datetime(2026, 10, 10, 4, 0, tzinfo=UTC)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
+        route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit', departure_time=departure)
+    assert all(fact in route.memo for fact in ('시청앞', arrival, line, headsign))
+    assert '타세요' in route.memo and '내리세요' in route.memo
+    assert len(route.memo) <= 120 and len(route.memo.splitlines()) <= 2
+    assert not any(repeated in route.memo for repeated in ('목적지', '1250', '21분', '2026-10-10', 'UTC', '+00:00', '조회', '출발 기준', '상세 안내 생략', '지도'))
+
+
+@pytest.mark.asyncio
+async def test_compact_guidance_preserves_long_but_fitting_stop_identifiers_without_slicing(endpoints):
+    start = '서울특별시시립문화전시관중앙정문앞정류장'
+    end = '서울역사박물관국제문화교육센터동쪽정문정류장'
+    line, headsign = '문화관광순환버스', '서울역사박물관국제문화교육센터'
+    payload = response([transit(start, end, line, headsign)])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
+        route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
+    assert all(identifier in route.memo for identifier in (start, end, line, headsign))
+    assert len(route.memo) <= 240 and len(route.memo.splitlines()) <= 2
+    assert route.memo.rstrip().endswith(('내리세요.', '하차하세요.'))
+
+
+@pytest.mark.asyncio
+async def test_unfittable_essential_identifiers_use_generic_action_instead_of_truncated_stop(endpoints):
+    start = '가나다라마바사' * 20 + '시청앞'
+    end = '아자차카타파하' * 20 + '최종정류장'
+    payload = response([transit(start, end, '402', '장지공영차고지')])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
+        route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
+    assert len(route.memo) <= 120
+    assert not any(fragment in route.memo for fragment in ('가나다', '아자차', '402', '장지공영차고지'))
+    assert (route.minutes, route.distance) == (21, 1250)
+
+
+@pytest.mark.asyncio
+async def test_four_required_transit_connections_cannot_be_presented_as_three_line_complete_route(endpoints):
+    payload = response([transit(f'{index}번승차역', f'{index}번하차역', f'{index}호선', f'{index}번방면') for index in range(1, 5)])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
+        route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
+    assert len(route.memo) <= 120 and len(route.memo.splitlines()) <= 3
+    assert not any(partial in route.memo for partial in ('승차역', '하차역', '1호선', '2호선', '3호선', '4호선'))
+    assert (route.minutes, route.distance) == (21, 1250)
+
+
+@pytest.mark.asyncio
+async def test_selected_walking_instruction_is_complete_not_cut_to_fit_card(endpoints):
+    too_long = '세종대로를 따라 ' + '문화시설 입구를 지나 ' * 30 + '오른쪽으로 도세요'
+    payload = response([walking(too_long), walking('율곡로에서 왼쪽으로 도세요')])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
+        route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints)
+    assert '율곡로에서 왼쪽으로 도세요' in route.memo
+    assert '문화시설 입구' not in route.memo
+    assert '주요 이동' in route.memo and len(route.memo) <= 240
+
+
+@pytest.mark.asyncio
+async def test_step_specific_distance_remains_useful_without_repeating_total_route_metrics(endpoints):
+    payload = response([walking('세종대로를 따라 50m 이동한 뒤 오른쪽으로 도세요')])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
+        route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints)
+    assert '50m' in route.memo and '오른쪽으로 도세요' in route.memo
+    assert '1250' not in route.memo and '21분' not in route.memo
+    assert len(route.memo) <= 240 and len(route.memo.splitlines()) <= 3
+
+
+@pytest.mark.asyncio
+async def test_missing_optional_headsign_does_not_discard_known_boarding_and_alighting(endpoints):
+    payload = response([transit('시청역', '안국역', '3호선', '')])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
+        route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
+    assert all(fact in route.memo for fact in ('시청역', '안국역', '3호선'))
+    assert '방면' not in route.memo and '방향' not in route.memo
+    assert len(route.memo) <= 120 and len(route.memo.splitlines()) <= 2
 
 
 @pytest.mark.asyncio
