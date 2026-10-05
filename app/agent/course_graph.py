@@ -232,6 +232,22 @@ def _meal_capable(venue: VerifiedPlace) -> bool:
     return any(meal_category_supported(venue.place.category, meal) for meal in ('lunch', 'dinner'))
 
 
+def _core_visit(item: Visit) -> bool:
+    """Count verified sightseeing venues; food and cafe stops never replace them."""
+    candidate, venue = item
+    return candidate.meal == 'none' and not _meal_capable(venue) and venue.place.category not in CAFE
+
+
+def _visit_shortage(selected: list[Visit]) -> tuple[int, int]:
+    """Return common normal floor deficits, independent of optional pace targets."""
+    return max(0, 5 - len(selected)), max(0, 3 - sum(_core_visit(item) for item in selected))
+
+
+def _pace_limit(request: CourseRequestSchema) -> int:
+    pace = request.tasteProfile.travelPaceDensity if request.tasteProfile else 'balanced'
+    return {'slow_stay': 5, 'long_stay': 5, 'dense_schedule': 7}.get(pace, 6)
+
+
 def _plan_signature(selected: list[Visit]) -> tuple:
     """Identify the exact ordered visits whose real travel feasibility was checked."""
     return tuple((venue.place.placeId, candidate.meal, candidate.stay_minutes) for candidate, venue in selected)
@@ -250,7 +266,7 @@ def _recoverable_draft(error: Exception) -> bool:
 
 def _selection_metadata(selected: list[list[Visit]]) -> dict:
     """Remember only selected attraction IDs and their original model choices."""
-    attractions = [(candidate, venue) for day in selected for candidate, venue in day if candidate.meal == 'none' and not _meal_capable(venue) and venue.place.category not in CAFE]
+    attractions = [(candidate, venue) for day in selected for candidate, venue in day if _core_visit((candidate, venue))]
     return {
         'attraction_ids': sorted({venue.place.placeId for _, venue in attractions}),
         'areas': sorted({normalize_area(candidate.planned_area) for candidate, _ in attractions if candidate.planned_area.strip()}),
@@ -261,8 +277,7 @@ def _selection_metadata(selected: list[list[Visit]]) -> dict:
 def _diversity_rank(path: list[Visit], profiles: list[dict]) -> tuple:
     metadata = _selection_metadata([path])
     scores = overlap_scores([venue.place.placeId for _, venue in path], metadata['attraction_ids'], profiles)
-    # Keeping a single planned area per day precedes visit count: mixed six-stop
-    # tours must not crowd a coherent four-stop alternative out of the shortlist.
+    # Rank diversity after the common visit floor; extra stops are optional.
     areas = {normalize_area(candidate.planned_area) for candidate, _ in path if candidate.planned_area.strip()}
     area_overlap = planning_overlap(metadata['areas'], profiles, 'areas')
     misses_target = max(scores['attraction_overlap'], scores['place_overlap'], area_overlap) > MAX_OVERLAP
@@ -307,7 +322,7 @@ def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_v
                     continue
                 new_path = [*path, item]
                 new_meals = meals | {candidate.meal}
-                visits = sum(entry[0].meal == 'none' for entry in new_path)
+                visits = sum(_core_visit(entry) for entry in new_path)
                 required = len({'lunch', 'dinner'} - new_meals) + max(0, minimum_visits - visits)
                 if max_stops - depth - 1 < required:
                     continue
@@ -321,7 +336,7 @@ def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_v
         beam = following[:48]
         if not beam:
             break
-    completed.sort(key=lambda state: ((_diversity_rank(state[0], recent_profiles) if recent_profiles else ()), len(state[0]) if compact else -len(state[0]), not any(candidate.meal == 'breakfast' for candidate, _ in state[0]), sum(venue.place.placeId in recent_ids for _, venue in state[0]), state[2], state[1]))
+    completed.sort(key=lambda state: (_visit_shortage(state[0]), (_diversity_rank(state[0], recent_profiles) if recent_profiles else ()), len(state[0]) if compact else -len(state[0]), not any(candidate.meal == 'breakfast' for candidate, _ in state[0]), sum(venue.place.placeId in recent_ids for _, venue in state[0]), state[2], state[1]))
     # Keep an already feasible original proposal first; this avoids gratuitous reorder.
     original = []
     used: set[str] = set()
@@ -340,7 +355,7 @@ def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_v
     valid_meals = [candidate.meal for candidate, _ in original if candidate.meal != 'none']
     original_key = tuple((venue.place.placeId, candidate.meal) for candidate, venue in original)
     preferred = next((state for state in completed if tuple((venue.place.placeId, candidate.meal) for candidate, venue in state[0]) == original_key), None)
-    if not recent_profiles and not compact and preferred and valid_meals in (['lunch', 'dinner'], ['breakfast', 'lunch', 'dinner']):
+    if not recent_profiles and not compact and preferred and len(preferred[0]) == len(completed[0][0]) and valid_meals in (['lunch', 'dinner'], ['breakfast', 'lunch', 'dinner']):
         completed.remove(preferred)
         completed.insert(0, preferred)
     plans: list[list[Visit]] = []
@@ -452,9 +467,8 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             if isinstance(venue, VerifiedPlace):
                 cache[candidate_key] = venue
         recent_ids = set().union(*state['recent']) if state['recent'] else set()
-        pace = state['request'].tasteProfile.travelPaceDensity if state['request'].tasteProfile else 'balanced'
-        max_stops = {'slow_stay': 5, 'long_stay': 5, 'dense_schedule': 7}.get(pace, 6)
-        minimum_visits = {'slow_stay': 1, 'long_stay': 1, 'dense_schedule': 3}.get(pace, 2)
+        max_stops = _pace_limit(state['request'])
+        minimum_visits = 3
         all_plans, failures = [], []
         for index, day in enumerate(state['draft_data'].days):
             if index in saved:
@@ -515,6 +529,12 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                 pools[index] = dict(list({**additions, **pools[index]}.items())[:30])
                 available = list(pools[index].values())
             plans = _day_plans(available, day_date, max_stops, minimum_visits, recent_ids, state['rejected_plans'].get(index), recent_profiles=state.get('recent_profiles'))
+            if not plans:
+                # Retain a safe short course before optional missing-slot refill.
+                for core_count in (2, 1):
+                    plans = _day_plans(available, day_date, max_stops, core_count, recent_ids, state['rejected_plans'].get(index), recent_profiles=state.get('recent_profiles'))
+                    if plans:
+                        break
             all_plans.append(plans)
             if not plans:
                 failures.append(f'{index + 1}일차 {day_date}: 점심·저녁과 명소 {minimum_visits}곳의 영업/식사 시간 조합 부족. 확인된 후보: {", ".join(candidate.name for candidate, _ in available)}. 일시 조회 실패(재조회 가능): {", ".join(name for name in rejected if name in temporary_names)}. 이름/위치 검증 미충족: {", ".join(name for name in rejected if name not in temporary_names)}. 다른 공식 장소명과 식사 대안을 제안하세요.')
@@ -608,7 +628,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                 except (CourseGenerationError, ValueError) as error:
                     last_error = str(error)
                 else:
-                    validated[index] = {'selected': selected, 'routes': routes, 'day': day, 'compact': state.get('repairing', False)}
+                    validated[index] = {'selected': selected, 'routes': routes, 'day': day, 'compact': any(_visit_shortage(selected))}
                     used.update(venue.place.placeId for _, venue in selected)
                     break
                 if not temporary_failure:
@@ -626,14 +646,22 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         scores = overlap_scores(used, metadata['attraction_ids'], state.get('recent_profiles', []))
         area_overlap = planning_overlap(metadata['areas'], state.get('recent_profiles', []), 'areas')
         repeated = max(scores.values()) > MAX_OVERLAP or area_overlap > MAX_OVERLAP
-        rank = (max(scores.values()), area_overlap)
-        snapshot = copy.deepcopy({'draft_data': state['draft_data'], 'validated_days': validated, 'selected': selected, 'routes': routes, 'diversity_scores': {**scores, 'planned_area_overlap': area_overlap}, 'rank': rank})
+        shortages = [_visit_shortage(day) for day in selected]
+        rank = (sum(value[0] for value in shortages), sum(value[1] for value in shortages), max(scores.values()), area_overlap)
+        snapshot = copy.deepcopy({'draft_data': state['draft_data'], 'validated_days': validated, 'selected': selected, 'routes': routes, 'diversity_scores': {**scores, 'planned_area_overlap': area_overlap}, 'repeated': repeated, 'rank': rank})
         previous = state.get('verified_fallback')
         if previous and previous['rank'] <= rank:
             snapshot = previous
         logger.info('Course diversity: place_overlap=%.2f attraction_overlap=%.2f planned_area_overlap=%.2f attempt=%d', scores['place_overlap'], scores['attraction_overlap'], area_overlap, state['attempt'])
         updates = {'validated_days': validated, 'route_cache': cache, 'selected': selected, 'routes': routes, 'repeated': repeated, 'feedback': '', 'verified_fallback': snapshot, 'diversity_scores': {**scores, 'planned_area_overlap': area_overlap}}
-        if repeated and state['attempt'] < _max_drafts(state) and optional_budget(state) > .1:
+        underfull = any(any(value) for value in shortages)
+        if underfull and state['attempt'] < _max_drafts(state) and not state.get('repairing') and optional_budget(state) > .1:
+            retained = {index: value for index, value in validated.items() if not any(_visit_shortage(value['selected']))}
+            missing = '; '.join(f'{index + 1}일차: 총 장소 {count}곳, 관광·체험 명소 {core}곳 부족. 검증된 가까운 후보 유지: ' + ', '.join(candidate.name for candidate, _ in validated[index]['selected']) for index, (count, core) in enumerate(shortages) if count or core)
+            updates.update({'validated_days': retained, 'feedback': missing + '. 부족한 관광·체험 슬롯을 가까운 실제 명소로 보충하고 성공한 일차는 유지하세요.'})
+        elif underfull and previous and previous['rank'] <= rank:
+            updates['restore_fallback'] = True
+        elif repeated and state['attempt'] < _max_drafts(state) and optional_budget(state) > .1:
             updates.update({'validated_days': {}, 'feedback': '최근 코스의 명소 또는 계획 권역이 반복됩니다. 취향을 유지하고 다른 권역의 실제 장소를 제안하세요. 이미 확인한 후보: ' + ', '.join(candidate.name for value in validated.values() for candidate, _ in value['selected'])})
         elif repeated and previous and previous['rank'] <= rank:
             updates['restore_fallback'] = True
@@ -644,7 +672,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         _progress('확인된 장소와 이동 경로를 유지하여 일정을 마무리하고 있습니다.')
         logger.info('Course diversity fallback: retained verified itinerary')
         snapshot = state['verified_fallback']
-        return {**{key: copy.deepcopy(value) for key, value in snapshot.items() if key != 'rank'}, 'feedback': '', 'restore_fallback': False, 'repeated': True, 'attempt': _max_drafts(state)}
+        return {**{key: copy.deepcopy(value) for key, value in snapshot.items() if key != 'rank'}, 'feedback': '', 'restore_fallback': False, 'attempt': _max_drafts(state)}
 
     async def schedule(state: CourseState) -> dict:
         _progress('확정한 일자별 장소·이동·영업·식사 시간을 최종 검증하고 있습니다.')
@@ -652,7 +680,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         days = [_schedule_day(selected, state['routes'][index], start_date + timedelta(days=index), index + 1) for index, selected in enumerate(state['selected'])]
         for index, day in enumerate(days):
             if state['validated_days'][index].get('compact'):
-                day.memo += ' 이동·영업·식사 시간을 지키기 위해 방문 수를 줄인 여유 일정입니다.'
+                day.memo += f' 이동·영업·식사 시간과 확인 가능한 명소 조건을 지켜 {len(day.stops)}곳으로 구성했습니다. 관광·체험 명소는 {sum(_core_visit(item) for item in state["selected"][index])}곳이며, 최소 5곳·명소 3곳 목표보다 축소된 일정입니다.'
         return {'days': days, 'feedback': ''}
 
     async def finalize(state: CourseState) -> dict:
@@ -711,7 +739,9 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                 plans.append([saved[index]['selected']])
                 continue
             available = [item for item in state['candidate_pools'].get(index, {}).values() if item[1].place.placeId not in reserved]
-            alternatives = _day_plans(available, start + timedelta(days=index), 3, 1, recent_ids, state['rejected_plans'].get(index), plan_limit=12, compact=True, recent_profiles=state.get('recent_profiles'))
+            alternatives = []
+            for stop_count, core_count in ((5, 3), (4, 2), (3, 1)):
+                alternatives.extend(_day_plans(available, start + timedelta(days=index), stop_count, core_count, recent_ids, state['rejected_plans'].get(index), plan_limit=4, compact=True, recent_profiles=state.get('recent_profiles')))
             plans.append(alternatives)
             if not alternatives:
                 failures.append(f'{index + 1}일차: 점심·저녁과 명소를 포함한 검증 가능한 대안이 없습니다.')

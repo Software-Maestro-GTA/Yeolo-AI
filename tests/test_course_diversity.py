@@ -118,7 +118,7 @@ def diversity_dependencies(tmp_path, mocker):
     def make_draft(area, version='', *, same_attractions=False):
         index = {'광화문 북촌': 0, '성수 서울숲': 1, '마포 망원': 2}[area]
         candidates = []
-        for number, (role, category) in enumerate([('none', 'museum'), ('lunch', 'restaurant'), ('none', 'park'), ('dinner', 'restaurant')]):
+        for number, (role, category) in enumerate([('none', 'museum'), ('lunch', 'restaurant'), ('none', 'park'), ('dinner', 'restaurant'), ('none', 'art_gallery')]):
             suffix = '' if same_attractions and role == 'none' else version
             name = f'{area}-{number}{suffix}'
             candidate = Candidate(name=name, meal=role, stay_minutes=45, planned_area=area, experiences=['culture' if category == 'museum' else 'nature' if category == 'park' else 'food'])
@@ -181,7 +181,7 @@ async def test_three_identical_seoul_requests_change_real_selected_neighborhoods
     # Every search uses a current draft name, never an old ID reverse lookup.
     assert all(call.args[0].name in places for call in provider.search.await_args_list)
     provider.discover_meals.assert_not_awaited()
-    assert all(len(day.stops) == 4 for course in courses for day in course.itinerary.days)
+    assert all(len(day.stops) == 5 for course in courses for day in course.itinerary.days)
     assert not any(key in json.dumps(course.model_dump()) for course in courses for key in ('planned_area', 'experiences', 'place_overlap'))
 
 
@@ -208,7 +208,7 @@ async def test_novelty_repair_failure_returns_captured_verified_course(diversity
         llm.side_effect = [similar, alternate]
     course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
     assert course.title == similar.title
-    assert len(course.itinerary.days[0].stops) == 4
+    assert len(course.itinerary.days[0].stops) == 5
     assert all('광화문 북촌' in stop.place.placeName for stop in course.itinerary.days[0].stops)
     assert '이전' in course.recommendationReason or '중복' in course.recommendationReason
     assert llm.await_count <= 2
@@ -233,7 +233,7 @@ async def test_near_deadline_novelty_retry_does_not_lose_verified_fallback(diver
     llm.side_effect = draft_response
     now = asyncio.get_running_loop().time()
     state = await asyncio.wait_for(build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0, 'deadline': now + .6}), timeout=.9)
-    assert len(state['course'].itinerary.days[0].stops) == 4
+    assert len(state['course'].itinerary.days[0].stops) == 5
     assert state['course'].title == draft.title
     assert asyncio.get_running_loop().time() < now + .9
 
@@ -270,8 +270,8 @@ async def test_verified_alternate_neighborhood_in_same_pool_needs_no_extra_llm(d
     assert all('성수 서울숲' in stop.place.placeName for stop in course.itinerary.days[0].stops)
     assert course_attractions(course).isdisjoint(attractions)
     llm.assert_awaited_once()
-    assert provider.search.await_count == 8
-    assert len({call.args[0].name for call in provider.search.await_args_list}) == 8
+    assert provider.search.await_count == 10
+    assert len({call.args[0].name for call in provider.search.await_args_list}) == 10
     assert len({(call.args[0].place.placeId, call.args[1].place.placeId, call.kwargs.get('departure_time')) for call in provider.route.await_args_list}) == provider.route.await_count
 
 
@@ -290,7 +290,7 @@ async def test_first_request_no_history_keeps_existing_calls_and_stream_contract
     assert all(set(data) == {'step', 'message'} and data['step'] == 'GENERATING_ROUTE' for event, data in events if event == 'progress')
     assert set(events[-1][1]) == {'course'}
     assert events[-1][1]['course']['destinationCity'] == '서울특별시'
-    assert provider.search.await_count == 4 and provider.route.await_count == 3
+    assert provider.search.await_count == 5 and provider.route.await_count == 4
     llm.assert_awaited_once()
 
 
@@ -320,8 +320,8 @@ async def test_history_core_attractions_exclude_coffee_dessert_and_meal_business
         assert set(remembered['attraction_ids']) == core
         assert remembered['areas'] == ['광화문 북촌']
         # A completely different food list leaves the same core experience.
-        scores = overlap_scores(core | {'new-food-a', 'new-food-b', 'new-food-c'}, core, [remembered])
-        assert scores['place_overlap'] == .4 and scores['attraction_overlap'] == 1.
+        scores = overlap_scores(core | {'new-food-a', 'new-food-b'}, core, [remembered])
+        assert scores['place_overlap'] == .6 and scores['attraction_overlap'] == 1.
 
 
 @pytest.mark.asyncio
