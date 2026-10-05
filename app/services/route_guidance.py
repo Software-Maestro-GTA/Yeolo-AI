@@ -16,19 +16,19 @@ ROUTE_GUIDANCE_FIELDS = frozenset({
     'routes.legs.steps.transitDetails.headsign',
 })
 ROUTE_FIELD_MASK = ','.join(sorted(ROUTE_METRIC_FIELDS | ROUTE_GUIDANCE_FIELDS))
-MAX_MEMO_LENGTH = 1400
+MAX_MEMO_LENGTH = 240
 
 
-def _clean(value: Any, limit: int = 160) -> str:
-    """Remove external markup, links and terminal controls before display."""
-    if not isinstance(value, str):
+def _clean(value: Any) -> str:
+    """Sanitize whole facts; discard oversized inputs rather than cut names."""
+    if not isinstance(value, str) or len(value) > 8000:
         return ''
-    value = html.unescape(value[:8000])
+    value = html.unescape(value)
     value = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', value)
     value = re.sub(r'<[^>]*>', '', value)
     value = re.sub(r'https?://\S+', '', value)
     value = ''.join(char if ord(char) >= 32 and ord(char) != 127 else ' ' for char in value)
-    return ' '.join(value.split())[:limit]
+    return ' '.join(value.split())
 
 
 def _mapping(value: Any) -> dict:
@@ -43,20 +43,31 @@ def fallback_route_guidance(mode: str, destination_name: str, departure_time: da
         destination_name: Verified destination name.
         departure_time: Actual aware transit query departure, if supplied.
     Returns:
-        Bounded memo with the actual query basis and no repeated metrics.
+        Short mode-specific action without repeated destination or query metadata.
+        The retained destination/time parameters preserve the provider interface.
     """
-    label = {'walking': '도보', 'transit': '대중교통', 'driving': '차량', 'taxi': '택시'}.get(mode, '이동')
-    name = _clean(destination_name, 100) or '다음 방문 장소'
-    timing = '조회 시점 기준 이동 안내입니다.'
-    if mode == 'transit' and departure_time is not None:
-        timing = f'{departure_time.isoformat(sep=" ", timespec="minutes")} 출발 기준 예상 이동 안내입니다.'
-    action = {
-        'walking': '지도 앱에서 목적지를 설정해 도보 길찾기를 열고, 안내된 보행 경로를 따라가세요.',
-        'transit': '지도 앱의 대중교통 길찾기를 열고, 탑승 전 노선과 행선지 표시를 안내와 대조하세요.',
-        'driving': '내비게이션의 도착지 이름을 목적지와 대조한 뒤 안내된 차량 경로를 따라가세요.',
-        'taxi': '탑승 시 기사에게 목적지 이름을 보여주고 내비게이션의 도착지와 대조하세요.',
+    return {
+        'walking': '지도 앱의 도보 길찾기를 열고 안내된 보행 경로를 따라가세요.',
+        'transit': '지도 앱의 대중교통 길찾기를 열고 노선과 행선지를 확인해 타세요.',
+        'driving': '내비게이션에 목적지를 설정하고 안내된 차량 경로를 따라가세요.',
+        'taxi': '택시 기사에게 목적지를 보여주고 내비게이션의 도착지를 확인하세요.',
     }.get(mode, '지도 앱에서 도착지 이름을 목적지와 대조하며 이동하세요.')
-    return f'{name}까지 {label} 이동입니다. {action} {timing}'
+
+
+def _sentence(instruction: str) -> str:
+    """Keep a supplied instruction whole, adding only terminal punctuation."""
+    return instruction if instruction.endswith(('.', '!', '?', '。', '！', '？')) else instruction + '.'
+
+
+def _object_particle(name: str) -> str:
+    """Select the object particle for a complete displayed Korean line name."""
+    last = ord(name[-1])
+    return '을' if 0xAC00 <= last <= 0xD7A3 and (last - 0xAC00) % 28 else '를'
+
+
+def _memo(lines: list[str], partial: bool = False) -> str:
+    """Render at most three chronological action units, optionally as highlights."""
+    return ('주요 이동: ' if partial else '') + '\n'.join(lines)
 
 
 def format_route_guidance(data: dict, mode: str, destination_name: str, departure_time: datetime | None = None) -> str:
@@ -68,8 +79,10 @@ def format_route_guidance(data: dict, mode: str, destination_name: str, departur
         destination_name: Verified arrival venue name.
         departure_time: Actual transit query departure, when supplied.
     Returns:
-        Sanitized memo of at most 1,400 characters. Missing or omitted steps are
-        marked as a summary; no stop, line, direction or maneuver is inferred.
+        At most 240 characters and three lines of complete actions. All transit
+        connections must fit; otherwise a generic action is returned. Optional
+        walking omissions receive a short highlights label. No route fact is
+        inferred and no identifier or instruction is sliced to fit the card.
     """
     fallback = fallback_route_guidance(mode, destination_name, departure_time)
     routes = _mapping(data).get('routes')
@@ -80,73 +93,85 @@ def format_route_guidance(data: dict, mode: str, destination_name: str, departur
         return fallback
     parts: list[tuple[int, str, bool]] = []
     partial = False
-    boarded = False
+    transit_count = 0
+    direct_actions: tuple[str, str] | None = None
     count = 0
+    # An unprocessed suffix might hide a required connection; never summarize
+    # bounded parsing of such a response as a complete transit route.
+    if len(legs) > 20:
+        return fallback
     for leg in legs[:20]:
         steps = _mapping(leg).get('steps')
         if not isinstance(steps, list):
+            if mode == 'transit':
+                return fallback
             partial = True
             continue
+        if len(steps) > 120:
+            return fallback
         for step in steps[:120]:
             count += 1
             raw = _mapping(step)
             supplied_instruction = _mapping(raw.get('navigationInstruction')).get('instructions')
             instruction = _clean(supplied_instruction)
-            partial |= len(_clean(supplied_instruction, 8000)) > len(instruction)
             transit = raw.get('travelMode') == 'TRANSIT'
             if transit:
                 details = _mapping(raw.get('transitDetails'))
                 stops = _mapping(details.get('stopDetails'))
-                start = _clean(_mapping(stops.get('departureStop')).get('name'), 60)
-                end = _clean(_mapping(stops.get('arrivalStop')).get('name'), 60)
+                start = _clean(_mapping(stops.get('departureStop')).get('name'))
+                end = _clean(_mapping(stops.get('arrivalStop')).get('name'))
                 line = _mapping(details.get('transitLine'))
-                supplied_line = line.get('nameShort') if _clean(line.get('nameShort')) else line.get('name')
-                line_name = _clean(supplied_line, 60)
-                direction = _clean(details.get('headsign'), 60)
-                for supplied, cleaned in (
-                    (_mapping(stops.get('departureStop')).get('name'), start),
-                    (_mapping(stops.get('arrivalStop')).get('name'), end),
-                    (supplied_line, line_name), (details.get('headsign'), direction),
-                ):
-                    partial |= len(_clean(supplied, 8000)) > len(cleaned)
-                partial |= not all((start, end, line_name))
-                if start and line_name and end:
-                    action = '환승해 탑승하세요' if boarded else '탑승하세요'
-                    direction_label = f' ({direction} 방향)' if direction else ''
-                    instruction = f'{start}에서 {line_name}{direction_label}에 {action}. {end}에서 하차하세요.'
-                else:
-                    # Known fragments are useful, but never join incomplete facts
-                    # into a purported boarding-to-alighting instruction.
-                    facts = [value for value in (start, line_name, direction, end) if value]
-                    instruction = '대중교통 구간 정보: ' + ' · '.join(facts) if facts else ''
-                boarded = True
+                line_name = _clean(line.get('nameShort')) or _clean(line.get('name'))
+                supplied_direction = details.get('headsign')
+                direction = _clean(supplied_direction)
+                if not all((start, end, line_name)) or (supplied_direction and not direction):
+                    return fallback
+                transfer = '환승해 ' if transit_count else ''
+                direction_label = ''
+                if direction:
+                    direction_label = f'({direction})' if direction.endswith(('방면', '방향')) else f'({direction} 방면)'
+                line_label = f'{line_name}번' if line_name.isdecimal() else line_name
+                particle = '을' if direction else _object_particle(line_label)
+                boarding = f'{start}에서 {transfer}{line_label}{direction_label}{particle} 타세요.'
+                alighting = f'{end}에서 내리세요.'
+                direct_actions = boarding, alighting
+                instruction = f'{boarding} {alighting}'
+                transit_count += 1
+                if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
+                    return fallback
             if instruction:
-                parts.append((count, instruction, transit))
+                parts.append((count, _sentence(instruction), transit))
             else:
+                if mode == 'transit' and not raw:
+                    return fallback
                 partial = True
-        partial |= len(steps) > 120
-    partial |= len(legs) > 20
     if not parts:
         return fallback
-    prefix = f'{_clean(destination_name, 100) or "다음 방문 장소"}까지 이동 안내: '
-    timing = fallback.rsplit('. ', 1)[-1]
-    # Prioritize every available transit connection, then the first approach
-    # and final walking instruction; restore chronological order for display.
-    priority = [part for part in parts if part[2]]
-    priority += [parts[0], parts[-1]]
-    priority += parts
+    # Transit actions are mandatory. Final walking is the first optional action,
+    # followed by the approach and remaining chronological walking instructions.
+    connections = [part for part in parts if part[2]]
+    if len(_memo([part[1] for part in connections])) > MAX_MEMO_LENGTH:
+        return fallback
     selected: dict[int, str] = {}
-    budget = MAX_MEMO_LENGTH - len(prefix) - len(timing) - 90
+    for index, instruction, _ in connections:
+        selected[index] = instruction
+    optional = [part for part in parts if not part[2]]
+    priority = ([optional[-1], optional[0]] + optional) if optional else []
     for index, instruction, _ in priority:
         if index in selected:
             continue
-        if sum(len(value) + 3 for value in selected.values()) + len(instruction) + 3 <= budget:
+        proposed = selected | {index: instruction}
+        lines = [proposed[key] for key in sorted(proposed)]
+        # Reserve the short label when any supplied instruction is omitted.
+        omitted = partial or len(proposed) < len(parts)
+        if len(lines) <= 3 and len(_memo(lines, omitted)) <= MAX_MEMO_LENGTH:
             selected[index] = instruction
     partial |= len(selected) < len(parts)
-    summary = '주요 구간 요약(일부 상세 안내 생략): ' if partial else ''
-    if partial:
-        timing = '전체 이동은 지도 길찾기의 안내를 따라가세요. ' + timing
-    body = ' → '.join(selected[index] for index in sorted(selected))
-    if body and body[-1] not in '.!?。！？':
-        body += '.'
-    return f'{prefix}{summary}{body} {timing}'[:MAX_MEMO_LENGTH]
+    if not selected:
+        return fallback
+    lines = [selected[index] for index in sorted(selected)]
+    if len(connections) == 1 and len(selected) == 1 and direct_actions is not None:
+        # A direct trip reads naturally as separate boarding/alighting actions.
+        lines = list(direct_actions)
+    result = _memo(lines, partial)
+    return result if len(result) <= MAX_MEMO_LENGTH else fallback

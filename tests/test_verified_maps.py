@@ -800,7 +800,7 @@ async def test_transit_uses_supplied_trip_departure_time():
     ('walking', '도보', False), ('transit', '대중교통', False),
     ('transit', '대중교통', True), ('driving', '차량', True), ('taxi', '택시', False),
 ])
-async def test_route_guidance_explains_provider_metrics_and_actual_departure_basis(mode, label, departure_supplied):
+async def test_missing_route_steps_keep_compact_mode_action_and_actual_departure_request(mode, label, departure_supplied):
     import json
     from datetime import datetime, timedelta, timezone
 
@@ -818,18 +818,14 @@ async def test_route_guidance_explains_provider_metrics_and_actual_departure_bas
     assert len(bodies) == 1
     assert result.type == mode and result.distance == 1250 and result.minutes == 11
     assert result.cost == (0 if mode == 'walking' else None)
-    assert destination.place.placeName in result.memo and label in result.memo
+    assert label in result.memo and len(result.memo) <= 120
     assert '11분' not in result.memo and '1250' not in result.memo
     assert not any(blanket in result.memo for blanket in ['재확인이 필요', '운행·혼잡·요금', '확정 운행', '승차장', '환승'])
     if mode == 'transit' and departure_supplied:
-        assert 'departureTime' in bodies[0]
-        assert '2026-10-05' in result.memo and '14:25' in result.memo
-        assert any(zone in result.memo for zone in ['+09:00', 'UTC+9', 'UTC+09', 'KST'])
-        assert '예상' in result.memo
+        assert bodies[0]['departureTime'] == '2026-10-05T05:25:00Z'
     else:
         assert 'departureTime' not in bodies[0]
-        assert '조회 시점' in result.memo
-        assert '14:25' not in result.memo
+    assert not any(repeated in result.memo for repeated in ('다음 방문 장소까지', '2026-10-05', '14:25', 'UTC', '조회 시점', '출발 기준'))
 
 
 @pytest.mark.asyncio

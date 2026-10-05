@@ -53,9 +53,9 @@ from app.services.course_reasons import CAFE, apply_personalized_reasons, visit_
 from app.services.course_routing import (
     distance_meters,
     estimated_walking,
-    is_estimated_walking,
     valid_route,
 )
+from app.services.day_summary import MAX_DAY_SUMMARY_LENGTH, compose_day_summary
 from app.services.maps_cost import MapsCostMetrics
 
 logger = logging.getLogger(__name__)
@@ -205,7 +205,7 @@ MEAL_WINDOWS = {'none': (540, 1260), 'breakfast': (540, 660), 'lunch': (690, 840
 type Visit = tuple[Candidate, VerifiedPlace]
 
 
-def _schedule_day(selected: list[Visit], routes: list[TransportToNextSchema], day_date: date, day_number: int) -> DayItinerarySchema:
+def _schedule_day(selected: list[Visit], routes: list[TransportToNextSchema], day_date: date, day_number: int, *, compact: bool = False) -> DayItinerarySchema:
     """Build one day using actual routes; reject any full-visit window violation."""
     if len(routes) != len(selected) - 1:
         raise CourseGenerationError(f'{day_number}일차: 이동 경로가 누락되었습니다.')
@@ -222,9 +222,15 @@ def _schedule_day(selected: list[Visit], routes: list[TransportToNextSchema], da
             note += ' 영업시간 미확인: 방문 전 확인이 필요합니다.'
         stops.append(StopSchema(sequence=index + 1, arrivalTime=f'{arrival // 60:02d}:{arrival % 60:02d}', stayMinutes=candidate.stay_minutes, memo=note, reason=candidate.reason, cost=candidate.cost, place=venue.place, transportToNext=transport))
         current = arrival + candidate.stay_minutes + (transport.minutes or 0) + (0 if last else 10)
-    breakfast_note = '조식이 포함되어 있습니다.' if any(candidate.meal == 'breakfast' for candidate, _ in selected) else '조식은 별도입니다.'
-    estimate_note = ' 일부 구간은 직선거리 기반 추정 도보 시간으로 실제 경로는 방문 전 확인이 필요합니다.' if any(is_estimated_walking(route) for route in routes) else ''
-    return DayItinerarySchema(day=day_number, date=day_date.isoformat(), memo=f'09:00~21:00 기준 일정. 식사와 이동 후 10분 여유를 반영했습니다. {breakfast_note} 숙소 왕복은 별도이며 교통은 제공된 출발 시각 또는 조회 시점 예상치입니다.{estimate_note}', stops=stops)
+    try:
+        summary = compose_day_summary(stops, day_number, compact=compact)
+        if not isinstance(summary, str) or not summary.strip() or len(summary) > MAX_DAY_SUMMARY_LENGTH:
+            raise ValueError('Invalid optional day summary')
+    except Exception:  # noqa: BLE001 - optional prose cannot invalidate a verified schedule; cancellation propagates
+        summary = '새로운 장소를 만나며 나만의 여행 이야기를 만들어보세요.'
+        if compact:
+            summary += f' 오늘은 이동과 식사 시간을 고려해 {len(stops)}곳을 둘러보세요.'
+    return DayItinerarySchema(day=day_number, date=day_date.isoformat(), memo=summary, stops=stops)
 
 
 def _meal_capable(venue: VerifiedPlace) -> bool:
@@ -627,7 +633,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                             raise CourseGenerationError(f'{candidate.name} → {right[0].name}: 경로 정보가 불완전하거나 이동 시간이 90분을 초과합니다.')
                         routes.append(route)
                         current = arrival + candidate.stay_minutes + route.minutes + 10
-                    day = _schedule_day(selected, routes, day_date, index + 1)
+                    day = _schedule_day(selected, routes, day_date, index + 1, compact=any(_visit_shortage(selected)))
                 except MapsProviderError as error:
                     if error.kind in {'unauthorized', 'invalid'}:
                         raise
@@ -685,10 +691,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
     async def schedule(state: CourseState) -> dict:
         _progress('확정한 일자별 장소·이동·영업·식사 시간을 최종 검증하고 있습니다.')
         start_date = date.fromisoformat(state['request'].tripCondition.startDate)
-        days = [_schedule_day(selected, state['routes'][index], start_date + timedelta(days=index), index + 1) for index, selected in enumerate(state['selected'])]
-        for index, day in enumerate(days):
-            if state['validated_days'][index].get('compact'):
-                day.memo += f' 이동·영업·식사 시간과 확인 가능한 명소 조건을 지켜 {len(day.stops)}곳으로 구성했습니다. 관광·체험 명소는 {sum(_core_visit(item) for item in state["selected"][index])}곳이며, 최소 5곳·명소 3곳 목표보다 축소된 일정입니다.'
+        days = [_schedule_day(selected, state['routes'][index], start_date + timedelta(days=index), index + 1, compact=bool(state['validated_days'][index].get('compact'))) for index, selected in enumerate(state['selected'])]
         return {'days': days, 'feedback': ''}
 
     async def finalize(state: CourseState) -> dict:
