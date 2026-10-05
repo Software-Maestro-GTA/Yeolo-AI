@@ -65,9 +65,9 @@ def _object_particle(name: str) -> str:
     return '을' if 0xAC00 <= last <= 0xD7A3 and (last - 0xAC00) % 28 else '를'
 
 
-def _memo(lines: list[str], partial: bool = False) -> str:
-    """Render at most three chronological action units, optionally as highlights."""
-    return ('주요 이동: ' if partial else '') + '\n'.join(lines)
+def _memo(actions: list[str]) -> str:
+    """Connect complete chronological actions in one paragraph."""
+    return ' '.join(actions)
 
 
 def format_route_guidance(data: dict, mode: str, destination_name: str, departure_time: datetime | None = None) -> str:
@@ -79,10 +79,9 @@ def format_route_guidance(data: dict, mode: str, destination_name: str, departur
         destination_name: Verified arrival venue name.
         departure_time: Actual transit query departure, when supplied.
     Returns:
-        At most 240 characters and three lines of complete actions. All transit
-        connections must fit; otherwise a generic action is returned. Optional
-        walking omissions receive a short highlights label. No route fact is
-        inferred and no identifier or instruction is sliced to fit the card.
+        One paragraph of at most 240 characters and three complete action units.
+        All transit connections must fit; otherwise a generic action is returned.
+        No route fact is inferred and no identifier or instruction is sliced.
     """
     fallback = fallback_route_guidance(mode, destination_name, departure_time)
     routes = _mapping(data).get('routes')
@@ -92,9 +91,7 @@ def format_route_guidance(data: dict, mode: str, destination_name: str, departur
     if not isinstance(legs, list):
         return fallback
     parts: list[tuple[int, str, bool]] = []
-    partial = False
     transit_count = 0
-    direct_actions: tuple[str, str] | None = None
     count = 0
     # An unprocessed suffix might hide a required connection; never summarize
     # bounded parsing of such a response as a complete transit route.
@@ -105,7 +102,6 @@ def format_route_guidance(data: dict, mode: str, destination_name: str, departur
         if not isinstance(steps, list):
             if mode == 'transit':
                 return fallback
-            partial = True
             continue
         if len(steps) > 120:
             return fallback
@@ -126,16 +122,19 @@ def format_route_guidance(data: dict, mode: str, destination_name: str, departur
                 direction = _clean(supplied_direction)
                 if not all((start, end, line_name)) or (supplied_direction and not direction):
                     return fallback
-                transfer = '환승해 ' if transit_count else ''
                 direction_label = ''
                 if direction:
+                    direction = re.sub(r'(?<=[가-힣])\.(?=[가-힣])', '·', direction)
                     direction_label = f'({direction})' if direction.endswith(('방면', '방향')) else f'({direction} 방면)'
                 line_label = f'{line_name}번' if line_name.isdecimal() else line_name
-                particle = '을' if direction else _object_particle(line_label)
-                boarding = f'{start}에서 {transfer}{line_label}{direction_label}{particle} 타세요.'
-                alighting = f'{end}에서 내리세요.'
-                direct_actions = boarding, alighting
-                instruction = f'{boarding} {alighting}'
+                if transit_count:
+                    last = ord(line_label[-1])
+                    consonant = (last - 0xAC00) % 28 if 0xAC00 <= last <= 0xD7A3 else 0
+                    particle = '으로' if direction or consonant not in (0, 8) else '로'
+                    instruction = f'{start}에서 {line_label}{direction_label}{particle} 환승해 {end}에서 내리세요.'
+                else:
+                    particle = '을' if direction else _object_particle(line_label)
+                    instruction = f'{start}에서 {line_label}{direction_label}{particle} 타고 {end}에서 내리세요.'
                 transit_count += 1
                 if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
                     return fallback
@@ -144,7 +143,6 @@ def format_route_guidance(data: dict, mode: str, destination_name: str, departur
             else:
                 if mode == 'transit' and not raw:
                     return fallback
-                partial = True
     if not parts:
         return fallback
     # Transit actions are mandatory. Final walking is the first optional action,
@@ -162,16 +160,10 @@ def format_route_guidance(data: dict, mode: str, destination_name: str, departur
             continue
         proposed = selected | {index: instruction}
         lines = [proposed[key] for key in sorted(proposed)]
-        # Reserve the short label when any supplied instruction is omitted.
-        omitted = partial or len(proposed) < len(parts)
-        if len(lines) <= 3 and len(_memo(lines, omitted)) <= MAX_MEMO_LENGTH:
+        if len(lines) <= 3 and len(_memo(lines)) <= MAX_MEMO_LENGTH:
             selected[index] = instruction
-    partial |= len(selected) < len(parts)
     if not selected:
         return fallback
     lines = [selected[index] for index in sorted(selected)]
-    if len(connections) == 1 and len(selected) == 1 and direct_actions is not None:
-        # A direct trip reads naturally as separate boarding/alighting actions.
-        lines = list(direct_actions)
-    result = _memo(lines, partial)
+    result = _memo(lines)
     return result if len(result) <= MAX_MEMO_LENGTH else fallback
