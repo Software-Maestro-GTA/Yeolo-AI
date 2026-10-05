@@ -1,6 +1,7 @@
 """Explicit, bounded LangGraph pipeline for personal, verified travel courses."""
 
 import asyncio
+import copy
 import inspect
 import logging
 import math
@@ -40,9 +41,16 @@ from app.schemas.course import (
     StopSchema,
     TransportToNextSchema,
 )
+from app.services.course_diversity import (
+    MAX_OVERLAP,
+    Experience,
+    normalize_area,
+    overlap_scores,
+    planning_overlap,
+)
 from app.services.course_history import CourseHistory, history_key
 from app.services.course_images import enrich_course_images
-from app.services.course_reasons import apply_personalized_reasons, visit_tip
+from app.services.course_reasons import CAFE, apply_personalized_reasons, visit_tip
 from app.services.course_routing import (
     distance_meters,
     estimated_walking,
@@ -68,6 +76,8 @@ class Candidate(BaseModel):
     cost: int = Field(default=0, ge=0)
     reason: str = ''
     meal: Literal['none', 'breakfast', 'lunch', 'dinner'] = 'none'
+    planned_area: str = Field(default='', max_length=100)
+    experiences: list[Experience] = Field(default_factory=list, max_length=5)
 
 
 class DraftDay(BaseModel):
@@ -104,6 +114,10 @@ class CourseState(TypedDict, total=False):
     repeated: bool
     discovered_days: set[int]
     deadline: float
+    recent_profiles: list[dict]
+    verified_fallback: dict
+    restore_fallback: bool
+    diversity_scores: dict
 
 
 async def draft_candidates(request: CourseRequestSchema, recent_ids: list[str], feedback: str = '') -> CourseDraft:
@@ -234,7 +248,28 @@ def _recoverable_draft(error: Exception) -> bool:
     return isinstance(error, (TimeoutError, httpx.TimeoutException, httpx.NetworkError, OutputParserException, ValidationError))
 
 
-def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_visits: int, recent_ids: set[str], rejected_plans: set[tuple] | None = None, *, plan_limit: int = MAX_DAY_PLANS, compact: bool = False) -> list[list[Visit]]:
+def _selection_metadata(selected: list[list[Visit]]) -> dict:
+    """Remember only selected attraction IDs and their original model choices."""
+    attractions = [(candidate, venue) for day in selected for candidate, venue in day if candidate.meal == 'none' and not _meal_capable(venue) and venue.place.category not in CAFE]
+    return {
+        'attraction_ids': sorted({venue.place.placeId for _, venue in attractions}),
+        'areas': sorted({normalize_area(candidate.planned_area) for candidate, _ in attractions if candidate.planned_area.strip()}),
+        'experiences': sorted({value for candidate, _ in attractions for value in candidate.experiences}),
+    }
+
+
+def _diversity_rank(path: list[Visit], profiles: list[dict]) -> tuple:
+    metadata = _selection_metadata([path])
+    scores = overlap_scores([venue.place.placeId for _, venue in path], metadata['attraction_ids'], profiles)
+    # Keeping a single planned area per day precedes visit count: mixed six-stop
+    # tours must not crowd a coherent four-stop alternative out of the shortlist.
+    areas = {normalize_area(candidate.planned_area) for candidate, _ in path if candidate.planned_area.strip()}
+    area_overlap = planning_overlap(metadata['areas'], profiles, 'areas')
+    misses_target = max(scores['attraction_overlap'], scores['place_overlap'], area_overlap) > MAX_OVERLAP
+    return (misses_target, scores['attraction_overlap'], scores['place_overlap'], area_overlap, max(0, len(areas) - 1), planning_overlap(metadata['experiences'], profiles, 'experiences'))
+
+
+def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_visits: int, recent_ids: set[str], rejected_plans: set[tuple] | None = None, *, plan_limit: int = MAX_DAY_PLANS, compact: bool = False, recent_profiles: list[dict] | None = None) -> list[list[Visit]]:
     """Find up to four optimistic plans; only real routes can confirm feasibility.
 
     The beam is capped at 48 states per depth, with at most 30 retained proposals.
@@ -282,11 +317,11 @@ def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_v
                 following.append(new_state)
                 if not required:
                     completed.append(new_state)
-        following.sort(key=lambda state: (state[1], sum(venue.place.placeId in recent_ids for _, venue in state[0]), state[2]))
+        following.sort(key=lambda state: ((_diversity_rank(state[0], recent_profiles) if recent_profiles else ()), state[1], sum(venue.place.placeId in recent_ids for _, venue in state[0]), state[2]))
         beam = following[:48]
         if not beam:
             break
-    completed.sort(key=lambda state: (len(state[0]) if compact else -len(state[0]), not any(candidate.meal == 'breakfast' for candidate, _ in state[0]), sum(venue.place.placeId in recent_ids for _, venue in state[0]), state[2], state[1]))
+    completed.sort(key=lambda state: ((_diversity_rank(state[0], recent_profiles) if recent_profiles else ()), len(state[0]) if compact else -len(state[0]), not any(candidate.meal == 'breakfast' for candidate, _ in state[0]), sum(venue.place.placeId in recent_ids for _, venue in state[0]), state[2], state[1]))
     # Keep an already feasible original proposal first; this avoids gratuitous reorder.
     original = []
     used: set[str] = set()
@@ -305,13 +340,13 @@ def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_v
     valid_meals = [candidate.meal for candidate, _ in original if candidate.meal != 'none']
     original_key = tuple((venue.place.placeId, candidate.meal) for candidate, venue in original)
     preferred = next((state for state in completed if tuple((venue.place.placeId, candidate.meal) for candidate, venue in state[0]) == original_key), None)
-    if not compact and preferred and valid_meals in (['lunch', 'dinner'], ['breakfast', 'lunch', 'dinner']):
+    if not recent_profiles and not compact and preferred and valid_meals in (['lunch', 'dinner'], ['breakfast', 'lunch', 'dinner']):
         completed.remove(preferred)
         completed.insert(0, preferred)
     plans: list[list[Visit]] = []
     signatures: set[tuple] = set()
     meal_sets: set[tuple] = set()
-    for diverse in (True, False):
+    for diverse in ((False,) if recent_profiles else (True, False)):
         for path, _, _ in completed:
             signature = _plan_signature(path)
             meal_set = tuple((candidate.meal, venue.place.placeId) for candidate, venue in path if candidate.meal != 'none')
@@ -330,6 +365,41 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
 
     Returns a compiled LangGraph; validation failures receive one repair, or two for multi-day trips.
     """
+    async def read_history(request: CourseRequestSchema) -> tuple[list[set[str]], list[dict]]:
+        recent = await history.recent(history_key(request))
+        read_profiles = getattr(history, 'recent_profiles', None)
+        if inspect.iscoroutinefunction(read_profiles):
+            profiles = await read_profiles(history_key(request))
+            if isinstance(profiles, list):
+                return recent, profiles
+        return recent, [{'place_ids': sorted(ids)} for ids in recent]
+
+    def optional_budget(state: CourseState) -> float:
+        remaining = state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.
+        return min(25., max(0., remaining))
+
+    async def optional_node(node: Callable[[CourseState], Awaitable[dict]], state: CourseState) -> dict:
+        """Bound novelty-only work while preserving time for safe completion."""
+        if not state.get('verified_fallback'):
+            return await node(state)
+        budget = optional_budget(state)
+        if budget <= .1:
+            return {'restore_fallback': True, 'feedback': ''}
+        try:
+            async with asyncio.timeout(budget):
+                return await node(state)
+        except TimeoutError:
+            logger.info('Course diversity fallback: optional validation timeout')
+            return {'restore_fallback': True, 'feedback': ''}
+
+    def history_feedback(state: CourseState) -> str:
+        profiles = state.get('recent_profiles', [])
+        areas = sorted({value for item in profiles for value in item.get('areas', [])})
+        experiences = sorted({value for item in profiles for value in item.get('experiences', [])})
+        return ('최근 계획 권역: ' + ', '.join(areas[:30]) + '. 최근 경험 구성: ' + ', '.join(experiences) + '. '
+                '사용자의 높은 취향을 유지하며 최근 계획과 다른 권역을 우선하세요. 권역은 하루 안에서 가까운 장소로 묶으세요. 낮은 취향을 다양성 때문에 강제하지 마세요. '
+                '각 후보에 모델 계획 planned_area와 experiences를 작성하세요. 권역 이름만 바꿔 동일 장소를 다시 제안하지 마세요.') if profiles else ''
+
     async def prepare(state: CourseState) -> dict:
         _progress('여행 조건과 최근 코스 이력을 확인하고 있습니다.')
         request = state['request']
@@ -337,21 +407,25 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         destination = await provider.resolve_destination(request.tripCondition.destinationCountry, request.tripCondition.destinationCity)
         unavailable = False
         try:
-            recent = await history.recent(history_key(request))
+            recent, profiles = await read_history(request)
         except (OSError, sqlite3.Error):
             logger.warning('Course history read unavailable')
-            recent, unavailable = [], True
-        return {'destination': destination, 'recent': recent, 'history_unavailable': unavailable, 'attempt': 0, 'feedback': '', 'validated_days': {}, 'place_cache': {}, 'route_cache': {}, 'candidate_pools': {}, 'rejected_plans': {}, 'repairing': False, 'repeated': False, 'discovered_days': set()}
+            recent, profiles, unavailable = [], [], True
+        return {'destination': destination, 'recent': recent, 'recent_profiles': profiles, 'history_unavailable': unavailable, 'attempt': 0, 'feedback': '', 'validated_days': {}, 'place_cache': {}, 'route_cache': {}, 'candidate_pools': {}, 'rejected_plans': {}, 'repairing': False, 'repeated': False, 'discovered_days': set(), 'restore_fallback': False, 'verified_fallback': {}}
 
     async def draft(state: CourseState) -> dict:
         _progress('취향에 맞는 장소 후보와 식사 대안을 구성하고 있습니다.')
         try:
-            result = await draft_candidates(state['request'], sorted(set().union(*state['recent'])) if state['recent'] else [], state.get('feedback', ''))
+            result = await draft_candidates(state['request'], sorted(set().union(*state['recent'])) if state['recent'] else [], history_feedback(state) + '\n' + state.get('feedback', ''))
         except Exception as error:
             if not _recoverable_draft(error):
                 raise
+            if state.get('verified_fallback'):
+                return {'attempt': state['attempt'] + 1, 'restore_fallback': True, 'feedback': ''}
             return {'attempt': state['attempt'] + 1, 'feedback': '모델의 일시적 응답 오류입니다. 기존에 확인한 장소를 유지하고 필요한 대안을 다시 제안하세요.'}
         if len(result.days) != state['request'].tripCondition.totalDays:
+            if state.get('verified_fallback'):
+                return {'attempt': state['attempt'] + 1, 'restore_fallback': True, 'feedback': ''}
             return {'attempt': state['attempt'] + 1, 'feedback': '요청한 여행 일수와 초안의 days 개수를 일치시키세요.'}
         result = result.model_copy(deep=True)
         for index, saved in state.get('validated_days', {}).items():
@@ -373,7 +447,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         for candidate_key, venue in zip(unique, results):
             if isinstance(venue, asyncio.CancelledError):
                 raise venue
-            if isinstance(venue, MapsProviderError) and venue.kind == 'unauthorized':
+            if isinstance(venue, MapsProviderError) and venue.kind in {'unauthorized', 'invalid'}:
                 raise venue
             if isinstance(venue, VerifiedPlace):
                 cache[candidate_key] = venue
@@ -440,7 +514,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                     additions[(venue.place.placeId, candidate.meal)] = (candidate, venue)
                 pools[index] = dict(list({**additions, **pools[index]}.items())[:30])
                 available = list(pools[index].values())
-            plans = _day_plans(available, day_date, max_stops, minimum_visits, recent_ids, state['rejected_plans'].get(index))
+            plans = _day_plans(available, day_date, max_stops, minimum_visits, recent_ids, state['rejected_plans'].get(index), recent_profiles=state.get('recent_profiles'))
             all_plans.append(plans)
             if not plans:
                 failures.append(f'{index + 1}일차 {day_date}: 점심·저녁과 명소 {minimum_visits}곳의 영업/식사 시간 조합 부족. 확인된 후보: {", ".join(candidate.name for candidate, _ in available)}. 일시 조회 실패(재조회 가능): {", ".join(name for name in rejected if name in temporary_names)}. 이름/위치 검증 미충족: {", ".join(name for name in rejected if name not in temporary_names)}. 다른 공식 장소명과 식사 대안을 제안하세요.')
@@ -542,11 +616,35 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             if index not in validated:
                 failures.append(f'{index + 1}일차 {day_date} 대안 {min(len(plans), limit)}개 소진: {last_error}')
         if failures:
+            if state.get('verified_fallback'):
+                return {'route_cache': cache, 'restore_fallback': True, 'feedback': ''}
             preserved = '; '.join(f'{index + 1}일차 유지: {", ".join(candidate.name for candidate, _ in value["selected"])}' for index, value in sorted(validated.items()))
             return {'validated_days': validated, 'route_cache': cache, 'rejected_plans': rejected_plans, 'feedback': ' / '.join(failures) + ' / ' + preserved}
-        if used in state['recent'] and state['attempt'] < _max_drafts(state):
-            return {'validated_days': {}, 'route_cache': cache, 'feedback': '최근 코스와 장소 집합이 동일합니다. 다른 장소를 제안하세요: ' + ', '.join(candidate.name for value in validated.values() for candidate, _ in value['selected'])}
-        return {'validated_days': validated, 'route_cache': cache, 'selected': [validated[index]['selected'] for index in range(len(state['day_plans']))], 'routes': [validated[index]['routes'] for index in range(len(state['day_plans']))], 'repeated': used in state['recent'], 'feedback': ''}
+        selected = [validated[index]['selected'] for index in range(len(state['day_plans']))]
+        routes = [validated[index]['routes'] for index in range(len(state['day_plans']))]
+        metadata = _selection_metadata(selected)
+        scores = overlap_scores(used, metadata['attraction_ids'], state.get('recent_profiles', []))
+        area_overlap = planning_overlap(metadata['areas'], state.get('recent_profiles', []), 'areas')
+        repeated = max(scores.values()) > MAX_OVERLAP or area_overlap > MAX_OVERLAP
+        rank = (max(scores.values()), area_overlap)
+        snapshot = copy.deepcopy({'draft_data': state['draft_data'], 'validated_days': validated, 'selected': selected, 'routes': routes, 'diversity_scores': {**scores, 'planned_area_overlap': area_overlap}, 'rank': rank})
+        previous = state.get('verified_fallback')
+        if previous and previous['rank'] <= rank:
+            snapshot = previous
+        logger.info('Course diversity: place_overlap=%.2f attraction_overlap=%.2f planned_area_overlap=%.2f attempt=%d', scores['place_overlap'], scores['attraction_overlap'], area_overlap, state['attempt'])
+        updates = {'validated_days': validated, 'route_cache': cache, 'selected': selected, 'routes': routes, 'repeated': repeated, 'feedback': '', 'verified_fallback': snapshot, 'diversity_scores': {**scores, 'planned_area_overlap': area_overlap}}
+        if repeated and state['attempt'] < _max_drafts(state) and optional_budget(state) > .1:
+            updates.update({'validated_days': {}, 'feedback': '최근 코스의 명소 또는 계획 권역이 반복됩니다. 취향을 유지하고 다른 권역의 실제 장소를 제안하세요. 이미 확인한 후보: ' + ', '.join(candidate.name for value in validated.values() for candidate, _ in value['selected'])})
+        elif repeated and previous and previous['rank'] <= rank:
+            updates['restore_fallback'] = True
+        return updates
+
+    async def restore(state: CourseState) -> dict:
+        """Restore a complete feasible snapshot, including its own draft metadata."""
+        _progress('확인된 장소와 이동 경로를 유지하여 일정을 마무리하고 있습니다.')
+        logger.info('Course diversity fallback: retained verified itinerary')
+        snapshot = state['verified_fallback']
+        return {**{key: copy.deepcopy(value) for key, value in snapshot.items() if key != 'rank'}, 'feedback': '', 'restore_fallback': False, 'repeated': True, 'attempt': _max_drafts(state)}
 
     async def schedule(state: CourseState) -> dict:
         _progress('확정한 일자별 장소·이동·영업·식사 시간을 최종 검증하고 있습니다.')
@@ -566,16 +664,29 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         unavailable = state.get('history_unavailable', False)
         novel = False
         try:
-            novel = await history.record_if_novel(history_key(request), ids)
-            if not novel and state['attempt'] < _max_drafts(state):
-                return {'validated_days': {}, 'feedback': '동시에 생성된 최근 코스와 중복됩니다. 다른 장소를 제안하세요.', 'recent': await history.recent(history_key(request))}
-        except (OSError, sqlite3.Error):
+            budget = optional_budget(state)
+            if budget <= .1:
+                raise TimeoutError('History storage skipped to preserve completion margin')
+            async with asyncio.timeout(budget):
+                record = history.record_if_novel
+                parameters = inspect.signature(record).parameters
+                supports_metadata = 'metadata' in parameters or any(value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values())
+                kwargs = {'metadata': _selection_metadata(state['selected']), 'max_overlap': None if state.get('repeated') else MAX_OVERLAP} if supports_metadata else {}
+                novel = await record(history_key(request), ids, **kwargs)
+                if not novel and state['attempt'] < _max_drafts(state) and optional_budget(state) > .1:
+                    recent, profiles = await read_history(request)
+                    return {'validated_days': {}, 'feedback': '동시에 생성된 최근 코스와 유사합니다. 취향과 검증된 후보를 유지하며 다른 권역·명소를 제안하세요.', 'recent': recent, 'recent_profiles': profiles}
+                if not novel and supports_metadata and not state.get('repeated'):
+                    # Explicit soft acceptance after bounded concurrency retries.
+                    novel = await record(history_key(request), ids, metadata=_selection_metadata(state['selected']))
+                    state = {**state, 'repeated': True}
+        except (OSError, sqlite3.Error, TimeoutError):
             logger.warning('Course history write unavailable')
             unavailable = True
         if unavailable:
             course.recommendationReason += ' 생성 이력 확인·저장이 일시적으로 제한되어 최근 코스와 겹칠 수 있어요.'
         elif not novel or state.get('repeated'):
-            course.recommendationReason += ' 확인 가능한 장소와 일정 조건이 제한되어 이전 코스와 같은 장소가 포함되어 있어요.'
+            course.recommendationReason += ' 확인 가능한 장소와 일정 조건이 제한되어 이전 코스와 일부 방문 장소 또는 계획 권역이 겹칠 수 있어요.'
         return {'course': course, 'feedback': ''}
 
     async def enrich_images(state: CourseState) -> dict:
@@ -600,7 +711,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                 plans.append([saved[index]['selected']])
                 continue
             available = [item for item in state['candidate_pools'].get(index, {}).values() if item[1].place.placeId not in reserved]
-            alternatives = _day_plans(available, start + timedelta(days=index), 3, 1, recent_ids, state['rejected_plans'].get(index), plan_limit=12, compact=True)
+            alternatives = _day_plans(available, start + timedelta(days=index), 3, 1, recent_ids, state['rejected_plans'].get(index), plan_limit=12, compact=True, recent_profiles=state.get('recent_profiles'))
             plans.append(alternatives)
             if not alternatives:
                 failures.append(f'{index + 1}일차: 점심·저녁과 명소를 포함한 검증 가능한 대안이 없습니다.')
@@ -608,9 +719,13 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
 
     def next_node(success: str) -> Callable[[CourseState], str]:
         def decide(state: CourseState) -> str:
+            if state.get('restore_fallback'):
+                return 'restore'
             if not state.get('feedback'):
                 return success
             if state['attempt'] >= _max_drafts(state):
+                if state.get('verified_fallback'):
+                    return 'restore'
                 if not state.get('repairing') and state.get('draft_data'):
                     return 'repair'
                 raise CourseGenerationError(state['feedback'])
@@ -619,13 +734,20 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
 
     graph = StateGraph(CourseState)
     for name, node in [('prepare', prepare), ('draft', draft), ('verify_places', verify_places), ('verify_routes', verify_routes), ('schedule', schedule), ('finalize', finalize), ('repair', repair), ('enrich_images', enrich_images)]:
-        graph.add_node(name, node)
+        if name in {'draft', 'verify_places', 'verify_routes'}:
+            async def bounded(state: CourseState, operation: Callable = node) -> dict:
+                return await optional_node(operation, state)
+            graph.add_node(name, bounded)
+        else:
+            graph.add_node(name, node)
+    graph.add_node('restore', restore)
+    graph.add_edge('restore', 'schedule')
     graph.add_edge(START, 'prepare')
     graph.add_edge('prepare', 'draft')
-    graph.add_conditional_edges('draft', next_node('verify_places'), ['verify_places', 'draft', 'repair'])
+    graph.add_conditional_edges('draft', next_node('verify_places'), ['verify_places', 'draft', 'repair', 'restore'])
     graph.add_edge('repair', 'verify_routes')
     for node, successor in [('verify_places', 'verify_routes'), ('verify_routes', 'schedule'), ('schedule', 'finalize'), ('finalize', 'enrich_images')]:
-        graph.add_conditional_edges(node, next_node(successor), [successor, 'draft', 'repair'])
+        graph.add_conditional_edges(node, next_node(successor), [successor, 'draft', 'repair', 'restore'])
     graph.add_edge('enrich_images', END)
     return graph.compile()
 

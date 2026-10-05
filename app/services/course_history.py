@@ -1,4 +1,4 @@
-"""Bounded persistent course history; stores hashed users and provider IDs only."""
+"""Bounded history of provider IDs and independent model planning choices."""
 
 import asyncio
 import hashlib
@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.core.config import settings
 from app.schemas.course import CourseRequestSchema
+from app.services.course_diversity import clean_metadata, overlap_scores
 
 
 def history_key(request: CourseRequestSchema) -> str:
@@ -38,6 +39,7 @@ class CourseHistory:
         connection = sqlite3.connect(self.path, timeout=10)
         try:
             connection.execute('CREATE TABLE IF NOT EXISTS courses (user_key TEXT NOT NULL, signature TEXT NOT NULL, ids TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY(user_key, signature))')
+            connection.execute('CREATE TABLE IF NOT EXISTS course_plans (user_key TEXT NOT NULL, signature TEXT NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(user_key, signature))')
         except sqlite3.Error:
             connection.close()
             raise
@@ -70,23 +72,35 @@ class CourseHistory:
         """
         await asyncio.to_thread(self._ensure_available)
 
-    def _operate(self, key: str, ids: set[str] | None) -> list[set[str]] | bool:
+    def _operate(self, key: str, ids: set[str] | None, metadata: dict | None = None, max_overlap: float | None = None, profiles: bool = False) -> list | bool:
         connection = self._connect()
         try:
             connection.execute('BEGIN IMMEDIATE')
             connection.execute('DELETE FROM courses WHERE created < ?', (time.time() - self.ttl_seconds,))
+            def prune_metadata() -> None:
+                connection.execute('DELETE FROM course_plans WHERE NOT EXISTS (SELECT 1 FROM courses WHERE courses.user_key = course_plans.user_key AND courses.signature = course_plans.signature)')
+
+            rows = connection.execute('SELECT c.ids, p.metadata FROM courses c LEFT JOIN course_plans p ON c.user_key = p.user_key AND c.signature = p.signature WHERE c.user_key = ? ORDER BY c.created DESC LIMIT ?', (key, self.max_entries)).fetchall()
+            entries = [{'place_ids': json.loads(row[0]), **(json.loads(row[1]) if row[1] else {'attraction_ids': [], 'areas': [], 'experiences': []})} for row in rows]
             if ids is None:
-                rows = connection.execute('SELECT ids FROM courses WHERE user_key = ? ORDER BY created DESC LIMIT ?', (key, self.max_entries)).fetchall()
-                result = [set(json.loads(row[0])) for row in rows]
+                result = entries if profiles else [set(item['place_ids']) for item in entries]
             else:
                 if not ids:
                     raise ValueError('Cannot record an empty course')
                 serialized = json.dumps(sorted(ids), separators=(',', ':'))
                 signature = hashlib.sha256(serialized.encode()).hexdigest()
-                cursor = connection.execute('INSERT OR IGNORE INTO courses VALUES (?, ?, ?, ?)', (key, signature, serialized, time.time()))
-                result = cursor.rowcount == 1
+                safe_metadata = clean_metadata(metadata, ids)
+                scores = overlap_scores(ids, safe_metadata['attraction_ids'], entries)
+                if max_overlap is not None and max(scores.values()) > max_overlap:
+                    result = False
+                else:
+                    cursor = connection.execute('INSERT OR IGNORE INTO courses VALUES (?, ?, ?, ?)', (key, signature, serialized, time.time()))
+                    result = cursor.rowcount == 1
+                    if result and metadata is not None:
+                        connection.execute('INSERT INTO course_plans VALUES (?, ?, ?)', (key, signature, json.dumps(safe_metadata, separators=(',', ':'))))
                 connection.execute('DELETE FROM courses WHERE user_key = ? AND signature NOT IN (SELECT signature FROM courses WHERE user_key = ? ORDER BY created DESC LIMIT ?)', (key, key, self.max_entries))
                 connection.execute('DELETE FROM courses WHERE rowid NOT IN (SELECT rowid FROM courses ORDER BY created DESC LIMIT 10000)')
+            prune_metadata()
             connection.commit()
             return result
         finally:
@@ -96,6 +110,15 @@ class CourseHistory:
         """Return recent successful place sets; SQLite I/O runs off the event loop."""
         return await asyncio.to_thread(self._operate, user_key, None)
 
-    async def record_if_novel(self, user_key: str, place_ids: set[str]) -> bool:
-        """Atomically accept a new place set, or return False for a duplicate."""
-        return await asyncio.to_thread(self._operate, user_key, place_ids)
+    async def recent_profiles(self, user_key: str) -> list[dict]:
+        """Read bounded planning profiles, including backward compatible ID-only rows."""
+        return await asyncio.to_thread(self._operate, user_key, None, profiles=True)
+
+    async def record_if_novel(self, user_key: str, place_ids: set[str], *, metadata: dict | None = None, max_overlap: float | None = None) -> bool:
+        """Atomically check exact or optional partial overlap before remembering IDs.
+
+        The partial guard uses the latest rows under BEGIN IMMEDIATE. Metadata
+        contains only selected IDs and independently generated planning choices.
+        OSError and SQLite errors propagate to the caller's fail-open policy.
+        """
+        return await asyncio.to_thread(self._operate, user_key, place_ids, metadata, max_overlap)
