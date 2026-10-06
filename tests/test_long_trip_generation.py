@@ -146,7 +146,7 @@ async def test_daily_model_prompt_has_exact_assignment_and_whole_trip_context(mo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('configured', [120, 300, 45])
-async def test_request_deadline_never_exceeds_ninety_seconds(mocker, trip_request, configured):
+async def test_request_deadline_honors_configured_budget(mocker, trip_request, configured):
     from app.agent.course_graph import stream_course_generation
 
     captured = []
@@ -162,7 +162,7 @@ async def test_request_deadline_never_exceeds_ninety_seconds(mocker, trip_reques
     mocker.patch('app.agent.course_graph.settings.COURSE_TIMEOUT_SECONDS', configured)
     before = asyncio.get_running_loop().time()
     assert [event async for event in stream_course_generation(trip_request)]
-    assert 0 < captured[0]['deadline'] - before <= min(90, configured) + .1
+    assert captured[0]['deadline'] - before == pytest.approx(configured - 1, abs=.1)
 
 
 def graph_with_days(mocker, tmp_path, trip_request, *, aliases=False, alternatives=False):

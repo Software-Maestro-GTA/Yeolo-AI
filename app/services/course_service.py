@@ -33,7 +33,7 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
     Once streaming starts, failures emit progress and close without complete.
     Cancellation closes the graph and its outstanding external operations.
     """
-    deadline = asyncio.get_running_loop().time() + min(90., settings.COURSE_TIMEOUT_SECONDS)
+    deadline = asyncio.get_running_loop().time() + settings.COURSE_TIMEOUT_SECONDS
     try:
         start = date.fromisoformat(request.tripCondition.startDate)
         start + timedelta(days=request.tripCondition.totalDays - 1)

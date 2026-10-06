@@ -1560,6 +1560,20 @@ async def test_graph_skips_images_when_final_phase_has_no_reserved_time(request_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('explicit_deadline', [False, True])
+async def test_draft_phase_uses_shared_budget_without_forty_six_second_cap(request_data, graph_dependencies, explicit_deadline):
+    from app.agent.course_graph import build_course_graph
+
+    provider, history, llm, _, _ = graph_dependencies
+    state = {'request': request_data, 'attempt': 0}
+    if explicit_deadline:
+        state['deadline'] = asyncio.get_running_loop().time() + 300
+    await build_course_graph(provider, history).ainvoke(state)
+    expected = state['deadline'] - 28 if explicit_deadline else None
+    assert llm.call_args.kwargs['deadline'] == expected
+
+
+@pytest.mark.asyncio
 async def test_stream_passes_outer_deadline_to_graph_and_publishes_image_update(request_data, graph_dependencies, mocker):
     from app.agent.course_graph import build_course_graph, stream_course_generation
 
@@ -1583,7 +1597,8 @@ async def test_stream_passes_outer_deadline_to_graph_and_publishes_image_update(
     events = [event async for event in stream_course_generation(request_data)]
     assert len(events) == 1 and events[0][0] == 'complete'
     assert events[0][1]['course']['coverImageUrl'] == enriched.coverImageUrl
-    assert before < captured[0]['deadline'] <= before + 121
+    from app.core.config import settings
+    assert captured[0]['deadline'] - before == pytest.approx(settings.COURSE_TIMEOUT_SECONDS - 1, abs=.1)
 
 
 @pytest.mark.asyncio

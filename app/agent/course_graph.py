@@ -64,6 +64,8 @@ from app.services.day_summary import MAX_DAY_SUMMARY_LENGTH, compose_day_summary
 from app.services.maps_cost import MapsCostMetrics
 
 logger = logging.getLogger(__name__)
+DAILY_DRAFT_TIMEOUT_SECONDS = 60.
+MIN_DAILY_DRAFT_BUDGET_SECONDS = 10.
 
 
 class CourseGenerationError(ValueError):
@@ -136,16 +138,21 @@ class PartialDraftError(TimeoutError):
 async def _draft_day_candidates(request: CourseRequestSchema, recent_ids: list[str], feedback: str = '', *, day_index: int, seed: str, deadline: float | None = None, day_hints: list[str] | None = None) -> CourseDraft:
     """Generate exactly one assigned day, keeping whole-trip planning context.
 
+    The SDK receives a valid 60-second deadline; the local timer additionally
+    honors the shared absolute deadline. Calls with under ten seconds left skip
+    the provider, allowing the caller to retain already completed days.
+
     Raises:
-        TimeoutError: The shared request has no remaining drafting budget.
+        TimeoutError: Insufficient budget to start, or local execution timed out.
         ValueError: The provider did not return exactly one day.
     """
-    remaining = 22. if deadline is None else min(22., deadline - asyncio.get_running_loop().time())
-    if remaining <= 0:
-        raise TimeoutError('Daily candidate budget exhausted')
+    remaining = DAILY_DRAFT_TIMEOUT_SECONDS if deadline is None else min(DAILY_DRAFT_TIMEOUT_SECONDS, deadline - asyncio.get_running_loop().time())
+    if remaining < MIN_DAILY_DRAFT_BUDGET_SECONDS:
+        raise TimeoutError('Insufficient budget to start a daily candidate request')
     assigned = date.fromisoformat(request.tripCondition.startDate) + timedelta(days=day_index)
     context = f'이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. reason은 25자 이내 한 문장만 작성하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{feedback}'
-    model = ChatGoogleGenerativeAI(model=settings.GEMINI_MODEL_NAME, google_api_key=settings.GEMINI_API_KEY, temperature=0.7, thinking_level='low', max_retries=0, timeout=remaining, max_output_tokens=5000)
+    # The provider deadline stays valid even when the local request expires sooner.
+    model = ChatGoogleGenerativeAI(model=settings.GEMINI_MODEL_NAME, google_api_key=settings.GEMINI_API_KEY, temperature=0.7, thinking_level='low', max_retries=0, timeout=DAILY_DRAFT_TIMEOUT_SECONDS, max_output_tokens=5000)
     chain = COURSE_CANDIDATE_PROMPT | model.with_structured_output(CourseDraft)
     async with asyncio.timeout(remaining):
         result = await chain.ainvoke({
@@ -186,11 +193,12 @@ async def draft_candidates(request: CourseRequestSchema, recent_ids: list[str], 
                     errors.pop(index, None)
                     return
                 except Exception as error:
-                    logger.warning('Course daily draft failed: day=%d attempt=%d error=%s code=%s elapsed=%.2f', index + 1, attempt + 1, type(error).__name__, getattr(error, 'code', None), asyncio.get_running_loop().time() - started)
+                    provider_error = _draft_api_error(error)
+                    logger.warning('Course daily draft failed: day=%d attempt=%d error=%s code=%s elapsed=%.2f', index + 1, attempt + 1, type(error).__name__, provider_error.code if provider_error is not None else None, asyncio.get_running_loop().time() - started)
                     if not _recoverable_draft(error):
                         raise
                     errors[index] = error
-                    if attempt or (deadline is not None and deadline - asyncio.get_running_loop().time() < 2):
+                    if attempt or (deadline is not None and deadline - asyncio.get_running_loop().time() < MIN_DAILY_DRAFT_BUDGET_SECONDS + .2):
                         return
                     await asyncio.sleep(.2)
     tasks = [asyncio.create_task(one(index)) for index in pending]
@@ -335,10 +343,31 @@ def _max_drafts(state: CourseState) -> int:
     return 3 if state['request'].tripCondition.totalDays > 1 else 2
 
 
-def _recoverable_draft(error: Exception) -> bool:
-    """Retry temporary model and structured-output failures, never configuration."""
-    if isinstance(error, APIError):
-        return error.code == 429 or 500 <= error.code < 600
+def _draft_api_error(error: BaseException) -> APIError | None:
+    """Find a typed provider failure through wrappers without revisiting cycles."""
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, APIError):
+            return current
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+    return None
+
+
+def _recoverable_draft(error: BaseException) -> bool:
+    """Retry typed temporary provider/model failures while propagating cancellation."""
+    if isinstance(error, asyncio.CancelledError):
+        return False
+    provider_error = _draft_api_error(error)
+    if provider_error is not None:
+        return provider_error.code == 429 or 500 <= provider_error.code < 600
     return isinstance(error, (TimeoutError, httpx.TimeoutException, httpx.NetworkError, OutputParserException, ValidationError))
 
 
@@ -546,7 +575,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         existing.update({index: DraftDay(candidates=[candidate for candidate, _ in saved['selected']]) for index, saved in state.get('validated_days', {}).items()})
         pending = [index for index in range(state['request'].tripCondition.totalDays) if index not in existing]
         try:
-            draft_deadline = min(state.get('deadline', float('inf')) - 28., asyncio.get_running_loop().time() + 46.)
+            draft_deadline = state['deadline'] - 28. if 'deadline' in state else None
             result = await draft_candidates(state['request'], sorted(set().union(*state['recent'])) if state['recent'] else [], history_feedback(state) + '\n' + state.get('feedback', ''), pending_days=pending, existing_days=existing, deadline=draft_deadline)
         except PartialDraftError as error:
             return {'partial_drafts': error.days, 'attempt': state['attempt'] + 1, 'feedback': '일부 일자 후보 응답이 지연되었습니다. 완료한 일자는 유지하고 누락한 일자만 보충하세요.'}
@@ -954,7 +983,7 @@ async def stream_course_generation(request: CourseRequestSchema, *, deadline: fl
     completed: dict | None = None
     provider = VerifiedMapsProvider(concurrency=settings.COURSE_MAPS_CONCURRENCY)
     now = asyncio.get_running_loop().time()
-    request_deadline = min(deadline if deadline is not None else float('inf'), now + min(90., settings.COURSE_TIMEOUT_SECONDS))
+    request_deadline = min(deadline if deadline is not None else float('inf'), now + settings.COURSE_TIMEOUT_SECONDS)
     remaining = max(0., request_deadline - now)
     # Leave up to one second for cancelled provider/graph work to close cleanly.
     processing_deadline = request_deadline - min(1., remaining * .1)
