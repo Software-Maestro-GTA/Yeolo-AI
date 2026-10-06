@@ -207,14 +207,14 @@ async def test_novelty_repair_failure_returns_captured_verified_course(diversity
             places[candidate.name] = VerifiedPlace(venue.place.model_copy(update={'latitude': 0.}))
         llm.side_effect = [similar, alternate]
     course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
-    assert course.title == similar.title
+    assert course.title == f'{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행'
     assert len(course.itinerary.days[0].stops) == 5
     assert all('광화문 북촌' in stop.place.placeName for stop in course.itinerary.days[0].stops)
     assert '이전' in course.recommendationReason or '중복' in course.recommendationReason
     assert llm.await_count <= 2
     assert all(stop.transportToNext.minutes <= 90 for stop in course.itinerary.days[0].stops[:-1])
-    offline_place_copy.assert_awaited_once()
-    assert {row['placeId'] for row in offline_place_copy.call_args.args[0]['stops']} == {stop.place.placeId for stop in course.itinerary.days[0].stops}
+    offline_place_copy.assert_not_awaited()
+    assert all(stop.reason and stop.memo for stop in course.itinerary.days[0].stops)
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,7 @@ async def test_near_deadline_novelty_retry_does_not_lose_verified_fallback(diver
     now = asyncio.get_running_loop().time()
     state = await asyncio.wait_for(build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0, 'deadline': now + .6}), timeout=.9)
     assert len(state['course'].itinerary.days[0].stops) == 5
-    assert state['course'].title == draft.title
+    assert state['course'].title == f'{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행'
     assert asyncio.get_running_loop().time() < now + .9
 
 

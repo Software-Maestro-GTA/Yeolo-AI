@@ -50,7 +50,12 @@ from app.services.course_diversity import (
 )
 from app.services.course_history import CourseHistory, history_key
 from app.services.course_images import enrich_course_images
-from app.services.course_reasons import CAFE, apply_personalized_reasons, visit_tip
+from app.services.course_reasons import (
+    CAFE,
+    apply_personalized_reasons,
+    verified_course_tags,
+    visit_tip,
+)
 from app.services.course_routing import (
     distance_meters,
     valid_route,
@@ -826,9 +831,9 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
 
     async def finalize(state: CourseState) -> dict:
         _progress('최종 일정과 최근 코스의 중복 여부를 확인하고 있습니다.')
-        request, proposal = state['request'], state['draft_data']
+        request = state['request']
         trip = request.tripCondition
-        course = CourseSchema(title=proposal.title, destinationCountry=trip.destinationCountry, destinationCity=trip.destinationCity, startDate=trip.startDate, totalDays=trip.totalDays, tags=proposal.tags, recommendationReason=apply_personalized_reasons(request, state['days']), itinerary=ItinerarySchema(days=state['days']))
+        course = CourseSchema(title=f'{trip.destinationCity} {trip.totalDays}일 여행', destinationCountry=trip.destinationCountry, destinationCity=trip.destinationCity, startDate=trip.startDate, totalDays=trip.totalDays, tags=verified_course_tags(state['days']), recommendationReason=apply_personalized_reasons(request, state['days']), itinerary=ItinerarySchema(days=state['days']))
         ids = {stop.place.placeId for day in course.itinerary.days for stop in day.stops}
         unavailable = state.get('history_unavailable', False)
         novel = False
@@ -859,7 +864,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         return {'course': course, 'feedback': ''}
 
     async def enrich_place_copy(state: CourseState) -> dict:
-        """Write final-place prose once, reserving photo and completion budgets."""
+        """Apply only grounded server prose, preserving verified venue facts."""
         _progress('확정한 장소의 추천 이유와 방문 팁을 작성하고 있습니다.')
         budget = 25.0
         if 'deadline' in state:
@@ -871,7 +876,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             for index, selected in enumerate(state['selected'])
             for sequence, (candidate, venue) in enumerate(selected)
         }
-        course = await enrich_course_place_copy(state['course'], state['request'], selection_context=context, timeout_seconds=budget)
+        course = await enrich_course_place_copy(state['course'], state['request'], selection_context=context, timeout_seconds=budget, evidence_only=True)
         return {'course': course}
 
     async def enrich_images(state: CourseState) -> dict:
