@@ -293,6 +293,22 @@ def individual_place_category_supported(category: str) -> bool:
     return not (_geographic_area([category]) or _transit_node([category]))
 
 
+TOURISM_CATEGORIES = frozenset({
+    'museum', 'art_gallery', 'cultural_center', 'historical_landmark', 'historical_place', 'monument',
+    'heritage_museum', 'history_museum', 'buddhist_temple', 'shinto_shrine', 'hindu_temple', 'mosque',
+    'church', 'synagogue', 'library', 'park', 'national_park', 'state_park', 'nature_preserve',
+    'botanical_garden', 'garden', 'hiking_area', 'beach', 'wildlife_park', 'aquarium', 'zoo',
+    'planetarium', 'observation_deck', 'tourist_attraction', 'amusement_park', 'theme_park', 'water_park',
+    'shopping_mall', 'department_store', 'shopping_center', 'clothing_store', 'book_store',
+    'gift_shop', 'souvenir_store', 'market', 'spa', 'wellness_center', 'massage', 'sauna', 'yoga_studio',
+})
+
+
+def tourism_category_supported(category: str) -> bool:
+    """Admit concrete non-food tourism venues for nearby slot supplementation."""
+    return category in TOURISM_CATEGORIES
+
+
 def _place_category(raw: dict) -> str:
     """Prefer the primary business; otherwise retain a specific provider type."""
     if raw.get('primaryType'):
@@ -605,6 +621,43 @@ class VerifiedMapsProvider:
         for raw in data.get('places', []):
             verified = _verified_place(raw, destination, 'lunch')
             if verified is not None and meal_category_supported(verified.place.category, 'dinner') and distance_meters(anchor, verified) <= 1000:
+                matches[verified.place.placeId] = verified
+        return sorted(matches.values(), key=lambda venue: distance_meters(anchor, venue))[:5]
+
+    async def discover_attractions(self, destination: Destination, anchor: VerifiedPlace) -> list[VerifiedPlace]:
+        """Find at most five real tourism venues near an existing preference anchor.
+
+        Args:
+            destination: Verified country and destination viewport.
+            anchor: Verified tourism venue determining the local category search.
+        Returns:
+            Unique official provider venues within two kilometres, nearest first.
+        Raises:
+            MapsProviderError: Invalid anchor, authentication or provider failure.
+        """
+        from app.services.course_routing import distance_meters
+
+        latitude, longitude = anchor.place.latitude, anchor.place.longitude
+        if not tourism_category_supported(anchor.place.category) or not all(math.isfinite(value) for value in (latitude, longitude)) or not -90 <= latitude <= 90 or not -180 <= longitude <= 180 or not destination.contains(latitude, longitude):
+            raise MapsProviderError('invalid')
+        data = await self._request('POST', 'https://places.googleapis.com/v1/places:searchText', headers={
+            'X-Goog-Api-Key': self.api_key,
+            'X-Goog-FieldMask': ','.join(f'places.{field}' for field in PLACE_DETAIL_FIELDS.split(',')),
+        }, json={
+            'textQuery': anchor.place.category.replace('_', ' '),
+            'languageCode': 'ko' if destination.country_code == 'KR' else 'en',
+            'pageSize': 5,
+            'locationBias': {'circle': {'center': {'latitude': latitude, 'longitude': longitude}, 'radius': 2000}},
+        })
+        entries = data.get('places', [])
+        if not isinstance(entries, list):
+            raise MapsProviderError('invalid')
+        matches: dict[str, VerifiedPlace] = {}
+        for raw in entries:
+            if not isinstance(raw, dict):
+                continue
+            verified = _verified_place(raw, destination, 'none')
+            if verified is not None and tourism_category_supported(verified.place.category) and verified.place.placeId != anchor.place.placeId.removeprefix('places/') and distance_meters(anchor, verified) <= 2000:
                 matches[verified.place.placeId] = verified
         return sorted(matches.values(), key=lambda venue: distance_meters(anchor, venue))[:5]
 

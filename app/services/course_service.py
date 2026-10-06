@@ -1,6 +1,7 @@
 """Deliver live graph progress through the existing SSE event contract."""
 
 import asyncio
+import inspect
 import json
 import logging
 import sqlite3
@@ -32,6 +33,7 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
     Once streaming starts, failures emit progress and close without complete.
     Cancellation closes the graph and its outstanding external operations.
     """
+    deadline = asyncio.get_running_loop().time() + settings.COURSE_TIMEOUT_SECONDS
     try:
         start = date.fromisoformat(request.tripCondition.startDate)
         start + timedelta(days=request.tripCondition.totalDays - 1)
@@ -42,8 +44,9 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
     if not settings.GEMINI_API_KEY or not settings.GOOGLE_MAPS_API_KEY:
         raise HTTPException(status_code=500, detail='AI 코스 생성 설정을 확인할 수 없습니다.')
     try:
-        await CourseHistory().ensure_available()
-    except (OSError, sqlite3.Error):
+        async with asyncio.timeout(min(1., max(.001, deadline - asyncio.get_running_loop().time()))):
+            await CourseHistory().ensure_available()
+    except (OSError, sqlite3.Error, TimeoutError):
         logger.warning('Course history preflight unavailable; generating with limited duplicate protection')
 
     async def sse_generator() -> AsyncGenerator[str]:
@@ -52,7 +55,9 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
 
         async def produce() -> None:
             try:
-                async with aclosing(stream_course_generation(request)) as source:
+                parameters = inspect.signature(stream_course_generation).parameters
+                kwargs = {'deadline': deadline} if 'deadline' in parameters else {}
+                async with aclosing(stream_course_generation(request, **kwargs)) as source:
                     async for item in source:
                         await queue.put(item)
             except asyncio.CancelledError:

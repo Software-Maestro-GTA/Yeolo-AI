@@ -31,7 +31,7 @@ def test_estimate_has_null_route_distance_and_conservative_formula():
     assert '보행 경로' in result.memo and any(word in result.memo for word in ['미제공', '포함되지', '제공하지'])
     assert not any(formula in result.memo for formula in ['우회 계수', '3km/h', '여유 5분'])
     assert is_estimated_walking(result)
-    assert valid_route(result, first, second)
+    assert not valid_route(result, first, second)
     assert set(result.model_dump()) == set(TransportToNextSchema.model_fields)
 
 

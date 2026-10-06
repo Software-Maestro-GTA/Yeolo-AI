@@ -92,7 +92,7 @@ async def test_missing_verified_route_cannot_produce_course(request_data, graph_
     provider.route.side_effect = ValueError('No verified route')
     with pytest.raises(ValueError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 2
+    assert llm.await_count <= 4
 
 
 @pytest.mark.asyncio
@@ -105,7 +105,7 @@ async def test_closed_all_day_places_cannot_produce_course(request_data, graph_d
     provider.search.side_effect = lambda candidate, destination: VerifiedPlace(place=places[candidate.name].place, periods=[])
     with pytest.raises(ValueError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 2
+    assert llm.await_count <= 4
 
 
 @pytest.mark.asyncio
@@ -473,7 +473,7 @@ def three_day_dinner_conflict(request_data, graph_dependencies, alternate_closes
     )
     initial = draft.model_copy(deep=True)
     initial.days[1].candidates[1].name = '찾을 수 없는 점심식당'
-    llm.side_effect = [initial, draft, draft]
+    llm.side_effect = [initial, draft, draft, draft, draft]
     return draft
 
 
@@ -518,7 +518,7 @@ async def test_three_day_impossible_dinner_still_fails_without_history_or_unboun
         }])
     with pytest.raises(CourseGenerationError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 3
+    assert llm.await_count <= 5
     assert await history.recent(history_key(request_data)) == []
 
 
@@ -605,7 +605,7 @@ async def test_breakfast_only_venue_cannot_fill_missing_lunch_slot(request_data,
     places[breakfast.name] = VerifiedPlace(places['점심식당'].place.model_copy(update={'placeId': 'places/breakfast-only', 'placeName': breakfast.name, 'category': 'breakfast_restaurant'}))
     with pytest.raises(CourseGenerationError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 2
+    assert llm.await_count <= 4
 
 
 @pytest.mark.asyncio
@@ -626,7 +626,7 @@ async def test_market_cannot_supply_required_lunch_by_label_or_remapping(request
     places[market.name] = VerifiedPlace(places['점심식당'].place.model_copy(update={'placeId': 'places/market-visit', 'placeName': market.name, 'category': 'market'}))
     with pytest.raises(CourseGenerationError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 2
+    assert llm.await_count <= 4
 
 
 @pytest.mark.asyncio
@@ -808,7 +808,7 @@ def candidate_pool_repair_fixture(request_data, graph_dependencies, include_seco
         first.days[2].candidates[4].name = '검증불가 추가명소'
     repaired = draft.model_copy(deep=True)
     repaired.days[2].candidates = [candidate for candidate in repaired.days[2].candidates if candidate.meal != 'none']
-    llm.side_effect = [first, repaired, repaired]
+    llm.side_effect = [first, repaired, repaired, repaired, repaired]
     return first, repaired
 
 
@@ -828,9 +828,8 @@ async def test_failed_day_reuses_verified_attractions_when_retry_only_proposes_m
     assert {stop.place.placeName for stop in days[2].stops} == {'미술관-pool-3', '공원-pool-3', '역사관-pool-3', '점심식당-pool-3', '저녁식당-pool-3'}
     assert not any('검증불가' in stop.place.placeName for day in days for stop in day.stops)
     assert all(day.stops[-1].transportToNext.type == 'none' for day in days)
-    offline_place_copy.assert_awaited_once()
-    assert len(offline_place_copy.call_args.args[0]['stops']) == sum(len(day.stops) for day in days)
-    assert {row['day'] for row in offline_place_copy.call_args.args[0]['stops']} == {1, 2, 3}
+    offline_place_copy.assert_not_awaited()
+    assert all(stop.reason and stop.memo for day in days for stop in day.stops)
 
 
 @pytest.mark.asyncio
@@ -841,7 +840,7 @@ async def test_candidate_pool_reduces_optional_visits_without_inventing_missing_
     provider, history, llm, _, _ = graph_dependencies
     candidate_pool_repair_fixture(request_data, graph_dependencies, include_second_attraction=False)
     course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
-    assert llm.await_count <= 3
+    assert llm.await_count <= 5
     last = course.itinerary.days[2]
     assert len(last.stops) == 3
     assert {stop.place.placeName for stop in last.stops} == {'미술관-pool-3', '점심식당-pool-3', '저녁식당-pool-3'}
@@ -968,21 +967,16 @@ async def test_korean_routes_use_transit_and_trip_departure_time(request_data, g
 
 
 @pytest.mark.asyncio
-async def test_missing_route_with_nearby_verified_places_returns_explicit_estimate(request_data, graph_dependencies):
-    from app.agent.course_graph import build_course_graph
+async def test_missing_route_with_nearby_verified_places_never_invents_success(request_data, graph_dependencies):
+    from app.agent.course_graph import CourseGenerationError, build_course_graph
     from app.agent.tools.verified_maps import NoRouteError
+    from app.services.course_history import history_key
 
-    provider, history, llm, _, places = graph_dependencies
+    provider, history, _, _, _ = graph_dependencies
     provider.route.side_effect = NoRouteError()
-    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
-    assert {stop.place.placeId for stop in course.itinerary.days[0].stops} == {p.place.placeId for p in places.values()}
-    for stop in course.itinerary.days[0].stops[:-1]:
-        assert stop.transportToNext.type == 'walking'
-        assert stop.transportToNext.distance is None
-        assert 5 <= stop.transportToNext.minutes <= 35
-        assert '[추정 도보]' in stop.transportToNext.memo
-        assert '확인된 약' not in stop.reason
-    llm.assert_awaited_once()
+    with pytest.raises(CourseGenerationError):
+        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
+    assert await history.recent(history_key(request_data)) == []
 
 
 @pytest.mark.asyncio
@@ -1011,7 +1005,7 @@ async def test_distant_missing_routes_cannot_be_invented_as_short_walks(request_
     provider.route.side_effect = NoRouteError()
     with pytest.raises(ValueError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 2
+    assert llm.await_count <= 4
     assert await history.recent(history_key(request_data)) == []
 
 
@@ -1056,10 +1050,10 @@ async def test_failed_final_llm_repair_keeps_verified_pool_for_lighter_day(reque
 
     provider, history, llm, _, _ = graph_dependencies
     first, repaired = candidate_pool_repair_fixture(request_data, graph_dependencies, include_second_attraction=False)
-    llm.side_effect = [first, repaired, TimeoutError('final model timeout')]
+    llm.side_effect = [first, repaired] + [TimeoutError('final model timeout')] * 3
     result = await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
     days = result['course'].itinerary.days
-    assert llm.await_count == 3
+    assert llm.await_count == 5
     assert len(days) == 3
     assert len(days[2].stops) == 3
     assert {stop.place.placeName for stop in days[2].stops} == {'미술관-pool-3', '점심식당-pool-3', '저녁식당-pool-3'}
@@ -1134,24 +1128,21 @@ async def test_repair_requires_real_attraction_in_addition_to_real_meals(request
     draft.days[0].candidates = [candidate for candidate in draft.days[0].candidates if candidate.meal != 'none']
     with pytest.raises(ValueError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 2
+    assert llm.await_count <= 4
     assert await history.recent(history_key(request_data)) == []
 
 
 @pytest.mark.asyncio
-async def test_estimated_course_serializes_under_current_api_and_passes_output_validator(request_data, graph_dependencies):
+async def test_verified_course_serializes_under_current_api_and_passes_output_validator(request_data, graph_dependencies):
     from app.agent.course_graph import build_course_graph
-    from app.agent.tools.verified_maps import NoRouteError
     from scripts.verify_course_output import validate_output
 
     provider, history, _, _, _ = graph_dependencies
-    provider.route.side_effect = NoRouteError()
     course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
     output = {'completed': True, 'events': [{'event': 'progress', 'data': {'step': 'GENERATING_ROUTE', 'message': '검증 중'}}, {'event': 'complete', 'data': {}}], 'course': course.model_dump()}
     report = validate_output(request_data.model_dump(), output)
     assert report['passed'], report['errors']
-    assert any('추정' in warning for warning in report['warnings'])
-    assert not any(repeated in course.itinerary.days[0].memo for repeated in ['추정', '직선거리', '재확인', '확인이 필요'])
+    assert not any('추정 도보' in stop.transportToNext.memo for stop in course.itinerary.days[0].stops[:-1])
 
 
 @pytest.mark.asyncio
@@ -1181,23 +1172,21 @@ async def test_model_authentication_failure_is_not_retried(request_data, graph_d
 
 
 @pytest.mark.asyncio
-async def test_nearby_route_transient_exhaustion_can_use_disclosed_formula_estimate(request_data, graph_dependencies):
-    from app.agent.course_graph import build_course_graph
+async def test_nearby_route_transient_exhaustion_never_becomes_formula_success(request_data, graph_dependencies):
+    from app.agent.course_graph import CourseGenerationError, build_course_graph
     from app.agent.tools.verified_maps import MapsProviderError
+    from app.services.course_history import history_key
 
-    provider, history, llm, _, _ = graph_dependencies
+    provider, history, _, _, _ = graph_dependencies
     provider.route.side_effect = MapsProviderError(kind='transient', status_code=503)
-    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
-    for stop in course.itinerary.days[0].stops[:-1]:
-        assert stop.transportToNext.distance is None
-        assert '[추정 도보]' in stop.transportToNext.memo
-        assert 5 <= stop.transportToNext.minutes <= 35
-    llm.assert_awaited_once()
+    with pytest.raises(CourseGenerationError):
+        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
+    assert await history.recent(history_key(request_data)) == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['no_route', 'route_data', 'transient'])
-async def test_transit_analysis_failure_tries_real_walk_before_formula_or_redraft(request_data, graph_dependencies, failure):
+async def test_transit_analysis_failure_tries_real_walk_before_redraft(request_data, graph_dependencies, failure):
     from collections import Counter
 
     from app.agent.course_graph import build_course_graph
@@ -1248,7 +1237,7 @@ async def test_real_walk_over_duration_cap_is_not_replaced_by_optimistic_formula
     provider.route.side_effect = route
     with pytest.raises(ValueError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 2
+    assert llm.await_count <= 4
     assert await history.recent(history_key(request_data)) == []
     assert any(call.kwargs['mode'] == 'walking' for call in provider.route.await_args_list)
 
@@ -1352,7 +1341,7 @@ async def test_same_temporary_route_failure_is_deduplicated_per_stage_and_retrie
     provider.route.side_effect = route
     course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
     assert len(course.itinerary.days[0].stops) >= 3
-    assert llm.await_count == 2
+    assert 2 <= llm.await_count <= 4
     first_stage = [entry[1:] for entry in queried if entry[0] == 1]
     second_stage = [entry[1:] for entry in queried if entry[0] == 2]
     assert first_stage and second_stage
@@ -1412,7 +1401,7 @@ async def test_empty_meal_discovery_is_bounded_to_one_request_per_day(request_da
     draft.days[0].candidates = [candidate for candidate in draft.days[0].candidates if candidate.meal != 'dinner']
     with pytest.raises(ValueError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 2
+    assert llm.await_count <= 4
     provider.discover_meals.assert_awaited_once()
 
 
@@ -1571,6 +1560,20 @@ async def test_graph_skips_images_when_final_phase_has_no_reserved_time(request_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('explicit_deadline', [False, True])
+async def test_draft_phase_uses_shared_budget_without_forty_six_second_cap(request_data, graph_dependencies, explicit_deadline):
+    from app.agent.course_graph import build_course_graph
+
+    provider, history, llm, _, _ = graph_dependencies
+    state = {'request': request_data, 'attempt': 0}
+    if explicit_deadline:
+        state['deadline'] = asyncio.get_running_loop().time() + 300
+    await build_course_graph(provider, history).ainvoke(state)
+    expected = state['deadline'] - 28 if explicit_deadline else None
+    assert llm.call_args.kwargs['deadline'] == expected
+
+
+@pytest.mark.asyncio
 async def test_stream_passes_outer_deadline_to_graph_and_publishes_image_update(request_data, graph_dependencies, mocker):
     from app.agent.course_graph import build_course_graph, stream_course_generation
 
@@ -1594,7 +1597,8 @@ async def test_stream_passes_outer_deadline_to_graph_and_publishes_image_update(
     events = [event async for event in stream_course_generation(request_data)]
     assert len(events) == 1 and events[0][0] == 'complete'
     assert events[0][1]['course']['coverImageUrl'] == enriched.coverImageUrl
-    assert before < captured[0]['deadline'] <= before + 121
+    from app.core.config import settings
+    assert captured[0]['deadline'] - before == pytest.approx(settings.COURSE_TIMEOUT_SECONDS - 1, abs=.1)
 
 
 @pytest.mark.asyncio
@@ -1723,13 +1727,12 @@ async def test_verified_place_copy_streams_progress_and_preserves_complete_on_op
     assert len(stops) == 5
     assert all(stop['transportToNext']['distance'] == 700 and stop['transportToNext']['minutes'] == 12 for stop in stops[:-1])
     assert all('private optional' not in stop['reason'] + stop['memo'] for stop in stops)
-    if not copy_fails:
-        assert all('새로운 모습을 발견' in stop['reason'] for stop in stops)
-        assert all('살펴보고 싶은 주제를' in stop['memo'] for stop in stops)
-        assert all(stop['memo'].endswith(' 영업시간 미확인: 방문 전 확인이 필요합니다.') for stop in stops if stop['place']['placeName'] != '역사관')
-    assert counts_at_copy == [(5, 4)]
-    assert (provider.search.await_count, provider.route.await_count) == counts_at_copy[0]
-    offline_place_copy.assert_awaited_once()
+    assert all(stop['reason'] and stop['memo'] for stop in stops)
+    assert all('새로운 모습을 발견' not in stop['reason'] for stop in stops)
+    assert all(stop['memo'].endswith(' 영업시간 미확인: 방문 전 확인이 필요합니다.') for stop in stops if stop['place']['placeName'] != '역사관')
+    assert counts_at_copy == []
+    assert (provider.search.await_count, provider.route.await_count) == (5, 4)
+    offline_place_copy.assert_not_awaited()
     llm.assert_awaited_once()
 
 
@@ -1737,9 +1740,8 @@ async def test_verified_place_copy_streams_progress_and_preserves_complete_on_op
 async def test_copy_phase_reserves_photo_and_completion_budget_and_skips_near_deadline(request_data, graph_dependencies, mocker, offline_place_copy):
     from uuid import UUID
 
-    from app.services.course_copy import enrich_course_place_copy
-
     from app.agent.course_graph import build_course_graph
+    from app.services.course_copy import enrich_course_place_copy
 
     provider, history, _, _, _ = graph_dependencies
     phase = mocker.patch('app.agent.course_graph.enrich_course_place_copy', wraps=enrich_course_place_copy)
@@ -1747,7 +1749,8 @@ async def test_copy_phase_reserves_photo_and_completion_budget_and_skips_near_de
     course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0, 'deadline': deadline}))['course']
     assert len(course.itinerary.days[0].stops) == 5
     assert 0 < phase.call_args.kwargs['timeout_seconds'] <= 6
-    offline_place_copy.assert_awaited_once()
+    assert phase.call_args.kwargs['evidence_only'] is True
+    offline_place_copy.assert_not_awaited()
     request_data.userId = UUID('550e8400-e29b-41d4-a716-446655440099')
     offline_place_copy.reset_mock()
     course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0, 'deadline': asyncio.get_running_loop().time() + 5.5}))['course']
@@ -1763,5 +1766,28 @@ async def test_history_concurrency_retry_copies_only_the_final_accepted_course(r
     claim = mocker.patch.object(history, 'record_if_novel', new_callable=AsyncMock, side_effect=[False, True])
     result = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
     assert claim.await_count == 2 and llm.await_count == 2
-    offline_place_copy.assert_awaited_once()
-    assert {row['placeId'] for row in offline_place_copy.call_args.args[0]['stops']} == {stop.place.placeId for day in result.itinerary.days for stop in day.stops}
+    offline_place_copy.assert_not_awaited()
+    assert all(stop.reason and stop.memo for day in result.itinerary.days for stop in day.stops)
+
+
+@pytest.mark.asyncio
+async def test_default_graph_never_applies_unsubstantiated_model_place_facts(request_data, graph_dependencies, offline_place_copy):
+    from app.agent.course_graph import build_course_graph
+
+    provider, history, _, _, _ = graph_dependencies
+    async def invented_facts(payload):
+        return {'stops': [{
+            'day': row['day'], 'sequence': row['sequence'], 'placeId': row['placeId'],
+            'reason': '도심 전망을 즐기는 아늑한 공간에서 시간을 보내보세요. 조선 왕실의 유물을 직접 만나는 특별한 경험을 추천해요.',
+            'memo': '옥상 정원에는 백 년 된 느티나무가 있어요. 세계 최초의 나선형 전시실을 따라 걸으며 수상 경력에 빛나는 셰프의 요리를 만나보세요.',
+        } for row in payload['stops']]}
+    offline_place_copy.side_effect = invented_facts
+    updates = [update async for update in build_course_graph(provider, history).astream({'request': request_data, 'attempt': 0}, stream_mode='updates')]
+    baseline = next(update['finalize']['course'] for update in updates if 'finalize' in update)
+    course = updates[-1]['enrich_images']['course']
+    assert len(course.itinerary.days[0].stops) == 5
+    for expected, stop in zip(baseline.itinerary.days[0].stops, course.itinerary.days[0].stops):
+        assert stop.place == expected.place
+        assert (stop.reason, stop.memo) == (expected.reason, expected.memo)
+        assert stop.reason and stop.memo
+        assert not any(claim in stop.reason + stop.memo for claim in ('도심 전망', '아늑한', '왕실의 유물', '옥상 정원', '느티나무', '세계 최초', '셰프'))

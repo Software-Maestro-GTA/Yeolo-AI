@@ -1,4 +1,4 @@
-"""Validate route facts and disclose bounded coordinate-based walking estimates."""
+"""Validate actual route facts; retain disclosed estimates for legacy callers only."""
 
 import math
 
@@ -51,14 +51,9 @@ def is_estimated_walking(route: TransportToNextSchema) -> bool:
 
 
 def valid_route(route: object, origin: VerifiedPlace, destination: VerifiedPlace) -> bool:
-    """Validate positive provider metrics or recompute a disclosed short estimate."""
+    """Accept positive provider metrics and reject coordinate-based estimates."""
     if not isinstance(route, TransportToNextSchema) or route.type == 'none' or route.minutes is None or not 0 < route.minutes <= 90:
         return False
     if (route.memo or '').startswith(ESTIMATE_MARKER):
-        if not is_estimated_walking(route) or route.cost != 0:
-            return False
-        try:
-            return route.minutes == estimated_walking(origin, destination).minutes
-        except ValueError:
-            return False
+        return False
     return route.distance is not None and math.isfinite(route.distance) and route.distance > 0
