@@ -187,7 +187,7 @@ async def test_three_identical_seoul_requests_change_real_selected_neighborhoods
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('repair_failure', ['timeout', 'unsafe_places'])
-async def test_novelty_repair_failure_returns_captured_verified_course(diversity_dependencies, repair_failure):
+async def test_novelty_repair_failure_returns_captured_verified_course(diversity_dependencies, repair_failure, offline_place_copy):
     from app.agent.course_graph import build_course_graph
     from app.agent.tools.verified_maps import VerifiedPlace
     from app.services.course_history import history_key
@@ -213,6 +213,8 @@ async def test_novelty_repair_failure_returns_captured_verified_course(diversity
     assert '이전' in course.recommendationReason or '중복' in course.recommendationReason
     assert llm.await_count <= 2
     assert all(stop.transportToNext.minutes <= 90 for stop in course.itinerary.days[0].stops[:-1])
+    offline_place_copy.assert_awaited_once()
+    assert {row['placeId'] for row in offline_place_copy.call_args.args[0]['stops']} == {stop.place.placeId for stop in course.itinerary.days[0].stops}
 
 
 @pytest.mark.asyncio
