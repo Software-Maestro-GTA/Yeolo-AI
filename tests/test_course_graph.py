@@ -63,7 +63,7 @@ async def test_actual_graph_verifies_and_schedules_before_complete(request_data,
     graph = build_course_graph(provider, history)
     updates = [update async for update in graph.astream({'request': request_data, 'attempt': 0}, stream_mode='updates')]
     names = [name for update in updates for name in update]
-    assert names == ['prepare', 'draft', 'verify_places', 'verify_routes', 'schedule', 'finalize', 'enrich_images']
+    assert names == ['prepare', 'draft', 'verify_places', 'verify_routes', 'schedule', 'finalize', 'enrich_place_copy', 'enrich_images']
     result = updates[-1]['enrich_images']['course']
     assert result.totalDays == 1
     assert result.startDate == request_data.tripCondition.startDate
@@ -313,7 +313,7 @@ async def test_same_museum_reason_changes_with_actual_high_preferences(request_d
     assert '문화' in culture_reason
     assert '관람' in viewing_reason
     assert culture_reason != viewing_reason
-    assert llm.await_count == 2  # No extra LLM call for explanation generation.
+    assert llm.await_count == 2  # Candidate generation remains independently bounded.
 
 
 @pytest.mark.asyncio
@@ -813,7 +813,7 @@ def candidate_pool_repair_fixture(request_data, graph_dependencies, include_seco
 
 
 @pytest.mark.asyncio
-async def test_failed_day_reuses_verified_attractions_when_retry_only_proposes_meals(request_data, graph_dependencies):
+async def test_failed_day_reuses_verified_attractions_when_retry_only_proposes_meals(request_data, graph_dependencies, offline_place_copy):
     """A retry must add verified options rather than erase the failed day's useful ones."""
     from app.agent.course_graph import build_course_graph
 
@@ -828,6 +828,9 @@ async def test_failed_day_reuses_verified_attractions_when_retry_only_proposes_m
     assert {stop.place.placeName for stop in days[2].stops} == {'미술관-pool-3', '공원-pool-3', '역사관-pool-3', '점심식당-pool-3', '저녁식당-pool-3'}
     assert not any('검증불가' in stop.place.placeName for day in days for stop in day.stops)
     assert all(day.stops[-1].transportToNext.type == 'none' for day in days)
+    offline_place_copy.assert_awaited_once()
+    assert len(offline_place_copy.call_args.args[0]['stops']) == sum(len(day.stops) for day in days)
+    assert {row['day'] for row in offline_place_copy.call_args.args[0]['stops']} == {1, 2, 3}
 
 
 @pytest.mark.asyncio
@@ -1686,3 +1689,79 @@ async def test_day_summary_cancelled_error_is_not_swallowed(request_data, graph_
     with pytest.raises(NodeCancelledError) as error:
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
     assert isinstance(error.value.__cause__, asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('copy_fails', [False, True])
+async def test_verified_place_copy_streams_progress_and_preserves_complete_on_optional_failure(request_data, graph_dependencies, mocker, offline_place_copy, copy_fails):
+    from app.agent.course_graph import build_course_graph, stream_course_generation
+
+    provider, history, llm, _, _ = graph_dependencies
+    counts_at_copy = []
+    async def prose(payload):
+        counts_at_copy.append((provider.search.await_count, provider.route.await_count))
+        if copy_fails:
+            raise RuntimeError('private optional prose failure')
+        return {'stops': [{
+            'day': row['day'], 'sequence': row['sequence'], 'placeId': row['placeId'],
+            'reason': f'{row["placeName"]}에서 직접 살펴보는 경험을 추천해요. 새로운 모습을 발견하며 여행의 기억을 만들어보세요.',
+            'memo': '먼저 공간의 안내를 읽고 살펴보고 싶은 주제를 골라보세요. 눈길을 끄는 부분을 중심으로 둘러보며 오늘의 경험을 기억해보세요.',
+        } for row in payload['stops']]}
+    offline_place_copy.side_effect = prose
+    graph = build_course_graph(provider, history)
+    provider.__aenter__ = AsyncMock(return_value=provider)
+    provider.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch('app.agent.course_graph.VerifiedMapsProvider', return_value=provider)
+    mocker.patch('app.agent.course_graph.CourseHistory', return_value=history)
+    mocker.patch('app.agent.course_graph.build_course_graph', return_value=graph)
+    events = [event async for event in stream_course_generation(request_data)]
+    complete = [payload for event, payload in events if event == 'complete']
+    assert len(complete) == 1 and events[-1][0] == 'complete'
+    assert any(event == 'progress' and '추천 이유' in payload['message'] and '방문 팁' in payload['message'] for event, payload in events)
+    assert all(payload['step'] == 'GENERATING_ROUTE' for event, payload in events if event == 'progress')
+    stops = complete[0]['course']['itinerary']['days'][0]['stops']
+    assert len(stops) == 5
+    assert all(stop['transportToNext']['distance'] == 700 and stop['transportToNext']['minutes'] == 12 for stop in stops[:-1])
+    assert all('private optional' not in stop['reason'] + stop['memo'] for stop in stops)
+    if not copy_fails:
+        assert all('새로운 모습을 발견' in stop['reason'] for stop in stops)
+        assert all('살펴보고 싶은 주제를' in stop['memo'] for stop in stops)
+        assert all(stop['memo'].endswith(' 영업시간 미확인: 방문 전 확인이 필요합니다.') for stop in stops if stop['place']['placeName'] != '역사관')
+    assert counts_at_copy == [(5, 4)]
+    assert (provider.search.await_count, provider.route.await_count) == counts_at_copy[0]
+    offline_place_copy.assert_awaited_once()
+    llm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_copy_phase_reserves_photo_and_completion_budget_and_skips_near_deadline(request_data, graph_dependencies, mocker, offline_place_copy):
+    from uuid import UUID
+
+    from app.services.course_copy import enrich_course_place_copy
+
+    from app.agent.course_graph import build_course_graph
+
+    provider, history, _, _, _ = graph_dependencies
+    phase = mocker.patch('app.agent.course_graph.enrich_course_place_copy', wraps=enrich_course_place_copy)
+    deadline = asyncio.get_running_loop().time() + 12
+    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0, 'deadline': deadline}))['course']
+    assert len(course.itinerary.days[0].stops) == 5
+    assert 0 < phase.call_args.kwargs['timeout_seconds'] <= 6
+    offline_place_copy.assert_awaited_once()
+    request_data.userId = UUID('550e8400-e29b-41d4-a716-446655440099')
+    offline_place_copy.reset_mock()
+    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0, 'deadline': asyncio.get_running_loop().time() + 5.5}))['course']
+    assert len(course.itinerary.days[0].stops) == 5
+    offline_place_copy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_history_concurrency_retry_copies_only_the_final_accepted_course(request_data, graph_dependencies, mocker, offline_place_copy):
+    from app.agent.course_graph import build_course_graph
+
+    provider, history, llm, _, _ = graph_dependencies
+    claim = mocker.patch.object(history, 'record_if_novel', new_callable=AsyncMock, side_effect=[False, True])
+    result = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
+    assert claim.await_count == 2 and llm.await_count == 2
+    offline_place_copy.assert_awaited_once()
+    assert {row['placeId'] for row in offline_place_copy.call_args.args[0]['stops']} == {stop.place.placeId for day in result.itinerary.days for stop in day.stops}
