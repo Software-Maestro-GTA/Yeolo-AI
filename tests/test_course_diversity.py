@@ -227,7 +227,7 @@ async def test_near_deadline_novelty_retry_does_not_lose_verified_fallback(diver
     ids = {places[candidate.name].place.placeId for candidate in draft.days[0].candidates}
     await history.record_if_novel(history_key(request), ids)
 
-    async def draft_response(*args):
+    async def draft_response(*args, **kwargs):
         if llm.await_count > 1:
             await asyncio.Event().wait()
         return draft

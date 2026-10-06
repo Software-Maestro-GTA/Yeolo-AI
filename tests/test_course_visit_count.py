@@ -136,7 +136,7 @@ async def test_count_fill_failure_preserves_verified_four_with_explicit_day_note
             places[candidate.name] = VerifiedPlace(places[candidate.name].place.model_copy(update={'latitude': 0.}))
         llm.side_effect = [first, second]
     else:
-        async def response(*args):
+        async def response(*args, **kwargs):
             if llm.await_count > 1:
                 await asyncio.Event().wait()
             return first

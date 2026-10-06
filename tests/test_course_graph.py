@@ -968,21 +968,16 @@ async def test_korean_routes_use_transit_and_trip_departure_time(request_data, g
 
 
 @pytest.mark.asyncio
-async def test_missing_route_with_nearby_verified_places_returns_explicit_estimate(request_data, graph_dependencies):
-    from app.agent.course_graph import build_course_graph
+async def test_missing_route_with_nearby_verified_places_never_invents_success(request_data, graph_dependencies):
+    from app.agent.course_graph import CourseGenerationError, build_course_graph
     from app.agent.tools.verified_maps import NoRouteError
+    from app.services.course_history import history_key
 
-    provider, history, llm, _, places = graph_dependencies
+    provider, history, _, _, _ = graph_dependencies
     provider.route.side_effect = NoRouteError()
-    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
-    assert {stop.place.placeId for stop in course.itinerary.days[0].stops} == {p.place.placeId for p in places.values()}
-    for stop in course.itinerary.days[0].stops[:-1]:
-        assert stop.transportToNext.type == 'walking'
-        assert stop.transportToNext.distance is None
-        assert 5 <= stop.transportToNext.minutes <= 35
-        assert '[추정 도보]' in stop.transportToNext.memo
-        assert '확인된 약' not in stop.reason
-    llm.assert_awaited_once()
+    with pytest.raises(CourseGenerationError):
+        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
+    assert await history.recent(history_key(request_data)) == []
 
 
 @pytest.mark.asyncio
@@ -1139,19 +1134,16 @@ async def test_repair_requires_real_attraction_in_addition_to_real_meals(request
 
 
 @pytest.mark.asyncio
-async def test_estimated_course_serializes_under_current_api_and_passes_output_validator(request_data, graph_dependencies):
+async def test_verified_course_serializes_under_current_api_and_passes_output_validator(request_data, graph_dependencies):
     from app.agent.course_graph import build_course_graph
-    from app.agent.tools.verified_maps import NoRouteError
     from scripts.verify_course_output import validate_output
 
     provider, history, _, _, _ = graph_dependencies
-    provider.route.side_effect = NoRouteError()
     course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
     output = {'completed': True, 'events': [{'event': 'progress', 'data': {'step': 'GENERATING_ROUTE', 'message': '검증 중'}}, {'event': 'complete', 'data': {}}], 'course': course.model_dump()}
     report = validate_output(request_data.model_dump(), output)
     assert report['passed'], report['errors']
-    assert any('추정' in warning for warning in report['warnings'])
-    assert not any(repeated in course.itinerary.days[0].memo for repeated in ['추정', '직선거리', '재확인', '확인이 필요'])
+    assert not any('추정 도보' in stop.transportToNext.memo for stop in course.itinerary.days[0].stops[:-1])
 
 
 @pytest.mark.asyncio
@@ -1181,23 +1173,21 @@ async def test_model_authentication_failure_is_not_retried(request_data, graph_d
 
 
 @pytest.mark.asyncio
-async def test_nearby_route_transient_exhaustion_can_use_disclosed_formula_estimate(request_data, graph_dependencies):
-    from app.agent.course_graph import build_course_graph
+async def test_nearby_route_transient_exhaustion_never_becomes_formula_success(request_data, graph_dependencies):
+    from app.agent.course_graph import CourseGenerationError, build_course_graph
     from app.agent.tools.verified_maps import MapsProviderError
+    from app.services.course_history import history_key
 
-    provider, history, llm, _, _ = graph_dependencies
+    provider, history, _, _, _ = graph_dependencies
     provider.route.side_effect = MapsProviderError(kind='transient', status_code=503)
-    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
-    for stop in course.itinerary.days[0].stops[:-1]:
-        assert stop.transportToNext.distance is None
-        assert '[추정 도보]' in stop.transportToNext.memo
-        assert 5 <= stop.transportToNext.minutes <= 35
-    llm.assert_awaited_once()
+    with pytest.raises(CourseGenerationError):
+        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
+    assert await history.recent(history_key(request_data)) == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['no_route', 'route_data', 'transient'])
-async def test_transit_analysis_failure_tries_real_walk_before_formula_or_redraft(request_data, graph_dependencies, failure):
+async def test_transit_analysis_failure_tries_real_walk_before_redraft(request_data, graph_dependencies, failure):
     from collections import Counter
 
     from app.agent.course_graph import build_course_graph
