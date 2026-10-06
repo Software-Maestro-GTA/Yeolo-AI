@@ -1,5 +1,5 @@
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -60,92 +60,11 @@ def valid_request_payload():
 
 @pytest.mark.asyncio
 async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload):
-    # 1. LangChain LLM 체인 Mocking 설정
-    # 1단계 요약 체인(Fact Sheet 요약본)의 결과값 모킹
-    mock_fact_sheet = MagicMock()
-    mock_fact_sheet.content = "이 여행자는 주말을 이용해 대도시의 공원이나 강릉의 해변 카페 거리 같은 자연 친화적이고 여유로운 장소를 즐겨 찾습니다."
-    
-    # 2단계 병렬 체인 Structured Output 결과 모킹
-    from app.schemas.taste_profile import (
-        ActivityFoodSpendingOutput,
-        LocationEnvironmentOutput,
-        PurposePaceCompanionOutput,
-    )
-    
-    mock_purpose_pace_output = PurposePaceCompanionOutput(
-        relaxation=4,
-        sightseeing=3,
-        culturalExperience=2,
-        gourmet=4,
-        natureExploration=4,
-        activity=2,
-        shopping=1,
-        festivalEvent=2,
-        wellness=3,
-        selfDevelopment=1,
-        travelPaceDensity="balanced",
-        companionType="friends"
-    )
-    
-    mock_location_env_output = LocationEnvironmentOutput(
-        bigCity=3,
-        smallTownAlley=4,
-        natureHinterland=4,
-        beachResort=4,
-        mountainPlateau=2,
-        historicalCity=3,
-        themeParkResort=1,
-        famousSpotPreferred=3,
-        hiddenSpotPreferred=4,
-        warm_region=True,
-        cold_region=False,
-        summer_resort=True,
-        winter_sports=False,
-        spring_flower_autumn_foliage=False,
-        dry_weather=False,
-        off_season=True,
-        peak_season=False
-    )
-    
-    mock_activity_food_output = ActivityFoodSpendingOutput(
-        viewing=3,
-        experience=3,
-        adventure=2,
-        photographyVideo=4,
-        gourmetExploration=4,
-        nightlife=2,
-        shopping=1,
-        relaxation=4,
-        localInteraction=3,
-        spendingTendency="moderate",
-        localFoodActive=4,
-        famousRestaurantCentered=4,
-        streetFood=3,
-        cafeDessert=5,
-        fineDining=2,
-        familiarFoodPreferred=2,
-        dietaryRestriction=1,
-        sightseeingOverFood=2
-    )
+    from tests.test_behavior_evidence import full_profile
 
-    # 1단계 LLM 인보크 체인 모킹
-    mock_summarize_chain = AsyncMock()
-    mock_summarize_chain.ainvoke.return_value = mock_fact_sheet
-    mocker.patch("app.services.behavior_service.summarize_chain", mock_summarize_chain)
-
-    # 2단계 Structured Output 체인 자체를 AsyncMock으로 패치하여 Pydantic delattr 이슈를 방지
-    # 서비스 모듈 네임스페이스의 참조를 직접 패치하여 임포트 바인딩 문제를 방지합니다.
-    mock_purpose_pace_chain = AsyncMock()
-    mock_purpose_pace_chain.ainvoke.return_value = mock_purpose_pace_output
-    mocker.patch("app.services.behavior_service.purpose_pace_companion_chain", mock_purpose_pace_chain)
-    
-    mock_location_env_chain = AsyncMock()
-    mock_location_env_chain.ainvoke.return_value = mock_location_env_output
-    mocker.patch("app.services.behavior_service.location_environment_chain", mock_location_env_chain)
-    
-    mock_activity_food_chain = AsyncMock()
-    mock_activity_food_chain.ainvoke.return_value = mock_activity_food_output
-    mocker.patch("app.services.behavior_service.activity_food_spending_chain", mock_activity_food_chain)
+    chain = AsyncMock()
+    chain.ainvoke.return_value = full_profile()
+    mocker.patch("app.services.behavior_service.taste_profile_chain", chain)
 
     # 2. httpx AsyncClient를 이용해 비동기 API 엔드포인트 호출 (SSE 통신)
     transport = ASGITransport(app=app)
@@ -180,11 +99,14 @@ async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload
         assert "tasteProfile" in complete_data
         
         profile = complete_data["tasteProfile"]
-        assert profile["travelPurpose"]["relaxation"] == 4
+        assert profile["travelPurpose"]["relaxation"] == 3
         assert profile["travelPaceDensity"] == "balanced"
         assert profile["spendingTendency"] == "moderate"
-        assert profile["companionType"] == "friends"
-        assert "warm_region" in profile["seasonalEnvironmentPreference"]
+        assert profile["companionType"] == "solo"  # Compatibility default, not observed companion.
+        assert "warm_region" not in profile["seasonalEnvironmentPreference"]
+        assert set(complete_data) == {"tasteProfile"}
+        chain.ainvoke.assert_awaited_once()
+        assert profile["seasonalEnvironmentPreference"] == ["summer_resort"]
 
 @pytest.mark.asyncio
 async def test_behavior_analysis_invalid_format(mock_env):

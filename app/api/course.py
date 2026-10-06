@@ -24,8 +24,6 @@ async def generate_course_api(
     # 1. 인증 헤더 검증
     if not x_internal_api_key or x_internal_api_key != settings.INTERNAL_API_KEY:
         logger.warning(f"Unauthorized access attempt to /internal/ai/courses for userId: {request.userId}")
-        logger.warning(f"외부 서버 API 요청 헤더 전체: {dict(raw_request.headers)}")
-        logger.warning(f"수신된 API Key: '{x_internal_api_key}', 서버 설정 API Key: '{settings.INTERNAL_API_KEY}'")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"status": 401, "message": "내부 인증 실패", "data": None},
@@ -41,7 +39,8 @@ async def generate_course_api(
         # 코스 생성 비동기 처리 및 SSE generator 획득
         sse_generator = await generate_course_service(request)
         return StreamingResponse(
-            sse_generator, media_type="text/event-stream"
+            sse_generator, media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         )
     except HTTPException as e:
         logger.warning(f"Course generation HTTP exception for userId: {request.userId} -> Code {e.status_code}: {e.detail}")
@@ -49,10 +48,10 @@ async def generate_course_api(
             status_code=e.status_code,
             content={"status": e.status_code, "message": e.detail, "data": None},
         )
-    except Exception as e:
-        logger.exception(f"Unexpected error in course generation for userId: {request.userId}")
+    except Exception:  # noqa: BLE001 - preserve a sanitized HTTP boundary
+        logger.error("Unexpected error before course stream start")
         return JSONResponse(
             status_code=500,
-            content={"status": 500, "message": f"AI 코스 생성 중 오류가 발생했습니다: {e!s}", "data": None},
+            content={"status": 500, "message": "AI 코스 생성 중 오류가 발생했습니다.", "data": None},
         )
 

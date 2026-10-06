@@ -1,0 +1,956 @@
+{
+  "CourseRequestSchema": {
+    "$defs": {
+      "ActivityPreferenceSchema": {
+        "properties": {
+          "viewing": {
+            "description": "관람형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Viewing",
+            "type": "integer"
+          },
+          "experience": {
+            "description": "체험형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Experience",
+            "type": "integer"
+          },
+          "adventure": {
+            "description": "모험형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Adventure",
+            "type": "integer"
+          },
+          "photographyVideo": {
+            "description": "사진·영상형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Photographyvideo",
+            "type": "integer"
+          },
+          "gourmetExploration": {
+            "description": "미식 탐방형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Gourmetexploration",
+            "type": "integer"
+          },
+          "nightlife": {
+            "description": "밤문화형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Nightlife",
+            "type": "integer"
+          },
+          "shopping": {
+            "description": "쇼핑형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Shopping",
+            "type": "integer"
+          },
+          "relaxation": {
+            "description": "휴식형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Relaxation",
+            "type": "integer"
+          },
+          "localInteraction": {
+            "description": "현지인 교류형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Localinteraction",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "viewing",
+          "experience",
+          "adventure",
+          "photographyVideo",
+          "gourmetExploration",
+          "nightlife",
+          "shopping",
+          "relaxation",
+          "localInteraction"
+        ],
+        "title": "ActivityPreferenceSchema",
+        "type": "object"
+      },
+      "FoodPreferenceSchema": {
+        "properties": {
+          "localFoodActive": {
+            "description": "현지 음식 적극 체험형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Localfoodactive",
+            "type": "integer"
+          },
+          "famousRestaurantCentered": {
+            "description": "유명 맛집 중심형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Famousrestaurantcentered",
+            "type": "integer"
+          },
+          "streetFood": {
+            "description": "길거리 음식형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Streetfood",
+            "type": "integer"
+          },
+          "cafeDessert": {
+            "description": "카페·디저트형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Cafedessert",
+            "type": "integer"
+          },
+          "fineDining": {
+            "description": "파인다이닝형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Finedining",
+            "type": "integer"
+          },
+          "familiarFoodPreferred": {
+            "description": "익숙한 음식 선호형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Familiarfoodpreferred",
+            "type": "integer"
+          },
+          "dietaryRestriction": {
+            "description": "식단 제한형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Dietaryrestriction",
+            "type": "integer"
+          },
+          "sightseeingOverFood": {
+            "description": "음식보다 관광 중시형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Sightseeingoverfood",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "localFoodActive",
+          "famousRestaurantCentered",
+          "streetFood",
+          "cafeDessert",
+          "fineDining",
+          "familiarFoodPreferred",
+          "dietaryRestriction",
+          "sightseeingOverFood"
+        ],
+        "title": "FoodPreferenceSchema",
+        "type": "object"
+      },
+      "PreferredLocationTypeSchema": {
+        "properties": {
+          "bigCity": {
+            "description": "대도시형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Bigcity",
+            "type": "integer"
+          },
+          "smallTownAlley": {
+            "description": "소도시·골목형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Smalltownalley",
+            "type": "integer"
+          },
+          "natureHinterland": {
+            "description": "자연·오지형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Naturehinterland",
+            "type": "integer"
+          },
+          "beachResort": {
+            "description": "해변·휴양지형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Beachresort",
+            "type": "integer"
+          },
+          "mountainPlateau": {
+            "description": "산악·고원형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Mountainplateau",
+            "type": "integer"
+          },
+          "historicalCity": {
+            "description": "역사도시형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Historicalcity",
+            "type": "integer"
+          },
+          "themeParkResort": {
+            "description": "테마파크·리조트형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Themeparkresort",
+            "type": "integer"
+          },
+          "famousSpotPreferred": {
+            "description": "유명 관광지 선호형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Famousspotpreferred",
+            "type": "integer"
+          },
+          "hiddenSpotPreferred": {
+            "description": "숨은 명소 선호형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Hiddenspotpreferred",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bigCity",
+          "smallTownAlley",
+          "natureHinterland",
+          "beachResort",
+          "mountainPlateau",
+          "historicalCity",
+          "themeParkResort",
+          "famousSpotPreferred",
+          "hiddenSpotPreferred"
+        ],
+        "title": "PreferredLocationTypeSchema",
+        "type": "object"
+      },
+      "TasteProfileSchema": {
+        "properties": {
+          "travelPurpose": {
+            "$ref": "#/$defs/TravelPurposeSchema",
+            "description": "여행 목적 선호도"
+          },
+          "travelPaceDensity": {
+            "description": "여행 속도/일정 밀도",
+            "enum": [
+              "slow_stay",
+              "balanced",
+              "dense_schedule",
+              "spontaneous",
+              "long_stay"
+            ],
+            "title": "Travelpacedensity",
+            "type": "string"
+          },
+          "preferredLocationType": {
+            "$ref": "#/$defs/PreferredLocationTypeSchema",
+            "description": "선호 장소 유형"
+          },
+          "activityPreference": {
+            "$ref": "#/$defs/ActivityPreferenceSchema",
+            "description": "활동 취향"
+          },
+          "spendingTendency": {
+            "description": "소비 성향",
+            "enum": [
+              "cost_effective",
+              "moderate",
+              "luxury"
+            ],
+            "title": "Spendingtendency",
+            "type": "string"
+          },
+          "companionType": {
+            "description": "동행 형태",
+            "enum": [
+              "solo",
+              "couple",
+              "friends",
+              "family",
+              "with_children",
+              "with_parents",
+              "group",
+              "with_pet",
+              "social"
+            ],
+            "title": "Companiontype",
+            "type": "string"
+          },
+          "foodPreference": {
+            "$ref": "#/$defs/FoodPreferenceSchema",
+            "description": "음식 취향"
+          },
+          "seasonalEnvironmentPreference": {
+            "description": "계절/환경 취향",
+            "items": {
+              "enum": [
+                "warm_region",
+                "cold_region",
+                "summer_resort",
+                "winter_sports",
+                "spring_flower_autumn_foliage",
+                "dry_weather",
+                "off_season",
+                "peak_season"
+              ],
+              "type": "string"
+            },
+            "title": "Seasonalenvironmentpreference",
+            "type": "array"
+          }
+        },
+        "required": [
+          "travelPurpose",
+          "travelPaceDensity",
+          "preferredLocationType",
+          "activityPreference",
+          "spendingTendency",
+          "companionType",
+          "foodPreference"
+        ],
+        "title": "TasteProfileSchema",
+        "type": "object"
+      },
+      "TravelPurposeSchema": {
+        "properties": {
+          "relaxation": {
+            "description": "휴양형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Relaxation",
+            "type": "integer"
+          },
+          "sightseeing": {
+            "description": "관광형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Sightseeing",
+            "type": "integer"
+          },
+          "culturalExperience": {
+            "description": "문화체험형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Culturalexperience",
+            "type": "integer"
+          },
+          "gourmet": {
+            "description": "미식형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Gourmet",
+            "type": "integer"
+          },
+          "natureExploration": {
+            "description": "자연탐방형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Natureexploration",
+            "type": "integer"
+          },
+          "activity": {
+            "description": "액티비티형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Activity",
+            "type": "integer"
+          },
+          "shopping": {
+            "description": "쇼핑형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Shopping",
+            "type": "integer"
+          },
+          "festivalEvent": {
+            "description": "축제·이벤트형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Festivalevent",
+            "type": "integer"
+          },
+          "wellness": {
+            "description": "웰니스형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Wellness",
+            "type": "integer"
+          },
+          "selfDevelopment": {
+            "description": "자기계발형 (1-5)",
+            "maximum": 5,
+            "minimum": 1,
+            "title": "Selfdevelopment",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "relaxation",
+          "sightseeing",
+          "culturalExperience",
+          "gourmet",
+          "natureExploration",
+          "activity",
+          "shopping",
+          "festivalEvent",
+          "wellness",
+          "selfDevelopment"
+        ],
+        "title": "TravelPurposeSchema",
+        "type": "object"
+      },
+      "TripConditionSchema": {
+        "properties": {
+          "destinationCountry": {
+            "description": "목적지 국가",
+            "title": "Destinationcountry",
+            "type": "string"
+          },
+          "destinationCity": {
+            "description": "목적지 도시",
+            "title": "Destinationcity",
+            "type": "string"
+          },
+          "startDate": {
+            "description": "시작일 (YYYY-MM-DD)",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "title": "Startdate",
+            "type": "string"
+          },
+          "totalDays": {
+            "description": "총 여행 일수",
+            "minimum": 1,
+            "title": "Totaldays",
+            "type": "integer"
+          },
+          "budgetType": {
+            "description": "예산 유형",
+            "enum": [
+              "cost_effective",
+              "moderate",
+              "luxury"
+            ],
+            "title": "Budgettype",
+            "type": "string"
+          }
+        },
+        "required": [
+          "destinationCountry",
+          "destinationCity",
+          "startDate",
+          "totalDays",
+          "budgetType"
+        ],
+        "title": "TripConditionSchema",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "userId": {
+        "description": "사용자 ID (UUID)",
+        "format": "uuid",
+        "title": "Userid",
+        "type": "string"
+      },
+      "mbti": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "사용자 MBTI (string|null)",
+        "title": "Mbti"
+      },
+      "tasteProfile": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TasteProfileSchema"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "성향 프로필 데이터 (object|null)"
+      },
+      "tripCondition": {
+        "$ref": "#/$defs/TripConditionSchema",
+        "description": "여행 제약 조건"
+      }
+    },
+    "required": [
+      "userId",
+      "tripCondition"
+    ],
+    "title": "CourseRequestSchema",
+    "type": "object"
+  },
+  "CourseResponseSchema": {
+    "$defs": {
+      "CourseSchema": {
+        "properties": {
+          "title": {
+            "description": "코스 제목",
+            "title": "Title",
+            "type": "string"
+          },
+          "destinationCountry": {
+            "description": "목적지 국가",
+            "title": "Destinationcountry",
+            "type": "string"
+          },
+          "destinationCity": {
+            "description": "목적지 도시",
+            "title": "Destinationcity",
+            "type": "string"
+          },
+          "coverImageUrl": {
+            "default": "",
+            "description": "코스 커버 이미지 URL",
+            "title": "Coverimageurl",
+            "type": "string"
+          },
+          "coverImageAttribution": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PhotoAttributionSchema"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "코스 커버 이미지의 원본 및 작성자 출처"
+          },
+          "startDate": {
+            "description": "시작일 (YYYY-MM-DD)",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "title": "Startdate",
+            "type": "string"
+          },
+          "totalDays": {
+            "description": "총 여행 일수",
+            "minimum": 1,
+            "title": "Totaldays",
+            "type": "integer"
+          },
+          "tags": {
+            "description": "코스 태그 목록",
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "recommendationReason": {
+            "description": "전체 코스 핵심 추천 이유",
+            "title": "Recommendationreason",
+            "type": "string"
+          },
+          "itinerary": {
+            "$ref": "#/$defs/ItinerarySchema",
+            "description": "일자별 세부 여정"
+          }
+        },
+        "required": [
+          "title",
+          "destinationCountry",
+          "destinationCity",
+          "startDate",
+          "totalDays",
+          "recommendationReason",
+          "itinerary"
+        ],
+        "title": "CourseSchema",
+        "type": "object"
+      },
+      "DayItinerarySchema": {
+        "properties": {
+          "day": {
+            "description": "일차 (1부터 시작)",
+            "title": "Day",
+            "type": "integer"
+          },
+          "date": {
+            "description": "날짜 (YYYY-MM-DD)",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "title": "Date",
+            "type": "string"
+          },
+          "memo": {
+            "description": "해당 일자 요약 메모",
+            "title": "Memo",
+            "type": "string"
+          },
+          "stops": {
+            "description": "일자별 스톱 목록",
+            "items": {
+              "$ref": "#/$defs/StopSchema"
+            },
+            "title": "Stops",
+            "type": "array"
+          }
+        },
+        "required": [
+          "day",
+          "date",
+          "memo",
+          "stops"
+        ],
+        "title": "DayItinerarySchema",
+        "type": "object"
+      },
+      "ItinerarySchema": {
+        "properties": {
+          "days": {
+            "description": "일자별 여정 목록",
+            "items": {
+              "$ref": "#/$defs/DayItinerarySchema"
+            },
+            "title": "Days",
+            "type": "array"
+          }
+        },
+        "required": [
+          "days"
+        ],
+        "title": "ItinerarySchema",
+        "type": "object"
+      },
+      "PhotoAttributionSchema": {
+        "description": "Source information for the exact selected place photo.",
+        "properties": {
+          "provider": {
+            "const": "Google Maps",
+            "default": "Google Maps",
+            "description": "사진 공급자",
+            "title": "Provider",
+            "type": "string"
+          },
+          "googleMapsUri": {
+            "description": "선택한 개별 사진의 Google Maps 원본 URL",
+            "title": "Googlemapsuri",
+            "type": "string"
+          },
+          "authorAttributions": {
+            "description": "제공된 사진 작성자 정보",
+            "items": {
+              "$ref": "#/$defs/PhotoAuthorSchema"
+            },
+            "title": "Authorattributions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "googleMapsUri"
+        ],
+        "title": "PhotoAttributionSchema",
+        "type": "object"
+      },
+      "PhotoAuthorSchema": {
+        "description": "A supplied photo author's name, profile link and distinct avatar link.",
+        "properties": {
+          "displayName": {
+            "description": "사진 작성자 표시 이름",
+            "title": "Displayname",
+            "type": "string"
+          },
+          "uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "작성자 Google Maps 프로필 URL",
+            "title": "Uri"
+          },
+          "photoUri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "작성자 아바타 URL (장소 사진이 아님)",
+            "title": "Photouri"
+          }
+        },
+        "required": [
+          "displayName"
+        ],
+        "title": "PhotoAuthorSchema",
+        "type": "object"
+      },
+      "PlaceSchema": {
+        "properties": {
+          "placeId": {
+            "description": "Google Maps Place ID 또는 서비스 장소 식별자",
+            "title": "Placeid",
+            "type": "string"
+          },
+          "placeName": {
+            "description": "장소 한글 명칭",
+            "title": "Placename",
+            "type": "string"
+          },
+          "placeEngName": {
+            "default": "",
+            "description": "장소 공식 영문/로마자 명칭 (한글 제외)",
+            "title": "Placeengname",
+            "type": "string"
+          },
+          "category": {
+            "description": "장소 카테고리",
+            "title": "Category",
+            "type": "string"
+          },
+          "address": {
+            "default": "",
+            "description": "장소 주소",
+            "title": "Address",
+            "type": "string"
+          },
+          "latitude": {
+            "description": "위도",
+            "title": "Latitude",
+            "type": "number"
+          },
+          "longitude": {
+            "description": "경도",
+            "title": "Longitude",
+            "type": "number"
+          },
+          "rating": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "장소 평점",
+            "title": "Rating"
+          },
+          "photoUrl": {
+            "default": "",
+            "description": "대표 사진 URL",
+            "title": "Photourl",
+            "type": "string"
+          },
+          "photoAttribution": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PhotoAttributionSchema"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "대표 사진의 원본 및 작성자 출처"
+          },
+          "openingHours": {
+            "description": "영업시간 정보 목록",
+            "items": {
+              "type": "string"
+            },
+            "title": "Openinghours",
+            "type": "array"
+          }
+        },
+        "required": [
+          "placeId",
+          "placeName",
+          "category",
+          "latitude",
+          "longitude"
+        ],
+        "title": "PlaceSchema",
+        "type": "object"
+      },
+      "StopSchema": {
+        "properties": {
+          "sequence": {
+            "description": "방문 순서 (1부터 시작)",
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "arrivalTime": {
+            "description": "도착 시각 (HH:mm)",
+            "pattern": "^\\d{2}:\\d{2}$",
+            "title": "Arrivaltime",
+            "type": "string"
+          },
+          "stayMinutes": {
+            "description": "체류 시간 (분)",
+            "minimum": 1,
+            "title": "Stayminutes",
+            "type": "integer"
+          },
+          "memo": {
+            "description": "메모 및 안내 사항",
+            "title": "Memo",
+            "type": "string"
+          },
+          "reason": {
+            "description": "해당 장소 추천 이유",
+            "title": "Reason",
+            "type": "string"
+          },
+          "cost": {
+            "default": 0,
+            "description": "해당 스톱 예상 활동/식사/입장 비용 (원)",
+            "minimum": 0,
+            "title": "Cost",
+            "type": "integer"
+          },
+          "place": {
+            "$ref": "#/$defs/PlaceSchema",
+            "description": "장소 상세 정보 (Google Maps API 연동)"
+          },
+          "transportToNext": {
+            "$ref": "#/$defs/TransportToNextSchema",
+            "description": "다음 장소까지 이동 정보 (Google Routes API 연동)"
+          }
+        },
+        "required": [
+          "sequence",
+          "arrivalTime",
+          "stayMinutes",
+          "memo",
+          "reason",
+          "place",
+          "transportToNext"
+        ],
+        "title": "StopSchema",
+        "type": "object"
+      },
+      "TransportToNextSchema": {
+        "properties": {
+          "type": {
+            "description": "다음 장소까지 이동 수단",
+            "enum": [
+              "walking",
+              "transit",
+              "driving",
+              "taxi",
+              "none"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "distance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "이동 거리 (미터)",
+            "title": "Distance"
+          },
+          "minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "이동 소요 시간 (분)",
+            "title": "Minutes"
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "예상 이동 비용 (원)",
+            "title": "Cost"
+          },
+          "memo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "이동 관련 참고 메모",
+            "title": "Memo"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "TransportToNextSchema",
+        "type": "object"
+      }
+    },
+    "properties": {
+      "course": {
+        "$ref": "#/$defs/CourseSchema",
+        "description": "생성된 여행 코스 정보"
+      }
+    },
+    "required": [
+      "course"
+    ],
+    "title": "CourseResponseSchema",
+    "type": "object"
+  },
+  "ProgressEventData": {
+    "properties": {
+      "step": {
+        "description": "진행 단계 코드",
+        "title": "Step",
+        "type": "string"
+      },
+      "message": {
+        "description": "진행 단계 안내 메시지",
+        "title": "Message",
+        "type": "string"
+      }
+    },
+    "required": [
+      "step",
+      "message"
+    ],
+    "title": "ProgressEventData",
+    "type": "object"
+  }
+}

@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import httpx
 from langchain_core.tools import tool
@@ -29,6 +30,20 @@ def _clean_english_name(name: str) -> str:
     if re.search(r"[\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f]", name):
         return ""
     return name.strip()
+
+
+def _safe_fallback_photo(url: str) -> str:
+    """Retain existing HTTPS fallback images only when credentials are absent."""
+    api_key = settings.GOOGLE_MAPS_API_KEY or os.getenv('GOOGLE_MAPS_API_KEY', '')
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or (api_key and api_key in unquote(url)) or any(ord(char) < 32 for char in unquote(url)):
+            return ''
+        if any(key.casefold() in {'key', 'apikey', 'api_key', 'token', 'access_token'} for key, _ in parse_qsl(parsed.query)):
+            return ''
+        return url
+    except ValueError:
+        return ''
 
 
 @tool
@@ -145,13 +160,9 @@ async def search_place_detail(
             lng = location.get("longitude", 126.9780)
             rating = p.get("rating")
 
-            photos = p.get("photos", [])
             photo_url = ""
-            if photos:
-                photo_name = photos[0].get("name", "")
-                photo_url = f"https://places.googleapis.com/v1/{photo_name}/media?key={api_key}&maxHeightPx=400"
-            elif fallback_place and fallback_place.photoUrl:
-                photo_url = fallback_place.photoUrl
+            if not p.get('photos') and fallback_place and fallback_place.photoUrl:
+                photo_url = _safe_fallback_photo(fallback_place.photoUrl)
 
             opening_hours = []
             hours_data = p.get("regularOpeningHours") or p.get("currentOpeningHours") or {}
@@ -283,7 +294,7 @@ def _get_fallback_place(
             latitude=lat,
             longitude=lng,
             rating=fallback_place.rating,
-            photoUrl=fallback_place.photoUrl or "",
+            photoUrl=_safe_fallback_photo(fallback_place.photoUrl or ""),
             openingHours=fallback_place.openingHours or [],
         )
 
