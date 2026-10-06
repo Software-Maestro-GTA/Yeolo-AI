@@ -428,8 +428,9 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         destination = await provider.resolve_destination(request.tripCondition.destinationCountry, request.tripCondition.destinationCity)
         unavailable = False
         try:
-            recent, profiles = await read_history(request)
-        except (OSError, sqlite3.Error):
+            async with asyncio.timeout(1.):
+                recent, profiles = await read_history(request)
+        except (OSError, sqlite3.Error, TimeoutError):
             logger.warning('Course history read unavailable')
             recent, profiles, unavailable = [], [], True
         return {'destination': destination, 'recent': recent, 'recent_profiles': profiles, 'history_unavailable': unavailable, 'attempt': 0, 'feedback': '', 'validated_days': {}, 'place_cache': {}, 'route_cache': {}, 'candidate_pools': {}, 'rejected_plans': {}, 'repairing': False, 'repeated': False, 'discovered_days': set(), 'restore_fallback': False, 'verified_fallback': {}}
@@ -704,7 +705,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         unavailable = state.get('history_unavailable', False)
         novel = False
         try:
-            budget = optional_budget(state)
+            budget = min(2., optional_budget(state))
             if budget <= .1:
                 raise TimeoutError('History storage skipped to preserve completion margin')
             async with asyncio.timeout(budget):
@@ -811,7 +812,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
     return graph.compile()
 
 
-async def stream_course_generation(request: CourseRequestSchema) -> AsyncGenerator[tuple[str, dict]]:
+async def stream_course_generation(request: CourseRequestSchema, *, deadline: float | None = None) -> AsyncGenerator[tuple[str, dict]]:
     """Stream existing progress/complete payloads while the graph actually executes.
 
     A request-wide timeout and generator closure cancel active graph work.
@@ -819,8 +820,13 @@ async def stream_course_generation(request: CourseRequestSchema) -> AsyncGenerat
     """
     completed: dict | None = None
     provider = VerifiedMapsProvider(concurrency=settings.COURSE_MAPS_CONCURRENCY)
+    now = asyncio.get_running_loop().time()
+    request_deadline = min(deadline if deadline is not None else float('inf'), now + min(90., settings.COURSE_TIMEOUT_SECONDS))
+    remaining = max(0., request_deadline - now)
+    # Leave up to one second for cancelled provider/graph work to close cleanly.
+    processing_deadline = request_deadline - min(1., remaining * .1)
     try:
-        async with asyncio.timeout(settings.COURSE_TIMEOUT_SECONDS) as timeout:
+        async with asyncio.timeout_at(processing_deadline) as timeout:
             async with provider:
                 graph = build_course_graph(provider, CourseHistory())
                 async with aclosing(graph.astream({'request': request, 'attempt': 0, 'deadline': timeout.when()}, stream_mode=['custom', 'updates'])) as events:
