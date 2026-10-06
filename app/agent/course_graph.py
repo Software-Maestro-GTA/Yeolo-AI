@@ -50,10 +50,14 @@ from app.services.course_diversity import (
 )
 from app.services.course_history import CourseHistory, history_key
 from app.services.course_images import enrich_course_images
-from app.services.course_reasons import CAFE, apply_personalized_reasons, visit_tip
+from app.services.course_reasons import (
+    CAFE,
+    apply_personalized_reasons,
+    verified_course_tags,
+    visit_tip,
+)
 from app.services.course_routing import (
     distance_meters,
-    estimated_walking,
     valid_route,
 )
 from app.services.day_summary import MAX_DAY_SUMMARY_LENGTH, compose_day_summary
@@ -118,20 +122,88 @@ class CourseState(TypedDict, total=False):
     verified_fallback: dict
     restore_fallback: bool
     diversity_scores: dict
+    partial_drafts: dict[int, DraftDay]
 
 
-async def draft_candidates(request: CourseRequestSchema, recent_ids: list[str], feedback: str = '') -> CourseDraft:
-    """Ask Gemini once for compact, preference-aware candidate names and reasons."""
-    model = ChatGoogleGenerativeAI(model=settings.GEMINI_MODEL_NAME, google_api_key=settings.GEMINI_API_KEY, temperature=0.7, thinking_level=settings.GEMINI_THINKING_LEVEL, max_retries=0, timeout=25)
+class PartialDraftError(TimeoutError):
+    """Retain completed day proposals when a subset of model calls failed."""
+
+    def __init__(self, days: dict[int, DraftDay], errors: dict[int, Exception]):
+        super().__init__('Some daily candidate calls did not complete')
+        self.days, self.errors = days, errors
+
+
+async def _draft_day_candidates(request: CourseRequestSchema, recent_ids: list[str], feedback: str = '', *, day_index: int, seed: str, deadline: float | None = None, day_hints: list[str] | None = None) -> CourseDraft:
+    """Generate exactly one assigned day, keeping whole-trip planning context.
+
+    Raises:
+        TimeoutError: The shared request has no remaining drafting budget.
+        ValueError: The provider did not return exactly one day.
+    """
+    remaining = 22. if deadline is None else min(22., deadline - asyncio.get_running_loop().time())
+    if remaining <= 0:
+        raise TimeoutError('Daily candidate budget exhausted')
+    assigned = date.fromisoformat(request.tripCondition.startDate) + timedelta(days=day_index)
+    context = f'이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. reason은 25자 이내 한 문장만 작성하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{feedback}'
+    model = ChatGoogleGenerativeAI(model=settings.GEMINI_MODEL_NAME, google_api_key=settings.GEMINI_API_KEY, temperature=0.7, thinking_level='low', max_retries=0, timeout=remaining, max_output_tokens=5000)
     chain = COURSE_CANDIDATE_PROMPT | model.with_structured_output(CourseDraft)
-    return await chain.ainvoke({
-        'mbti': request.mbti or '미제공',
-        'taste_profile': request.tasteProfile.model_dump_json() if request.tasteProfile else '미제공',
-        'trip_condition': request.tripCondition.model_dump_json(),
-        'recent_ids': ','.join(recent_ids[:120]),
-        'feedback': feedback,
-        'seed': uuid.uuid4().hex[:12],
-    })
+    async with asyncio.timeout(remaining):
+        result = await chain.ainvoke({
+            'mbti': request.mbti or '미제공',
+            'taste_profile': request.tasteProfile.model_dump_json() if request.tasteProfile else '미제공',
+            'trip_condition': request.tripCondition.model_dump_json(),
+            'recent_ids': ','.join(recent_ids[:120]), 'feedback': context, 'seed': seed,
+        })
+    if len(result.days) != 1:
+        raise OutputParserException('Return only the assigned day in days')
+    return result
+
+
+async def draft_candidates(request: CourseRequestSchema, recent_ids: list[str], feedback: str = '', *, pending_days: list[int] | None = None, existing_days: dict[int, DraftDay] | None = None, deadline: float | None = None) -> CourseDraft:
+    """Generate days concurrently; retry only failed calls and retain every success.
+
+    Day indices are assigned by the caller, never inferred from model output.
+    Cancellation always joins started children before returning.
+    """
+    days = dict(existing_days or {})
+    pending = list(range(request.tripCondition.totalDays)) if pending_days is None else pending_days
+    seed = uuid.uuid4().hex[:12]
+    directions = ('도심 중심 권역', '도심 동쪽 권역', '도심 서쪽 권역', '도심 남쪽 권역', '도심 북쪽 권역')
+    shift = int(seed[:4], 16) % len(directions)
+    directions = directions[shift:] + directions[:shift]
+    hints = [f'{i + 1}일차: {directions[i % len(directions)]}, 다른 날짜와 구분되는 인접한 개별 장소 묶음 {i + 1}' for i in range(request.tripCondition.totalDays)]
+    if days:
+        feedback += '\n유지할 다른 날짜의 장소(중복 금지): ' + '; '.join(f'{index + 1}일차: ' + ', '.join(candidate.name for candidate in day.candidates) for index, day in sorted(days.items()))
+    semaphore = asyncio.Semaphore(5)
+    errors: dict[int, Exception] = {}
+    async def one(index: int) -> None:
+        async with semaphore:
+            for attempt in range(2):
+                started = asyncio.get_running_loop().time()
+                try:
+                    result = await _draft_day_candidates(request, recent_ids, feedback, day_index=index, seed=seed, deadline=deadline, day_hints=hints)
+                    days[index] = result.days[0]
+                    errors.pop(index, None)
+                    return
+                except Exception as error:
+                    logger.warning('Course daily draft failed: day=%d attempt=%d error=%s code=%s elapsed=%.2f', index + 1, attempt + 1, type(error).__name__, getattr(error, 'code', None), asyncio.get_running_loop().time() - started)
+                    if not _recoverable_draft(error):
+                        raise
+                    errors[index] = error
+                    if attempt or (deadline is not None and deadline - asyncio.get_running_loop().time() < 2):
+                        return
+                    await asyncio.sleep(.2)
+    tasks = [asyncio.create_task(one(index)) for index in pending]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    if errors or len(days) != request.tripCondition.totalDays:
+        raise PartialDraftError(days, errors)
+    return CourseDraft(title=f'{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행', reason='', tags=[], days=[days[index] for index in range(request.tripCondition.totalDays)])
 
 
 def _progress(message: str) -> None:
@@ -381,6 +453,39 @@ def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_v
     return plans
 
 
+def _canonical_id(value: str) -> str:
+    return value.strip().removeprefix('places/')
+
+
+def _choose_disjoint_plans(day_plans: dict[int, list[list[Visit]]], reserved_ids: set[str], search_budget: int = 5000) -> dict[int, list[Visit]]:
+    """Find a bounded global assignment, protecting days with few alternatives."""
+    reserved = {_canonical_id(value) for value in reserved_ids}
+    options = {index: [(plan, {_canonical_id(venue.place.placeId) for _, venue in plan}) for plan in plans] for index, plans in day_plans.items()}
+    order = sorted(options, key=lambda index: (len(options[index]), index))
+    best: dict[int, list[Visit]] = {}
+    visited = 0
+    def search(offset: int, used: set[str], chosen: dict[int, list[Visit]]) -> bool:
+        nonlocal best, visited
+        visited += 1
+        if len(chosen) > len(best):
+            best = dict(chosen)
+        if offset == len(order):
+            return len(chosen) == len(order)
+        if visited >= search_budget:
+            return False
+        index = order[offset]
+        for plan, ids in options[index]:
+            if len(ids) != len(plan) or used & ids:
+                continue
+            chosen[index] = plan
+            if search(offset + 1, used | ids, chosen):
+                return True
+            chosen.pop(index)
+        return search(offset + 1, used, chosen)
+    search(0, reserved, {})
+    return dict(sorted(best.items()))
+
+
 def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -> Any:
     """Compile explicit generation nodes using injectable provider/history boundaries.
 
@@ -428,16 +533,23 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         destination = await provider.resolve_destination(request.tripCondition.destinationCountry, request.tripCondition.destinationCity)
         unavailable = False
         try:
-            recent, profiles = await read_history(request)
-        except (OSError, sqlite3.Error):
+            async with asyncio.timeout(1.):
+                recent, profiles = await read_history(request)
+        except (OSError, sqlite3.Error, TimeoutError):
             logger.warning('Course history read unavailable')
             recent, profiles, unavailable = [], [], True
         return {'destination': destination, 'recent': recent, 'recent_profiles': profiles, 'history_unavailable': unavailable, 'attempt': 0, 'feedback': '', 'validated_days': {}, 'place_cache': {}, 'route_cache': {}, 'candidate_pools': {}, 'rejected_plans': {}, 'repairing': False, 'repeated': False, 'discovered_days': set(), 'restore_fallback': False, 'verified_fallback': {}}
 
     async def draft(state: CourseState) -> dict:
         _progress('취향에 맞는 장소 후보와 식사 대안을 구성하고 있습니다.')
+        existing = dict(state.get('partial_drafts', {}))
+        existing.update({index: DraftDay(candidates=[candidate for candidate, _ in saved['selected']]) for index, saved in state.get('validated_days', {}).items()})
+        pending = [index for index in range(state['request'].tripCondition.totalDays) if index not in existing]
         try:
-            result = await draft_candidates(state['request'], sorted(set().union(*state['recent'])) if state['recent'] else [], history_feedback(state) + '\n' + state.get('feedback', ''))
+            draft_deadline = min(state.get('deadline', float('inf')) - 28., asyncio.get_running_loop().time() + 46.)
+            result = await draft_candidates(state['request'], sorted(set().union(*state['recent'])) if state['recent'] else [], history_feedback(state) + '\n' + state.get('feedback', ''), pending_days=pending, existing_days=existing, deadline=draft_deadline)
+        except PartialDraftError as error:
+            return {'partial_drafts': error.days, 'attempt': state['attempt'] + 1, 'feedback': '일부 일자 후보 응답이 지연되었습니다. 완료한 일자는 유지하고 누락한 일자만 보충하세요.'}
         except Exception as error:
             if not _recoverable_draft(error):
                 raise
@@ -451,7 +563,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         result = result.model_copy(deep=True)
         for index, saved in state.get('validated_days', {}).items():
             result.days[index] = DraftDay(candidates=[candidate for candidate, _ in saved['selected']])
-        return {'draft_data': result, 'attempt': state['attempt'] + 1, 'feedback': ''}
+        return {'draft_data': result, 'partial_drafts': {}, 'attempt': state['attempt'] + 1, 'feedback': ''}
 
     async def verify_places(state: CourseState) -> dict:
         _progress('장소의 실제 위치·도시·영업 정보를 병렬로 확인하고 있습니다.')
@@ -471,12 +583,14 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             if isinstance(venue, MapsProviderError) and venue.kind in {'unauthorized', 'invalid'}:
                 raise venue
             if isinstance(venue, VerifiedPlace):
+                venue.place.placeId = ('places/' + _canonical_id(venue.place.placeId)) if _canonical_id(venue.place.placeId) else ''
                 cache[candidate_key] = venue
         recent_ids = set().union(*state['recent']) if state['recent'] else set()
         max_stops = _pace_limit(state['request'])
         minimum_visits = 3
         all_plans, failures = [], []
         for index, day in enumerate(state['draft_data'].days):
+            await asyncio.sleep(0)
             if index in saved:
                 all_plans.append([saved[index]['selected']])
                 continue
@@ -531,6 +645,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                     if not venue.place.address or not individual_place_category_supported(venue.place.category) or not state['destination'].contains(venue.place.latitude, venue.place.longitude) or _distance(anchor, venue) > 1000:
                         continue
                     candidate = Candidate(name=venue.place.placeName, english_name=venue.place.placeEngName, meal='lunch', stay_minutes=45, cost=planned_cost)
+                    venue.place.placeId = ('places/' + _canonical_id(venue.place.placeId)) if _canonical_id(venue.place.placeId) else ''
                     additions[(venue.place.placeId, candidate.meal)] = (candidate, venue)
                 pools[index] = dict(list({**additions, **pools[index]}.items())[:30])
                 available = list(pools[index].values())
@@ -552,7 +667,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         cache = state['route_cache']
         failures = list(state['failures'])
         rejected_plans = {index: set(signatures) for index, signatures in state['rejected_plans'].items()}
-        used = {venue.place.placeId for value in validated.values() for _, venue in value['selected']}
+        used = {_canonical_id(venue.place.placeId) for value in validated.values() for _, venue in value['selected']}
         # Share one failed lookup within this validation pass only. A fresh draft
         # can retry a transient edge; failures never enter the successful cache.
         pass_failures: dict[tuple, MapsProviderError] = {}
@@ -601,55 +716,67 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                             raise
                         if _distance(left, right) > 1000:
                             raise
-                if _distance(left, right) > 1000:
-                    raise
-                route = estimated_walking(left, right)
-                cache[key] = route
-                return route
+                raise
 
-        for index, plans in enumerate(state['day_plans']):
-            if index in validated or not plans:
-                continue
-            last_error = '다른 일자와 장소가 겹칩니다.'
+
+        async def verify_one(item: tuple[int, list[Visit]]) -> tuple:
+            index, selected = item
             day_date = date.fromisoformat(state['request'].tripCondition.startDate) + timedelta(days=index)
-            limit = 12 if state.get('repairing') else MAX_DAY_PLANS
-            for selected in plans[:limit]:
-                if any(venue.place.placeId in used for _, venue in selected):
-                    continue
-                routes = []
-                current = 540
-                temporary_failure = False
-                try:
-                    for left, right in pairwise(selected):
-                        candidate, venue = left
-                        opening, latest = MEAL_WINDOWS[candidate.meal]
-                        arrival = _opening_start(venue.periods, day_date, max(current, opening), candidate.stay_minutes, latest)
-                        if arrival is None:
-                            raise CourseGenerationError(f'{candidate.name}: 영업/식사 시간 안에 방문할 수 없습니다.')
-                        departure = None
-                        if state['destination'].country_code == 'KR':
-                            departure = datetime.combine(day_date, time(), tzinfo=ZoneInfo('Asia/Seoul')) + timedelta(minutes=arrival + candidate.stay_minutes)
-                        route = await lookup(venue, right[1], departure)
-                        if not valid_route(route, venue, right[1]):
-                            raise CourseGenerationError(f'{candidate.name} → {right[0].name}: 경로 정보가 불완전하거나 이동 시간이 90분을 초과합니다.')
-                        routes.append(route)
-                        current = arrival + candidate.stay_minutes + route.minutes + 10
-                    day = _schedule_day(selected, routes, day_date, index + 1, compact=any(_visit_shortage(selected)))
-                except MapsProviderError as error:
-                    if error.kind in {'unauthorized', 'invalid'}:
-                        raise
-                    temporary_failure = error.transient
-                    last_error = ('일시적인 경로 조회 장애' if temporary_failure else '경로 미확인') + f': {left[0].name} → {right[0].name}. 서로 가까운 다른 장소가 필요합니다.'
-                except (CourseGenerationError, ValueError) as error:
-                    last_error = str(error)
+            routes = []
+            current = 540
+            temporary_failure = False
+            try:
+                for left, right in pairwise(selected):
+                    candidate, venue = left
+                    opening, latest = MEAL_WINDOWS[candidate.meal]
+                    arrival = _opening_start(venue.periods, day_date, max(current, opening), candidate.stay_minutes, latest)
+                    if arrival is None:
+                        raise CourseGenerationError(f'{candidate.name}: 영업/식사 시간 안에 방문할 수 없습니다.')
+                    departure = None
+                    if state['destination'].country_code == 'KR':
+                        departure = datetime.combine(day_date, time(), tzinfo=ZoneInfo('Asia/Seoul')) + timedelta(minutes=arrival + candidate.stay_minutes)
+                    route = await lookup(venue, right[1], departure)
+                    if not valid_route(route, venue, right[1]):
+                        raise CourseGenerationError(f'{candidate.name} → {right[0].name}: 경로 정보가 불완전하거나 이동 시간이 90분을 초과합니다.')
+                    routes.append(route)
+                    current = arrival + candidate.stay_minutes + route.minutes + 10
+                day = _schedule_day(selected, routes, day_date, index + 1, compact=any(_visit_shortage(selected)))
+            except MapsProviderError as error:
+                if error.kind in {'unauthorized', 'invalid'}:
+                    raise
+                temporary_failure = error.transient
+                last_error = ('일시적인 경로 조회 장애' if temporary_failure else '경로 미확인') + f': {left[0].name} → {right[0].name}. 서로 가까운 다른 장소가 필요합니다.'
+            except (CourseGenerationError, ValueError) as error:
+                last_error = str(error)
+            else:
+                return {'selected': selected, 'routes': routes, 'day': day, 'compact': any(_visit_shortage(selected))}, '', False
+            return None, last_error, temporary_failure
+
+        remaining = {index: list(plans[:12 if state.get('repairing') else MAX_DAY_PLANS]) for index, plans in enumerate(state['day_plans']) if index not in validated and plans}
+        last_errors: dict[int, str] = {}
+        while remaining:
+            assignments = _choose_disjoint_plans(remaining, used)
+            if not assignments:
+                break
+            results = await _parallel(list(assignments.items()), verify_one)
+            for (index, selected), outcome in zip(assignments.items(), results):
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                record, error, temporary = outcome
+                if record is not None:
+                    validated[index] = record
+                    used.update(_canonical_id(venue.place.placeId) for _, venue in selected)
+                    remaining.pop(index, None)
                 else:
-                    validated[index] = {'selected': selected, 'routes': routes, 'day': day, 'compact': any(_visit_shortage(selected))}
-                    used.update(venue.place.placeId for _, venue in selected)
-                    break
-                if not temporary_failure:
-                    rejected_plans.setdefault(index, set()).add(_plan_signature(selected))
-            if index not in validated:
-                failures.append(f'{index + 1}일차 {day_date} 대안 {min(len(plans), limit)}개 소진: {last_error}')
+                    last_errors[index] = error
+                    remaining[index].remove(selected)
+                    if not temporary:
+                        rejected_plans.setdefault(index, set()).add(_plan_signature(selected))
+                    if not remaining[index]:
+                        remaining.pop(index)
+        for index in range(len(state['day_plans'])):
+            if index not in validated and state['day_plans'][index]:
+                failures.append(f'{index + 1}일차: ' + last_errors.get(index, '다른 일차와 겹치지 않는 실제 장소 조합이 부족합니다.'))
         if failures:
             if state.get('verified_fallback'):
                 return {'route_cache': cache, 'restore_fallback': True, 'feedback': ''}
@@ -658,7 +785,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         selected = [validated[index]['selected'] for index in range(len(state['day_plans']))]
         routes = [validated[index]['routes'] for index in range(len(state['day_plans']))]
         metadata = _selection_metadata(selected)
-        scores = overlap_scores(used, metadata['attraction_ids'], state.get('recent_profiles', []))
+        scores = overlap_scores({venue.place.placeId for day in selected for _, venue in day}, metadata['attraction_ids'], state.get('recent_profiles', []))
         area_overlap = planning_overlap(metadata['areas'], state.get('recent_profiles', []), 'areas')
         repeated = max(scores.values()) > MAX_OVERLAP or area_overlap > MAX_OVERLAP
         shortages = [_visit_shortage(day) for day in selected]
@@ -691,20 +818,27 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
 
     async def schedule(state: CourseState) -> dict:
         _progress('확정한 일자별 장소·이동·영업·식사 시간을 최종 검증하고 있습니다.')
+        expected = state['request'].tripCondition.totalDays
+        ids = [_canonical_id(venue.place.placeId) for selected in state['selected'] for _, venue in selected]
+        if len(state['selected']) != expected or len(state['routes']) != expected or not all(ids) or len(ids) != len(set(ids)):
+            raise CourseGenerationError('전체 날짜의 장소 중복 또는 일정 누락을 확인했습니다.')
+        for selected, routes in zip(state['selected'], state['routes']):
+            if len(routes) != len(selected) - 1 or any(not valid_route(route, left[1], right[1]) for (left, right), route in zip(pairwise(selected), routes)):
+                raise CourseGenerationError('실제로 확인되지 않은 이동 경로가 있습니다.')
         start_date = date.fromisoformat(state['request'].tripCondition.startDate)
         days = [_schedule_day(selected, state['routes'][index], start_date + timedelta(days=index), index + 1, compact=bool(state['validated_days'][index].get('compact'))) for index, selected in enumerate(state['selected'])]
         return {'days': days, 'feedback': ''}
 
     async def finalize(state: CourseState) -> dict:
         _progress('최종 일정과 최근 코스의 중복 여부를 확인하고 있습니다.')
-        request, proposal = state['request'], state['draft_data']
+        request = state['request']
         trip = request.tripCondition
-        course = CourseSchema(title=proposal.title, destinationCountry=trip.destinationCountry, destinationCity=trip.destinationCity, startDate=trip.startDate, totalDays=trip.totalDays, tags=proposal.tags, recommendationReason=apply_personalized_reasons(request, state['days']), itinerary=ItinerarySchema(days=state['days']))
+        course = CourseSchema(title=f'{trip.destinationCity} {trip.totalDays}일 여행', destinationCountry=trip.destinationCountry, destinationCity=trip.destinationCity, startDate=trip.startDate, totalDays=trip.totalDays, tags=verified_course_tags(state['days']), recommendationReason=apply_personalized_reasons(request, state['days']), itinerary=ItinerarySchema(days=state['days']))
         ids = {stop.place.placeId for day in course.itinerary.days for stop in day.stops}
         unavailable = state.get('history_unavailable', False)
         novel = False
         try:
-            budget = optional_budget(state)
+            budget = min(2., optional_budget(state))
             if budget <= .1:
                 raise TimeoutError('History storage skipped to preserve completion margin')
             async with asyncio.timeout(budget):
@@ -730,7 +864,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         return {'course': course, 'feedback': ''}
 
     async def enrich_place_copy(state: CourseState) -> dict:
-        """Write final-place prose once, reserving photo and completion budgets."""
+        """Apply only grounded server prose, preserving verified venue facts."""
         _progress('확정한 장소의 추천 이유와 방문 팁을 작성하고 있습니다.')
         budget = 25.0
         if 'deadline' in state:
@@ -742,7 +876,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             for index, selected in enumerate(state['selected'])
             for sequence, (candidate, venue) in enumerate(selected)
         }
-        course = await enrich_course_place_copy(state['course'], state['request'], selection_context=context, timeout_seconds=budget)
+        course = await enrich_course_place_copy(state['course'], state['request'], selection_context=context, timeout_seconds=budget, evidence_only=True)
         return {'course': course}
 
     async def enrich_images(state: CourseState) -> dict:
@@ -811,7 +945,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
     return graph.compile()
 
 
-async def stream_course_generation(request: CourseRequestSchema) -> AsyncGenerator[tuple[str, dict]]:
+async def stream_course_generation(request: CourseRequestSchema, *, deadline: float | None = None) -> AsyncGenerator[tuple[str, dict]]:
     """Stream existing progress/complete payloads while the graph actually executes.
 
     A request-wide timeout and generator closure cancel active graph work.
@@ -819,8 +953,13 @@ async def stream_course_generation(request: CourseRequestSchema) -> AsyncGenerat
     """
     completed: dict | None = None
     provider = VerifiedMapsProvider(concurrency=settings.COURSE_MAPS_CONCURRENCY)
+    now = asyncio.get_running_loop().time()
+    request_deadline = min(deadline if deadline is not None else float('inf'), now + min(90., settings.COURSE_TIMEOUT_SECONDS))
+    remaining = max(0., request_deadline - now)
+    # Leave up to one second for cancelled provider/graph work to close cleanly.
+    processing_deadline = request_deadline - min(1., remaining * .1)
     try:
-        async with asyncio.timeout(settings.COURSE_TIMEOUT_SECONDS) as timeout:
+        async with asyncio.timeout_at(processing_deadline) as timeout:
             async with provider:
                 graph = build_course_graph(provider, CourseHistory())
                 async with aclosing(graph.astream({'request': request, 'attempt': 0, 'deadline': timeout.when()}, stream_mode=['custom', 'updates'])) as events:

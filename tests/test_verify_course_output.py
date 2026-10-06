@@ -261,7 +261,7 @@ async def test_live_wrapper_collects_real_graph_and_checks_exact_remote_root(arc
         assert report['langsmith']['status'] != 'success'
 
 
-def test_explicit_formula_estimate_passes_with_quality_warning(archived_output):
+def test_explicit_formula_estimate_fails_without_verified_route(archived_output):
     from app.agent.tools.verified_maps import VerifiedPlace
     from app.schemas.course import PlaceSchema
     from app.services.course_routing import estimated_walking
@@ -272,8 +272,8 @@ def test_explicit_formula_estimate_passes_with_quality_warning(archived_output):
     route = estimated_walking(VerifiedPlace(PlaceSchema.model_validate(first['place'])), VerifiedPlace(PlaceSchema.model_validate(following['place'])))
     first['transportToNext'] = route.model_dump()
     report = validate(request, result)
-    assert report['passed']
-    assert any('추정' in warning for warning in report['warnings'])
+    assert not report['passed']
+    assert report['errors']
 
 
 @pytest.mark.parametrize('invalid', ['arbitrary_time', 'too_far', 'transit'])

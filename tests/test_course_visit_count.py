@@ -136,7 +136,7 @@ async def test_count_fill_failure_preserves_verified_four_with_explicit_day_note
             places[candidate.name] = VerifiedPlace(places[candidate.name].place.model_copy(update={'latitude': 0.}))
         llm.side_effect = [first, second]
     else:
-        async def response(*args):
+        async def response(*args, **kwargs):
             if llm.await_count > 1:
                 await asyncio.Event().wait()
             return first
@@ -148,7 +148,7 @@ async def test_count_fill_failure_preserves_verified_four_with_explicit_day_note
     course = (await asyncio.wait_for(build_course_graph(provider, history).ainvoke(state), timeout=.9 if failure == 'deadline' else 10))['course']
     day = course.itinerary.days[0]
     assert len(day.stops) == 4 and len(core_ids(day)) == 2
-    assert course.title == first.title
+    assert course.title == f'{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행'
     assert '4' in day.memo and ('이동' in day.memo or '영업' in day.memo)
     if failure == 'deadline':
         assert llm.await_count <= 2

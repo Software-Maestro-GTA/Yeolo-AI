@@ -275,3 +275,15 @@ def apply_personalized_reasons(request: CourseRequestSchema, days: list[DayItine
         main_experience = experiences.most_common(1)[0][0]
         summary += ' ' + _experience_value(example_categories[main_experience])
     return summary
+
+
+def verified_course_tags(days: list[DayItinerarySchema]) -> list[str]:
+    """Derive whole-trip experience tags from verified place categories only.
+
+    Args:
+        days: Final verified itinerary in calendar order.
+    Returns:
+        Up to five distinct, type-supported experience labels.
+    """
+    experiences = Counter(_experience(stop.place.category)[0] for day in days for stop in day.stops)
+    return [label for label, _ in experiences.most_common(5)]

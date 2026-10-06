@@ -266,10 +266,14 @@ async def test_real_model_boundary_is_one_bounded_structured_call_and_prompt_sep
     model.assert_called_once()
     kwargs = model.call_args.kwargs
     assert kwargs['max_retries'] == 0 and 0 < kwargs['max_output_tokens'] <= 16000
+    assert kwargs['thinking_level'] == 'low'
     assert len(captured) == 1
     prompt = captured[0]
     assert '국립중앙박물관' in prompt and 'places/a' in prompt
-    assert any(word in prompt for word in ('모델 지식', 'model knowledge', '안정적인'))
+    assert '설명해도 됩니다' not in prompt
+    assert any(word in prompt for word in ('모델 지식', '모델 기억', '사전 지식'))
+    assert any(word in prompt for word in ('추가하지', '금지', '사용하지'))
+    assert '제공된' in prompt
     assert any(word in prompt for word in ('검증되지', '검증된 사실이 아', 'unverified'))
     assert any(word in prompt for word in ('지시로', '명령으로', 'instructions'))
     assert 'MBTI' in prompt and '예약' in prompt and '가격' in prompt
