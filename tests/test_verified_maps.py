@@ -1098,3 +1098,71 @@ async def test_meal_discovery_filters_before_limiting_valid_results(place_payloa
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={'places': venues}))) as client:
         result = await VerifiedMapsProvider(client=client, api_key='offline').discover_meals(Destination('KR', 37.3, 126.7, 37.8, 127.3), anchor)
     assert {venue.place.placeId for venue in result} == {'restaurant-5', 'restaurant-6', 'restaurant-7'}
+
+
+@pytest.mark.asyncio
+async def test_attraction_discovery_uses_one_small_nearby_query_and_only_verified_official_facts(place_payload):
+    """Local refill obtains provider identity and location without model guessing."""
+    import json
+
+    from app.agent.tools.verified_maps import (
+        Destination,
+        VerifiedMapsProvider,
+        VerifiedPlace,
+    )
+
+    anchor = VerifiedPlace(PlaceSchema(placeId='places/anchor', placeName='기존 명소', category='museum', address='대한민국 서울', latitude=37.57, longitude=126.98))
+    destination = Destination(country_code='KR', south=37.3, west=126.7, north=37.8, east=127.3)
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        assert request.method == 'POST' and request.url.path.endswith('places:searchText')
+        body = json.loads(request.content)
+        assert body['pageSize'] <= 5
+        assert body['locationBias']['circle']['radius'] <= 2000
+        assert body['locationBias']['circle']['center'] == {'latitude': 37.57, 'longitude': 126.98}
+        return httpx.Response(200, json={'places': [place_payload, copy.deepcopy(place_payload)]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        found = await provider.discover_attractions(destination, anchor)
+    assert len(requests) == 1 and len(found) == 1
+    assert found[0].place.placeId.endswith(place_payload['id'])
+    assert found[0].place.placeName == place_payload['displayName']['text']
+    assert found[0].place.address == place_payload['formattedAddress']
+    assert found[0].periods == place_payload['regularOpeningHours']['periods']
+
+
+@pytest.mark.parametrize('mutation', ['missing_id', 'food', 'cafe', 'closed', 'wrong_country', 'outside_city', 'far', 'nan', 'missing_address', 'geographic_area', 'hospital'])
+@pytest.mark.asyncio
+async def test_attraction_discovery_discards_unusable_places_without_satisfying_core_count(place_payload, mutation):
+    """API supplied entries remain untrusted until their core-place facts pass."""
+    from app.agent.tools.verified_maps import (
+        Destination,
+        VerifiedMapsProvider,
+        VerifiedPlace,
+    )
+
+    payload = copy.deepcopy(place_payload)
+    if mutation == 'missing_id':
+        payload.pop('id')
+    elif mutation in {'food', 'cafe', 'geographic_area', 'hospital'}:
+        payload['types'] = [{'food': 'restaurant', 'cafe': 'coffee_shop', 'geographic_area': 'locality', 'hospital': 'hospital'}[mutation]]
+    elif mutation == 'closed':
+        payload['businessStatus'] = 'CLOSED_PERMANENTLY'
+    elif mutation == 'wrong_country':
+        payload['addressComponents'][0]['shortText'] = 'JP'
+    elif mutation == 'outside_city':
+        payload['location']['latitude'] = 38.0
+    elif mutation == 'far':
+        payload['location']['latitude'] = 37.7
+    elif mutation == 'nan':
+        payload['location']['latitude'] = 'NaN'
+    elif mutation == 'missing_address':
+        payload.pop('formattedAddress')
+    anchor = VerifiedPlace(PlaceSchema(placeId='places/anchor', placeName='기존 명소', category='museum', address='대한민국 서울', latitude=37.57, longitude=126.98))
+    destination = Destination(country_code='KR', south=37.3, west=126.7, north=37.8, east=127.3)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={'places': [payload]}))) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        assert await provider.discover_attractions(destination, anchor) == []
