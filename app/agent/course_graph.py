@@ -41,7 +41,6 @@ from app.schemas.course import (
     StopSchema,
     TransportToNextSchema,
 )
-from app.services.course_copy import enrich_course_place_copy
 from app.services.course_diversity import (
     MAX_OVERLAP,
     Experience,
@@ -978,7 +977,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         return {**{key: copy.deepcopy(value) for key, value in snapshot.items() if key != 'rank'}, 'feedback': '', 'restore_fallback': False, 'attempt': _max_drafts(state)}
 
     async def schedule(state: CourseState) -> dict:
-        _progress('확정한 일자별 장소·이동·영업·식사 시간을 최종 검증하고 있습니다.')
+        _progress('검증을 마친 일자별 일정과 방문 팁을 최종 확인하고 있습니다.')
         expected = state['request'].tripCondition.totalDays
         ids = [_canonical_id(venue.place.placeId) for selected in state['selected'] for _, venue in selected]
         if len(state['selected']) != expected or len(state['routes']) != expected or not all(ids) or len(ids) != len(set(ids)):
@@ -991,7 +990,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         return {'days': days, 'feedback': ''}
 
     async def finalize(state: CourseState) -> dict:
-        _progress('최종 일정과 최근 코스의 중복 여부를 확인하고 있습니다.')
+        _progress('확정한 일정의 추천 이유를 작성하고 최근 코스의 중복 여부를 확인하고 있습니다.')
         request = state['request']
         trip = request.tripCondition
         course = CourseSchema(title=f'{trip.destinationCity} {trip.totalDays}일 여행', destinationCountry=trip.destinationCountry, destinationCity=trip.destinationCity, startDate=trip.startDate, totalDays=trip.totalDays, tags=verified_course_tags(state['days']), recommendationReason=apply_personalized_reasons(request, state['days']), itinerary=ItinerarySchema(days=state['days']))
@@ -1024,21 +1023,6 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             course.recommendationReason += ' 확인 가능한 장소와 일정 조건이 제한되어 이전 코스와 일부 방문 장소 또는 계획 권역이 겹칠 수 있어요.'
         return {'course': course, 'feedback': ''}
 
-    async def enrich_place_copy(state: CourseState) -> dict:
-        """Apply only grounded server prose, preserving verified venue facts."""
-        _progress('확정한 장소의 추천 이유와 방문 팁을 작성하고 있습니다.')
-        budget = 25.0
-        if 'deadline' in state:
-            budget = min(budget, state['deadline'] - asyncio.get_running_loop().time() - 6.0)
-        if budget <= .1:
-            return {'course': state['course']}
-        context = {
-            (index + 1, sequence + 1, venue.place.placeId): {'experiences': candidate.experiences}
-            for index, selected in enumerate(state['selected'])
-            for sequence, (candidate, venue) in enumerate(selected)
-        }
-        course = await enrich_course_place_copy(state['course'], state['request'], selection_context=context, timeout_seconds=budget, evidence_only=True)
-        return {'course': course}
 
     async def enrich_images(state: CourseState) -> dict:
         """Use only residual optional time for final-place photos and attribution."""
@@ -1093,7 +1077,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         return decide
 
     graph = StateGraph(CourseState)
-    for name, node in [('prepare', prepare), ('draft', draft), ('refill', refill), ('verify_places', verify_places), ('verify_routes', verify_routes), ('schedule', schedule), ('finalize', finalize), ('repair', repair), ('enrich_place_copy', enrich_place_copy), ('enrich_images', enrich_images)]:
+    for name, node in [('prepare', prepare), ('draft', draft), ('refill', refill), ('verify_places', verify_places), ('verify_routes', verify_routes), ('schedule', schedule), ('finalize', finalize), ('repair', repair), ('enrich_images', enrich_images)]:
         if name in {'draft', 'refill', 'verify_places', 'verify_routes'}:
             async def bounded(state: CourseState, operation: Callable = node) -> dict:
                 return await optional_node(operation, state)
@@ -1107,9 +1091,8 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
     graph.add_conditional_edges('draft', next_node('verify_places'), ['verify_places', 'draft', 'refill', 'repair', 'restore'])
     graph.add_conditional_edges('refill', next_node('verify_places'), ['verify_places', 'draft', 'refill', 'repair', 'restore'])
     graph.add_edge('repair', 'verify_routes')
-    for node, successor in [('verify_places', 'verify_routes'), ('verify_routes', 'schedule'), ('schedule', 'finalize'), ('finalize', 'enrich_place_copy')]:
+    for node, successor in [('verify_places', 'verify_routes'), ('verify_routes', 'schedule'), ('schedule', 'finalize'), ('finalize', 'enrich_images')]:
         graph.add_conditional_edges(node, next_node(successor), [successor, 'draft', 'refill', 'repair', 'restore'])
-    graph.add_edge('enrich_place_copy', 'enrich_images')
     graph.add_edge('enrich_images', END)
     return graph.compile().with_config({'recursion_limit': 50})
 

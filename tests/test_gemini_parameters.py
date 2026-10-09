@@ -15,9 +15,9 @@ from app.schemas.taste_profile import TasteProfileAnalysisOutput
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('operation', ['taste', 'candidates', 'place_copy'])
+@pytest.mark.parametrize('operation', ['taste', 'candidates'])
 async def test_gemini_requests_omit_deprecated_generation_parameters(
-    operation, mocker, offline_place_copy,
+    operation, mocker,
 ):
     """Exercise real LangChain/GenAI serialization without sending network traffic."""
     if operation == 'taste':
@@ -29,12 +29,10 @@ async def test_gemini_requests_omit_deprecated_generation_parameters(
             travelPaceDensity='balanced', spendingTendency='moderate',
             companionType='solo', seasonalEnvironmentPreference=['warm_region'],
         )
-    elif operation == 'candidates':
+    else:
         output = {'title': '서울 여행', 'reason': '문화 탐방', 'days': [
             {'candidates': [{'name': '국립중앙박물관'}, {'name': '서울숲'}]},
         ]}
-    else:
-        output = {'stops': []}
 
     requests = []
 
@@ -61,7 +59,7 @@ async def test_gemini_requests_omit_deprecated_generation_parameters(
                 if operation == 'taste':
                     result = await taste_profile_chains.generate_taste_profile('{}')
                     assert result.seasonalEnvironmentPreference == ['warm_region']
-                elif operation == 'candidates':
+                else:
                     request = CourseRequestSchema.model_validate({
                         'userId': '550e8400-e29b-41d4-a716-446655440000', 'mbti': 'INTJ',
                         'tripCondition': {
@@ -71,8 +69,6 @@ async def test_gemini_requests_omit_deprecated_generation_parameters(
                     })
                     result = await course_graph._draft_day_candidates(request, [], day_index=0, seed='offline')
                     assert len(result.days) == 1
-                else:
-                    assert await offline_place_copy.original({'stops': [], 'preferences': []}) == output
         finally:
             await provider.aio.aclose()
             provider.close()
@@ -91,7 +87,7 @@ async def test_gemini_requests_omit_deprecated_generation_parameters(
         assert 'thinkinglevel' not in thinking
     else:
         assert thinking['thinkinglevel'] == 'LOW'
-        assert config['maxOutputTokens'] == (5000 if operation == 'candidates' else 12000)
+        assert config['maxOutputTokens'] == 5000
 
 
 @pytest.mark.asyncio
