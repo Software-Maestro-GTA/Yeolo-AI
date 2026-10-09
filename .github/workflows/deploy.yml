@@ -95,6 +95,7 @@ jobs:
       # ── ConfigMap (ai-env) ──────────────────────────────────────────
       LOG_LEVEL: ${{ vars.LOG_LEVEL }}
       GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME }}
+      ABTO_GATEWAY_BASE_URL: ${{ vars.ABTO_GATEWAY_BASE_URL }}
       TASTE_ANALYSIS_TIMEOUT_SECONDS: ${{ vars.TASTE_ANALYSIS_TIMEOUT_SECONDS }}
       LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS }}
       PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS }}
@@ -105,6 +106,7 @@ jobs:
       # ── Secret (ai-secrets) ─────────────────────────────────────────
       INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      ABTO_CALLING_KEY: ${{ secrets.ABTO_CALLING_KEY }}
       GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -127,7 +129,7 @@ jobs:
         run: |
           umask 077
           : > ai.env
-          for k in LOG_LEVEL GEMINI_MODEL_NAME TASTE_ANALYSIS_TIMEOUT_SECONDS LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
+          for k in LOG_LEVEL GEMINI_MODEL_NAME ABTO_GATEWAY_BASE_URL TASTE_ANALYSIS_TIMEOUT_SECONDS LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai.env
           done
           kubectl -n "$K8S_NAMESPACE" create configmap ai-env \
@@ -139,7 +141,7 @@ jobs:
           umask 077
           : > ai-secret.env
           missing=0
-          for k in INTERNAL_API_KEY GEMINI_API_KEY; do
+          for k in INTERNAL_API_KEY GEMINI_API_KEY ABTO_CALLING_KEY; do
             v="${!k}"
             if [ -z "$v" ]; then
               echo "::error::Required secret $k is missing in GitHub Environment secrets!"
@@ -148,7 +150,7 @@ jobs:
           done
           [ "$missing" -eq 1 ] && exit 1
 
-          for k in INTERNAL_API_KEY GEMINI_API_KEY GOOGLE_MAPS_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
+          for k in INTERNAL_API_KEY GEMINI_API_KEY ABTO_CALLING_KEY GOOGLE_MAPS_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai-secret.env
           done
           kubectl -n "$K8S_NAMESPACE" create secret generic ai-secrets \
@@ -190,6 +192,7 @@ jobs:
       # ── ConfigMap (ai-env) ──────────────────────────────────────────
       LOG_LEVEL: ${{ vars.LOG_LEVEL }}
       GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME }}
+      ABTO_GATEWAY_BASE_URL: ${{ vars.ABTO_GATEWAY_BASE_URL }}
       TASTE_ANALYSIS_TIMEOUT_SECONDS: ${{ vars.TASTE_ANALYSIS_TIMEOUT_SECONDS }}
       LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS }}
       PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS }}
@@ -200,6 +203,7 @@ jobs:
       # ── Secret (ai-secrets) ─────────────────────────────────────────
       INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      ABTO_CALLING_KEY: ${{ secrets.ABTO_CALLING_KEY }}
       GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -222,7 +226,7 @@ jobs:
         run: |
           umask 077
           : > ai.env
-          for k in LOG_LEVEL GEMINI_MODEL_NAME TASTE_ANALYSIS_TIMEOUT_SECONDS LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
+          for k in LOG_LEVEL GEMINI_MODEL_NAME ABTO_GATEWAY_BASE_URL TASTE_ANALYSIS_TIMEOUT_SECONDS LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai.env
           done
           kubectl -n "$K8S_NAMESPACE" create configmap ai-env \
@@ -234,7 +238,7 @@ jobs:
           umask 077
           : > ai-secret.env
           missing=0
-          for k in INTERNAL_API_KEY GEMINI_API_KEY; do
+          for k in INTERNAL_API_KEY GEMINI_API_KEY ABTO_CALLING_KEY; do
             v="${!k}"
             if [ -z "$v" ]; then
               echo "::error::Required secret $k is missing in GitHub Environment secrets!"
@@ -243,7 +247,7 @@ jobs:
           done
           [ "$missing" -eq 1 ] && exit 1
 
-          for k in INTERNAL_API_KEY GEMINI_API_KEY GOOGLE_MAPS_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
+          for k in INTERNAL_API_KEY GEMINI_API_KEY ABTO_CALLING_KEY GOOGLE_MAPS_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY LANGSMITH_API_KEY LANGCHAIN_API_KEY; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai-secret.env
           done
           kubectl -n "$K8S_NAMESPACE" create secret generic ai-secrets \

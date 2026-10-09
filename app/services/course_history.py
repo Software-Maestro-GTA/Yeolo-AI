@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 from pathlib import Path
@@ -11,6 +12,35 @@ from uuid import uuid4
 from app.core.config import settings
 from app.schemas.course import CourseRequestSchema
 from app.services.course_diversity import clean_metadata, overlap_scores
+
+logger = logging.getLogger(__name__)
+
+
+def _history_entry(serialized_ids: str, serialized_metadata: str | None) -> dict | None:
+    """Read one local row; invalid IDs are skipped and bad metadata loses no IDs."""
+    try:
+        ids = json.loads(serialized_ids)
+    except (ValueError, TypeError):
+        logger.warning('Skipping unreadable course history IDs')
+        return None
+    if not isinstance(ids, list) or not ids or any(not isinstance(value, str) or not value.strip() for value in ids):
+        logger.warning('Skipping malformed course history IDs')
+        return None
+    metadata = {}
+    if serialized_metadata:
+        try:
+            metadata = json.loads(serialized_metadata)
+        except (ValueError, TypeError):
+            logger.warning('Ignoring unreadable course history metadata')
+        if not isinstance(metadata, dict):
+            logger.warning('Ignoring malformed course history metadata')
+            metadata = {}
+    fields = {
+        name: [value for value in metadata.get(name, []) if isinstance(value, str)]
+        if isinstance(metadata.get(name), list) else []
+        for name in ('attraction_ids', 'areas', 'experiences')
+    }
+    return {'place_ids': ids, **clean_metadata(fields, set(ids))}
 
 
 def history_key(request: CourseRequestSchema) -> str:
@@ -81,7 +111,7 @@ class CourseHistory:
                 connection.execute('DELETE FROM course_plans WHERE NOT EXISTS (SELECT 1 FROM courses WHERE courses.user_key = course_plans.user_key AND courses.signature = course_plans.signature)')
 
             rows = connection.execute('SELECT c.ids, p.metadata FROM courses c LEFT JOIN course_plans p ON c.user_key = p.user_key AND c.signature = p.signature WHERE c.user_key = ? ORDER BY c.created DESC LIMIT ?', (key, self.max_entries)).fetchall()
-            entries = [{'place_ids': json.loads(row[0]), **(json.loads(row[1]) if row[1] else {'attraction_ids': [], 'areas': [], 'experiences': []})} for row in rows]
+            entries = [entry for row in rows if (entry := _history_entry(*row)) is not None]
             if ids is None:
                 result = entries if profiles else [set(item['place_ids']) for item in entries]
             else:

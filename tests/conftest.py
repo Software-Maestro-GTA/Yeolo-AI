@@ -1,10 +1,22 @@
 """Keep unit tests independent of provider credentials and external networks."""
 
 import os
-from importlib import import_module
-from unittest.mock import AsyncMock
 
 import pytest
+
+from app.core.config import settings
+from app.core.llm import get_abto
+
+
+@pytest.fixture(autouse=True)
+def offline_calling_configuration(mocker):
+    """Never use local Calling/provider credentials or cached clients in tests."""
+    mocker.patch.object(settings, 'ABTO_CALLING_KEY', 'ck-abto-offline')
+    mocker.patch.object(settings, 'ABTO_GATEWAY_BASE_URL', 'https://gateway.abto.app/v1')
+    mocker.patch.object(settings, 'GEMINI_API_KEY', 'offline-gemini-key')
+    get_abto.cache_clear()
+    yield
+    get_abto.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -19,13 +31,11 @@ def forbid_live_http(mocker):
         'httpx.HTTPTransport.handle_request',
         side_effect=AssertionError('Live HTTP is forbidden in unit tests'),
     )
-
-
-@pytest.fixture(autouse=True)
-def offline_place_copy(mocker):
-    """Keep optional finalized-place prose independent of credentials and tokens."""
-    service = import_module('app.services.course_copy')
-    original = service.generate_place_copy
-    boundary = mocker.patch.object(service, 'generate_place_copy', new_callable=AsyncMock, return_value={'stops': []})
-    boundary.original = original
-    yield boundary
+    mocker.patch(
+        'httpx2.AsyncHTTPTransport.handle_async_request',
+        side_effect=AssertionError('Live HTTP is forbidden in unit tests'),
+    )
+    mocker.patch(
+        'httpx2.HTTPTransport.handle_request',
+        side_effect=AssertionError('Live HTTP is forbidden in unit tests'),
+    )

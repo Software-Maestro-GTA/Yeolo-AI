@@ -261,16 +261,12 @@ async def test_live_wrapper_collects_real_graph_and_checks_exact_remote_root(arc
         assert report['langsmith']['status'] != 'success'
 
 
-def test_explicit_formula_estimate_fails_without_verified_route(archived_output):
-    from app.agent.tools.verified_maps import VerifiedPlace
-    from app.schemas.course import PlaceSchema
-    from app.services.course_routing import estimated_walking
+def test_explicit_estimate_fails_without_verified_route(archived_output):
 
     request, result = archived_output
     first, following = result['course']['itinerary']['days'][0]['stops'][:2]
     following['place']['latitude'] = 37.551
-    route = estimated_walking(VerifiedPlace(PlaceSchema.model_validate(first['place'])), VerifiedPlace(PlaceSchema.model_validate(following['place'])))
-    first['transportToNext'] = route.model_dump()
+    first['transportToNext'] = {'type': 'walking', 'distance': None, 'minutes': 10, 'cost': 0, 'memo': '[추정 도보] 직선거리로 예상한 이동 시간'}
     report = validate(request, result)
     assert not report['passed']
     assert report['errors']
@@ -278,14 +274,11 @@ def test_explicit_formula_estimate_fails_without_verified_route(archived_output)
 
 @pytest.mark.parametrize('invalid', ['arbitrary_time', 'too_far', 'transit'])
 def test_estimate_marker_does_not_accept_arbitrary_unverified_metrics(archived_output, invalid):
-    from app.agent.tools.verified_maps import VerifiedPlace
-    from app.schemas.course import PlaceSchema
-    from app.services.course_routing import estimated_walking
 
     request, result = archived_output
     first, following = result['course']['itinerary']['days'][0]['stops'][:2]
     following['place']['latitude'] = 37.551
-    route = estimated_walking(VerifiedPlace(PlaceSchema.model_validate(first['place'])), VerifiedPlace(PlaceSchema.model_validate(following['place']))).model_dump()
+    route = {'type': 'walking', 'distance': None, 'minutes': 10, 'cost': 0, 'memo': '[추정 도보] 직선거리로 예상한 이동 시간'}
     if invalid == 'arbitrary_time':
         route['minutes'] = 1
     elif invalid == 'too_far':

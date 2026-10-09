@@ -31,7 +31,7 @@ def place_payload():
 
 @pytest.mark.asyncio
 async def test_provider_uses_place_facts_from_http_response(place_payload):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     def respond(request):
@@ -55,7 +55,7 @@ async def test_provider_uses_place_facts_from_http_response(place_payload):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('mutation', ['missing_id', 'out_of_bounds', 'wrong_country', 'closed', 'nan', 'missing_address'])
 async def test_invalid_place_facts_are_rejected(place_payload, mutation):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = copy.deepcopy(place_payload)
@@ -107,7 +107,7 @@ async def test_route_rounds_up_duration_and_does_not_invent_bus_instructions():
 async def test_provider_bounds_concurrent_searches_and_deduplicates(place_payload):
     import asyncio
 
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     in_flight = peak = calls = 0
@@ -141,7 +141,7 @@ async def test_provider_bounds_concurrent_searches_and_deduplicates(place_payloa
 async def test_named_place_identity_and_official_aliases(place_payload, case):
     import json
 
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     candidate = Candidate(name='Louvre Museum', english_name='Louvre Museum')
@@ -192,7 +192,7 @@ async def test_named_place_identity_and_official_aliases(place_payload, case):
 @pytest.mark.parametrize('geographic_type', ['sublocality_level_2', 'neighborhood', 'locality', 'administrative_area_level_1', 'administrative_area_level_2', 'country'])
 async def test_geographic_area_is_not_accepted_as_individual_stop(place_payload, geographic_type):
     """Exact name and valid coordinates do not turn an area centroid into a venue."""
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = copy.deepcopy(place_payload)
@@ -206,7 +206,7 @@ async def test_geographic_area_is_not_accepted_as_individual_stop(place_payload,
 
 @pytest.mark.asyncio
 async def test_verified_named_park_remains_a_valid_individual_stop(place_payload):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = copy.deepcopy(place_payload)
@@ -222,7 +222,7 @@ async def test_verified_named_park_remains_a_valid_individual_stop(place_payload
 
 @pytest.mark.asyncio
 async def test_geographic_primary_type_cannot_be_hidden_by_poi_secondary_type(place_payload):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = copy.deepcopy(place_payload)
@@ -236,7 +236,7 @@ async def test_geographic_primary_type_cannot_be_hidden_by_poi_secondary_type(pl
 @pytest.mark.asyncio
 @pytest.mark.parametrize('meal', ['breakfast', 'lunch', 'dinner'])
 async def test_breakfast_restaurant_category_only_establishes_breakfast_role(place_payload, meal):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = copy.deepcopy(place_payload)
@@ -257,7 +257,7 @@ async def test_breakfast_restaurant_category_only_establishes_breakfast_role(pla
 @pytest.mark.parametrize('transit_type', ['bus_stop', 'bus_station', 'train_station', 'subway_station', 'transit_station', 'light_rail_station'])
 async def test_transit_access_point_is_not_an_attraction(place_payload, transit_type):
     """A station sharing an attraction name must not replace the actual attraction."""
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = copy.deepcopy(place_payload)
@@ -271,7 +271,7 @@ async def test_transit_access_point_is_not_an_attraction(place_payload, transit_
 @pytest.mark.asyncio
 @pytest.mark.parametrize(('category', 'meal'), [('market', 'lunch'), ('market', 'dinner'), ('shopping_mall', 'dinner'), ('supermarket', 'lunch'), ('food', 'lunch'), ('cafe', 'lunch'), ('bakery', 'dinner'), ('dessert_restaurant', 'dinner')])
 async def test_shopping_or_generic_food_type_does_not_establish_meal_service(place_payload, category, meal):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = copy.deepcopy(place_payload)
@@ -285,7 +285,7 @@ async def test_shopping_or_generic_food_type_does_not_establish_meal_service(pla
 @pytest.mark.asyncio
 @pytest.mark.parametrize(('category', 'meal'), [('noodle_shop', 'lunch'), ('restaurant', 'dinner'), ('food_court', 'lunch')])
 async def test_concrete_meal_venue_types_remain_accepted(place_payload, category, meal):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = copy.deepcopy(place_payload)
@@ -299,7 +299,7 @@ async def test_concrete_meal_venue_types_remain_accepted(place_payload, category
 
 @pytest.mark.asyncio
 async def test_market_complex_is_not_meal_venue_from_secondary_restaurant_tag(place_payload):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = copy.deepcopy(place_payload)
@@ -314,7 +314,7 @@ async def test_market_complex_is_not_meal_venue_from_secondary_restaurant_tag(pl
 async def test_single_id_search_uses_ids_mask_then_complete_details(place_payload):
     import json
 
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     requests = []
@@ -352,7 +352,7 @@ async def test_single_id_search_uses_ids_mask_then_complete_details(place_payloa
 @pytest.mark.asyncio
 @pytest.mark.parametrize('ambiguous', [False, True])
 async def test_multiple_ids_use_full_search_without_details_and_keep_ambiguity_rule(place_payload, ambiguous):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     calls = []
@@ -385,7 +385,7 @@ async def test_multiple_ids_use_full_search_without_details_and_keep_ambiguity_r
 @pytest.mark.asyncio
 @pytest.mark.parametrize('malformed_id', [None, '', 'bad/id', ' white space', 123])
 async def test_mixed_malformed_ids_do_not_turn_ambiguous_search_into_single_hit(place_payload, malformed_id):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     calls = []
@@ -405,7 +405,7 @@ async def test_mixed_malformed_ids_do_not_turn_ambiguous_search_into_single_hit(
 @pytest.mark.asyncio
 @pytest.mark.parametrize('mismatch', [False, True])
 async def test_duplicate_search_ids_require_one_detail_and_same_response_id(place_payload, mismatch):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     methods = []
@@ -430,7 +430,7 @@ async def test_duplicate_search_ids_require_one_detail_and_same_response_id(plac
 async def test_same_place_details_singleflight_is_shared_across_meal_roles(place_payload):
     import asyncio
 
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     payload = {**place_payload, 'primaryType': 'restaurant', 'types': ['restaurant']}
@@ -457,7 +457,7 @@ async def test_same_place_details_singleflight_is_shared_across_meal_roles(place
 async def test_details_cache_keeps_languages_separate_for_english_fallback(place_payload):
     import json
 
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     languages = []
@@ -480,7 +480,7 @@ async def test_details_cache_keeps_languages_separate_for_english_fallback(place
 async def test_failed_details_are_not_success_cached_and_metrics_count_real_sends(place_payload):
     import json
 
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     details = 0
@@ -513,7 +513,7 @@ async def test_failed_details_are_not_success_cached_and_metrics_count_real_send
 async def test_cancelled_details_count_only_sent_attempt_and_can_be_retried(place_payload):
     import asyncio
 
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     started = asyncio.Event()
@@ -583,7 +583,7 @@ async def test_actual_masks_drive_sku_cost_and_unknown_fields_keep_estimate_inco
 async def test_cancelled_lock_and_capacity_waiters_are_not_http_attempts(place_payload):
     import asyncio
 
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     started = asyncio.Event()
@@ -624,7 +624,7 @@ async def test_cancelled_lock_and_capacity_waiters_are_not_http_attempts(place_p
 @pytest.mark.asyncio
 @pytest.mark.parametrize('invalid_body', [b'not json', b'[]', b'{"error": {"message": "unusable"}}'])
 async def test_http_200_invalid_payload_records_response_and_error_without_success_cache(place_payload, invalid_body):
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
     details = 0

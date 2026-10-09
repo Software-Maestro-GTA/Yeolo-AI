@@ -36,7 +36,7 @@ def test_overlap_detects_restaurant_only_swaps_and_uses_max_individual_history(c
 
 
 def test_area_normalization_and_candidate_metadata_remain_internal():
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.services.course_diversity import normalize_area
 
     assert normalize_area('  Ｓｅｏｕｌ   Forest ') == 'seoul forest'
@@ -108,7 +108,7 @@ async def test_history_ttl_and_per_user_pruning_remove_metadata_together(tmp_pat
 
 @pytest.fixture
 def diversity_dependencies(tmp_path, mocker):
-    from app.agent.course_graph import Candidate, CourseDraft, DraftDay
+    from app.agent.course_state import Candidate, CourseDraft, DraftDay
     from app.agent.tools.verified_maps import Destination, VerifiedPlace
     from app.services.course_history import CourseHistory
 
@@ -138,7 +138,7 @@ def diversity_dependencies(tmp_path, mocker):
         return TransportToNextSchema(type='transit', distance=500, minutes=minutes, cost=1500)
 
     provider.route = AsyncMock(side_effect=route)
-    llm = mocker.patch('app.agent.course_graph.draft_candidates', new_callable=AsyncMock)
+    llm = mocker.patch('app.agent.course_nodes.draft_candidates', new_callable=AsyncMock)
     history = CourseHistory(tmp_path / 'actual-history.sqlite3')
     return request, provider, history, llm, drafts, places, make_draft
 
@@ -187,7 +187,7 @@ async def test_three_identical_seoul_requests_change_real_selected_neighborhoods
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('repair_failure', ['timeout', 'unsafe_places'])
-async def test_novelty_repair_failure_returns_captured_verified_course(diversity_dependencies, repair_failure, offline_place_copy):
+async def test_novelty_repair_failure_returns_captured_verified_course(diversity_dependencies, repair_failure):
     from app.agent.course_graph import build_course_graph
     from app.agent.tools.verified_maps import VerifiedPlace
     from app.services.course_history import history_key
@@ -213,7 +213,6 @@ async def test_novelty_repair_failure_returns_captured_verified_course(diversity
     assert '이전' in course.recommendationReason or '중복' in course.recommendationReason
     assert llm.await_count <= 2
     assert all(stop.transportToNext.minutes <= 90 for stop in course.itinerary.days[0].stops[:-1])
-    offline_place_copy.assert_not_awaited()
     assert all(stop.reason and stop.memo for stop in course.itinerary.days[0].stops)
 
 
@@ -241,7 +240,7 @@ async def test_near_deadline_novelty_retry_does_not_lose_verified_fallback(diver
 
 
 def test_day_shortlist_prefers_new_attractions_over_original_and_meal_variations(diversity_dependencies):
-    from app.agent.course_graph import _day_plans
+    from app.services.course_planning import _day_plans
 
     _, _, _, _, drafts, places, _ = diversity_dependencies
     old = drafts['광화문 북촌'].days[0].candidates
@@ -258,7 +257,8 @@ def test_day_shortlist_prefers_new_attractions_over_original_and_meal_variations
 
 @pytest.mark.asyncio
 async def test_verified_alternate_neighborhood_in_same_pool_needs_no_extra_llm(diversity_dependencies):
-    from app.agent.course_graph import CourseDraft, DraftDay, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import CourseDraft, DraftDay
     from app.services.course_history import history_key
 
     request, provider, history, llm, drafts, places, _ = diversity_dependencies
@@ -301,7 +301,8 @@ async def test_history_core_attractions_exclude_coffee_dessert_and_meal_business
     """Food-only changes cannot dilute the remembered museum/park core."""
     from uuid import UUID
 
-    from app.agent.course_graph import Candidate, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
     from app.services.course_diversity import overlap_scores
     from app.services.course_history import history_key
@@ -345,9 +346,10 @@ async def test_legacy_id_only_history_retries_restaurant_only_changes(diversity_
 
 def test_pool_ranking_prefers_all_novelty_targets_over_zero_core_overlap_alone():
     """A feasible 0/.5 core/place score must not outrank feasible 1/3/.2."""
-    from app.agent.course_graph import Candidate, _diversity_rank, _schedule_day
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
     from app.services.course_diversity import overlap_scores, planning_overlap
+    from app.services.course_planning import _diversity_rank, _schedule_day
 
     old_ids = {'shared-core', 'old-core-2', 'old-core-3', 'old-lunch', 'old-dinner'}
     old_core = {'shared-core', 'old-core-2', 'old-core-3'}

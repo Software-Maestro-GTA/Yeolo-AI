@@ -14,6 +14,10 @@ class Settings:
     # 사용할 Gemini 모델명
     GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash")
 
+    # Server-only Calling credentials; Gemini routing is configured in ABTO.
+    ABTO_CALLING_KEY: str = os.getenv("ABTO_CALLING_KEY", "")
+    ABTO_GATEWAY_BASE_URL: str = os.getenv("ABTO_GATEWAY_BASE_URL", "https://gateway.abto.app/v1")
+
     # Google Maps API Key (Place New & Routes API)
     GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
 

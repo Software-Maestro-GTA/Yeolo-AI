@@ -180,8 +180,9 @@ def test_concrete_guidance_connects_visit_purpose_and_multiple_useful_actions(co
     ('sushi_restaurant', ('메뉴', '재료', '양')), ('restaurant', ('메뉴', '재료', '양')),
 ])
 def test_schedule_memo_has_type_action_and_preserves_numeric_cost(category, action_words):
-    from app.agent.course_graph import Candidate, _schedule_day
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
+    from app.services.course_planning import _schedule_day
 
     venue = VerifiedPlace(stop_with_type(category).place, periods=None)
     day = _schedule_day([(Candidate(name=venue.place.placeName, stay_minutes=60, cost=17000), venue)], [], date(2026, 10, 5), 1)
@@ -200,8 +201,9 @@ def test_schedule_memo_has_type_action_and_preserves_numeric_cost(category, acti
     [{'open': {'day': 0, 'hour': 20}, 'close': {'day': 1, 'hour': 12}}],
 ])
 def test_known_hours_do_not_repeat_blanket_reservation_or_false_closing_notice(periods):
-    from app.agent.course_graph import Candidate, _schedule_day
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
+    from app.services.course_planning import _schedule_day
 
     venue = VerifiedPlace(stop_with_type('museum').place, periods=periods)
     day = _schedule_day([(Candidate(name=venue.place.placeName, stay_minutes=60), venue)], [], date(2026, 10, 5), 1)
