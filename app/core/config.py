@@ -12,10 +12,7 @@ class Settings:
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     
     # 사용할 Gemini 모델명
-    GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash")
-
-    # Gemini Thinking Level (minimal, low, medium, high)
-    GEMINI_THINKING_LEVEL: str = os.getenv("GEMINI_THINKING_LEVEL", "medium")
+    GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash")
 
     # Google Maps API Key (Place New & Routes API)
     GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
@@ -27,5 +24,6 @@ class Settings:
     COURSE_HISTORY_PATH: str = os.getenv("COURSE_HISTORY_PATH", ".data/course_history.sqlite3")
     COURSE_TIMEOUT_SECONDS: float = float(os.getenv("COURSE_TIMEOUT_SECONDS", "300"))
     COURSE_MAPS_CONCURRENCY: int = int(os.getenv("COURSE_MAPS_CONCURRENCY", "6"))
+    TASTE_ANALYSIS_TIMEOUT_SECONDS: float = float(os.getenv("TASTE_ANALYSIS_TIMEOUT_SECONDS", "60"))
 
 settings = Settings()

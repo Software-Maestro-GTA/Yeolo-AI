@@ -1,95 +1,22 @@
 ---
 name: pytest-mocking
-description: pytest 및 pytest-mock을 활용한 외부 API 및 AI 모델 모킹 규칙
+description: pytest 테스트를 작성·정리할 때 외부 API와 LLM을 격리하고, SDK 파라미터 변경에서는 실제 직렬화 요청을 검증하는 규칙입니다.
 ---
 
-# pytest Mocking Rule
+# 외부 연동 테스트
 
-테스트 코드를 작성하거나 프로덕션 개발을 진행할 때 외부 백엔드 API, 외부 Open API(예: Google Gemini, 지도 API 등), 데이터베이스 연동 등을 테스트하기 위해 준수해야 하는 규칙입니다.
+## 검증 대상에 맞는 경계
 
-## 1. Mocking 원칙
+- 비즈니스 분기 테스트는 호출하는 서비스 또는 모델 경계를 mock합니다. 실제 사용되는 모듈 경로를 patch하고 비동기 호출에는 `AsyncMock`을 사용합니다. `mocker`나 `monkeypatch`로 테스트 종료 시 복구합니다.
+- SDK 파라미터·모델 설정·직렬화 변경은 실제 SDK 객체를 실행하고 `httpx.MockTransport`에서 최종 요청 JSON을 검사합니다. 생성자 인자나 `ainvoke`만 mock하면 SDK가 추가하는 기본 필드를 발견할 수 없습니다. 기존 `tests/test_gemini_parameters.py`를 참고합니다.
+- HTTP 요청 구성·응답 처리를 검증할 때는 `MockTransport` 또는 ASGI transport를 사용합니다. 실제 외부 API를 호출하지 않습니다.
+- `tests/conftest.py`의 live HTTP 차단 fixture를 유지합니다. 새 클라이언트가 httpx가 아니면 그 클라이언트의 전송 경계도 격리합니다. subprocess 테스트는 이 fixture가 자식 프로세스에 적용되지 않으므로 가짜 실행 파일 등으로 별도 격리합니다.
+- import 시 실행되는 작업은 fixture보다 먼저 발생합니다. import 시 네트워크 요청을 만들지 않고 테스트용 가짜 자격 증명을 사용합니다. 실제 `.env` 값에 의존하지 않습니다.
 
-- **외부 네트워크 호출 차단**: 테스트 실행 도중 실제 외부 서버로의 HTTP 요청이 발생하지 않도록 차단하는 것을 원칙으로 합니다.
-- **테스트 격리**: 각 테스트 케이스는 독립적이어야 하며, 목 데이터 상태가 다른 테스트 케이스에 영향을 미치지 않도록 `pytest-mock`의 `mocker` 피스처를 사용합니다.
+## 중복과 허위 성공 방지
 
-## 2. pytest-mock (`mocker`) 활용 규격
-
-- `mocker`는 `unittest.mock.patch`를 pytest 피스처 스타일로 제공하여 테스트 종료 시 자동으로 모킹을 리셋해 줍니다.
-
-### 2.1 LangChain & ChatGoogleGenerativeAI 모킹 예제
-
-AI 에이전트나 추천 엔진 등에서 Google Gemini 모델 API를 연동하여 사용할 때, 실제 토큰 비용 및 네트워크 의존성을 제거하기 위해 모델의 `ainvoke` 또는 `invoke` 호출을 모킹합니다.
-
-```python
-import pytest
-from unittest.mock import AsyncMock, MagicMock
-
-@pytest.mark.asyncio
-async def test_travel_agent_recommendation(mocker):
-    # 1. ChatGoogleGenerativeAI.ainvoke 모킹 (비동기 함수이므로 AsyncMock 사용)
-    mock_response = MagicMock()
-    mock_response.content = "추천 여행지: 제주도 2박 3일 코스"
-    
-    mock_ainvoke = mocker.patch(
-        "langchain_google_genai.ChatGoogleGenerativeAI.ainvoke",
-        new_callable=AsyncMock
-    )
-    mock_ainvoke.return_value = mock_response
-
-    # 2. 비즈니스 로직 실행
-    from app.services.recommendation import get_travel_recommendation
-    result = await get_travel_recommendation(destination="제주도", duration_days=3)
-
-    # 3. 검증
-    assert "제주도" in result
-    mock_ainvoke.assert_called_once()
-```
-
-### 2.2 외부 HTTP API 연동 모킹 예제
-
-`httpx.AsyncClient`를 사용하여 외부 REST API를 호출하는 경우, 해당 클라이언트의 `get` 또는 `post` 메서드를 모킹합니다.
-
-```python
-@pytest.mark.asyncio
-async def test_external_weather_api(mocker):
-    # AsyncClient.get 호출에 대한 모킹
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"weather": "Sunny", "temp": 22}
-    
-    mock_get = mocker.patch(
-        "httpx.AsyncClient.get",
-        new_callable=AsyncMock
-    )
-    mock_get.return_value = mock_response
-
-    # 서비스 로직 호출 및 검증
-    from app.services.weather import get_weather
-    data = await get_weather("Seoul")
-    
-    assert data["temp"] == 22
-    mock_get.assert_called_once_with("https://api.weather.com/v1/Seoul")
-```
-
-## 3. 예외 상황 및 에러 케이스 검증
-
-- 에러 케이스를 검증하기 위해 모킹 함수가 예외를 발생시키거나 HTTP 에러 응답을 반환하도록 설정합니다.
-- pytest의 `pytest.raises`를 활용하여 예외가 정상적으로 전파되거나 처리되는지 테스트합니다.
-
-```python
-import httpx
-
-@pytest.mark.asyncio
-async def test_weather_api_failure(mocker):
-    # API 호출 시 Timeout 예외가 발생하는 시나리오 모킹
-    mocker.patch(
-        "httpx.AsyncClient.get",
-        side_effect=httpx.TimeoutException("Connection timed out")
-    )
-
-    from app.services.weather import get_weather
-    
-    # 예외 처리 검증
-    with pytest.raises(httpx.HTTPError):
-        await get_weather("Seoul")
-```
+- 없는 속성을 만드는 `patch(..., create=True)` 또는 `hasattr` 조건으로 사라진 API를 숨기지 않습니다. 동적 속성이 실제 계약인 경우만 이유를 명시합니다.
+- 대표 입력이 서로 다른 분기를 검증할 때 parameterize합니다. 같은 분기에서 이름만 바꾼 입력의 곱집합을 만들지 않습니다.
+- 제거하려는 테스트가 검증하던 경계값·오류 처리·외부 계약이 다른 테스트에 남는지 확인합니다. 실행 라인 수가 같아도 assertion의 의미가 같다고 단정하지 않습니다.
+- 테스트 수를 맞추거나 구현을 그대로 복제하는 테스트를 추가하지 않습니다. 새로운 회귀 가능성을 드러내는 테스트를 선택합니다.
+- 실패 응답·예외는 실제 호출 경로에 주입하고 외부에서 관찰 가능한 결과를 검증합니다. mock 호출 검사는 호출 여부나 인자가 계약일 때만 사용합니다.

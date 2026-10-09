@@ -31,7 +31,7 @@ def test_estimate_has_null_route_distance_and_conservative_formula():
     assert '보행 경로' in result.memo and any(word in result.memo for word in ['미제공', '포함되지', '제공하지'])
     assert not any(formula in result.memo for formula in ['우회 계수', '3km/h', '여유 5분'])
     assert is_estimated_walking(result)
-    assert not valid_route(result, first, second)
+    assert not valid_route(result)
     assert set(result.model_dump()) == set(TransportToNextSchema.model_fields)
 
 
@@ -49,7 +49,7 @@ def test_estimate_marker_cannot_bypass_formula_or_provenance(alteration):
 
     first, second = venue('a', 37.55, 126.98), venue('b', 37.554, 126.98)
     route = estimated_walking(first, second).model_copy(update=alteration)
-    assert not valid_route(route, first, second)
+    assert not valid_route(route)
 
 
 @pytest.mark.parametrize('minutes', [91, 0, None])
@@ -57,4 +57,4 @@ def test_known_route_metrics_still_enforce_duration_cap(minutes):
     from app.services.course_routing import valid_route
 
     route = TransportToNextSchema(type='transit', distance=5000, minutes=minutes)
-    assert not valid_route(route, venue('a', 37.55, 126.98), venue('b', 37.58, 126.98))
+    assert not valid_route(route)

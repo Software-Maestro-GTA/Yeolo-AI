@@ -1,8 +1,6 @@
 """Reproduce Tokyo's actual administrative name while preserving strict identity."""
 
-import copy
 import json
-from itertools import product
 
 import httpx
 import pytest
@@ -55,8 +53,9 @@ async def test_actual_tokyo_metropolis_response_verifies_requested_tokyo(tokyo_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(('requested', 'official'), list(product(TOKYO_NAME_FORMS, repeat=2)))
+@pytest.mark.parametrize(('requested', 'official'), list(zip(TOKYO_NAME_FORMS, TOKYO_NAME_FORMS[1:] + TOKYO_NAME_FORMS[:1])))
 async def test_tokyo_provider_name_forms_preserve_existing_success_cases(tokyo_payload, requested, official):
+    """Cover each request and official name once; resolution is name-independent."""
     from app.agent.tools.verified_maps import VerifiedMapsProvider
 
     tokyo_payload['displayName']['text'] = official
@@ -107,43 +106,6 @@ async def test_tokyo_common_entities_still_reject_shops_and_wrong_country(tokyo_
             result = await provider.resolve_destination(country, requested)
             assert result.country_code == country_code
             assert result.place_id == tokyo_payload['id']
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(('same_id', 'same_bounds'), [(True, True), (False, True), (True, False), (False, False)])
-async def test_tokyo_multiple_matching_records_remain_ambiguous(tokyo_payload, same_id, same_bounds):
-    from app.agent.tools.verified_maps import VerifiedMapsProvider
-
-    other = copy.deepcopy(tokyo_payload)
-    other['displayName']['text'] = 'Tokyo Metropolis'
-    other['addressComponents'][0]['longText'] = 'Tokyo Metropolis'
-    if not same_id:
-        other['id'] = 'distinct-tokyo-region'
-    if not same_bounds:
-        other['viewport']['low']['latitude'] = 35.0
-    async with httpx.AsyncClient(transport=destination_transport([tokyo_payload, other])) as client:
-        with pytest.raises(ValueError):
-            await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination('일본', '도쿄')
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('invalid', ['missing', 'latitude_order', 'latitude_range', 'longitude_range', 'missing_coordinate'])
-async def test_tokyo_entity_does_not_bypass_viewport_validation(tokyo_payload, invalid):
-    from app.agent.tools.verified_maps import VerifiedMapsProvider
-
-    if invalid == 'missing':
-        tokyo_payload.pop('viewport')
-    elif invalid == 'latitude_order':
-        tokyo_payload['viewport']['low']['latitude'] = 40.0
-    elif invalid == 'latitude_range':
-        tokyo_payload['viewport']['high']['latitude'] = 100.0
-    elif invalid == 'longitude_range':
-        tokyo_payload['viewport']['high']['longitude'] = 190.0
-    else:
-        tokyo_payload['viewport']['low'].pop('latitude')
-    async with httpx.AsyncClient(transport=destination_transport([tokyo_payload])) as client:
-        with pytest.raises(ValueError):
-            await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination('일본', '도쿄')
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,53 @@
+name: Validate
+
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-checks:
+    name: Workflow and shell checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check workflows and shell scripts
+        run: >-
+          docker run --rm --network none
+          --volume "$PWD:/repo:ro" --workdir /repo
+          --entrypoint /bin/sh rhysd/actionlint:1.7.11
+          scripts/check_static.sh
+
+  validate:
+    name: Harness, lint and tests
+    needs: static-checks
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.24"
+          enable-cache: true
+
+      - name: Install pinned Python
+        run: uv python install
+
+      - name: Install locked dependencies
+        run: uv sync --locked --group dev
+
+      - name: Run repository validation
+        run: bash .agents/hooks/test.sh

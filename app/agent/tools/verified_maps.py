@@ -691,9 +691,9 @@ class VerifiedMapsProvider:
         # Guidance is optional: only validated numeric route facts determine
         # feasibility. Cancellation remains observable (it is BaseException).
         try:
-            memo = format_route_guidance(data, mode, destination.place.placeName, departure_time)
+            memo = format_route_guidance(data, mode)
             if not isinstance(memo, str) or not memo.strip() or len(memo) > MAX_MEMO_LENGTH:
                 raise ValueError('Unusable optional route guidance')
         except Exception:  # noqa: BLE001 - optional presentation must not invalidate verified metrics
-            memo = fallback_route_guidance(mode, destination.place.placeName, departure_time)
+            memo = fallback_route_guidance(mode)
         return TransportToNextSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=memo)

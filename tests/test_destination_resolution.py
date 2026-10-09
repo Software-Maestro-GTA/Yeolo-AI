@@ -144,6 +144,24 @@ async def test_destination_latitude_must_be_finite_real_numeric_coordinate(value
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('invalid', ['missing_viewport', 'latitude_order', 'longitude_range', 'missing_coordinate'])
+async def test_destination_requires_complete_and_ordered_viewport(invalid):
+    """Apply the same bounds contract to every city, including Tokyo."""
+    city = city_record()
+    if invalid == 'missing_viewport':
+        city.pop('viewport')
+    elif invalid == 'latitude_order':
+        city['viewport']['low']['latitude'] = 40.0
+    elif invalid == 'longitude_range':
+        city['viewport']['high']['longitude'] = 190.0
+    else:
+        city['viewport']['low'].pop('latitude')
+    async with httpx.AsyncClient(transport=responder([country_record()], [city])) as client:
+        with pytest.raises(ValueError):
+            await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination('Japan', 'Tokyo')
+
+
+@pytest.mark.asyncio
 async def test_valid_candidate_is_selected_only_after_full_geographic_validation():
     good, invalid = city_record(name='Untranslated official city'), city_record(identifier='invalid-region', name='Tokyo')
     invalid.pop('viewport')

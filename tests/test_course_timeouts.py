@@ -29,7 +29,7 @@ def day_draft(index=0):
     return CourseDraft(title='후보', reason='문화 여행', days=[DraftDay(candidates=[Candidate(name=f'{index}-미술관'), Candidate(name=f'{index}-공원')])])
 
 
-async def respond_with_draft(prompt):
+async def respond_with_draft(prompt, **_kwargs):
     return day_draft()
 
 
@@ -78,7 +78,7 @@ async def test_insufficient_daily_budget_starts_no_model_request(mocker, request
 async def test_local_timeout_cancels_inflight_call_without_short_sdk_deadline(mocker, request_data):
     closed = asyncio.Event()
 
-    async def blocked(prompt):
+    async def blocked(prompt, **_kwargs):
         try:
             await asyncio.Event().wait()
         finally:
@@ -159,7 +159,7 @@ async def test_queued_day_does_not_start_after_semaphore_wait_consumes_budget(mo
     entered = 0
     ready = asyncio.Event()
 
-    async def respond(prompt):
+    async def respond(prompt, **_kwargs):
         nonlocal entered
         entered += 1
         if entered == 5:

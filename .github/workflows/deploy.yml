@@ -20,7 +20,13 @@ env:
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+    permissions:
+      contents: read
+
   build-and-push:
+    needs: validate
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
     # EKS 노드가 Graviton(arm64, t4g)이므로 arm64 네이티브 러너에서 빌드한다.
     # amd64 러너로 빌드하면 노드에서 'exec format error' 로 CrashLoopBackOff.
@@ -89,6 +95,7 @@ jobs:
       # ── ConfigMap (ai-env) ──────────────────────────────────────────
       LOG_LEVEL: ${{ vars.LOG_LEVEL }}
       GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME }}
+      TASTE_ANALYSIS_TIMEOUT_SECONDS: ${{ vars.TASTE_ANALYSIS_TIMEOUT_SECONDS }}
       LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS }}
       PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS }}
       COURSE_HISTORY_PATH: ${{ vars.COURSE_HISTORY_PATH }}
@@ -120,7 +127,7 @@ jobs:
         run: |
           umask 077
           : > ai.env
-          for k in LOG_LEVEL GEMINI_MODEL_NAME LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
+          for k in LOG_LEVEL GEMINI_MODEL_NAME TASTE_ANALYSIS_TIMEOUT_SECONDS LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai.env
           done
           kubectl -n "$K8S_NAMESPACE" create configmap ai-env \
@@ -183,6 +190,7 @@ jobs:
       # ── ConfigMap (ai-env) ──────────────────────────────────────────
       LOG_LEVEL: ${{ vars.LOG_LEVEL }}
       GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME }}
+      TASTE_ANALYSIS_TIMEOUT_SECONDS: ${{ vars.TASTE_ANALYSIS_TIMEOUT_SECONDS }}
       LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS }}
       PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS }}
       COURSE_HISTORY_PATH: ${{ vars.COURSE_HISTORY_PATH }}
@@ -214,7 +222,7 @@ jobs:
         run: |
           umask 077
           : > ai.env
-          for k in LOG_LEVEL GEMINI_MODEL_NAME LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
+          for k in LOG_LEVEL GEMINI_MODEL_NAME TASTE_ANALYSIS_TIMEOUT_SECONDS LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai.env
           done
           kubectl -n "$K8S_NAMESPACE" create configmap ai-env \

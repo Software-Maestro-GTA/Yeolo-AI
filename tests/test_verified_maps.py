@@ -137,46 +137,6 @@ async def test_provider_bounds_concurrent_searches_and_deduplicates(place_payloa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mutation', ['valid', 'wrong_country', 'official_name_differs', 'missing_viewport', 'ambiguous_city'])
-async def test_destination_requires_unambiguous_city_and_country(mutation):
-    import json
-
-    from app.agent.tools.verified_maps import VerifiedMapsProvider
-
-    country_component = {'longText': '대한민국', 'shortText': 'KR', 'types': ['country']}
-    city = {
-        'id': 'seoul-city', 'displayName': {'text': '서울'}, 'types': ['locality'],
-        'addressComponents': [copy.deepcopy(country_component), {'longText': '서울', 'types': ['locality']}],
-        'viewport': {'low': {'latitude': 37.3, 'longitude': 126.7}, 'high': {'latitude': 37.8, 'longitude': 127.3}},
-    }
-    if mutation == 'wrong_country':
-        city['addressComponents'][0]['shortText'] = 'JP'
-    elif mutation == 'official_name_differs':
-        city['displayName']['text'] = '首爾'
-        city['addressComponents'][1]['longText'] = '首爾'
-    elif mutation == 'missing_viewport':
-        city.pop('viewport')
-
-    def respond(request):
-        query = json.loads(request.content)['textQuery']
-        assert request.url.host == 'places.googleapis.com'
-        if query == '대한민국':
-            return httpx.Response(200, json={'places': [{'id': 'verified-country', 'types': ['country'], 'addressComponents': [country_component]}]})
-        return httpx.Response(200, json={'places': [city, copy.deepcopy(city)] if mutation == 'ambiguous_city' else [city]})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        provider = VerifiedMapsProvider(client=client, api_key='offline')
-        if mutation in {'valid', 'official_name_differs'}:
-            destination = await provider.resolve_destination('대한민국', '서울')
-            assert destination.country_code == 'KR'
-            assert destination.contains(37.55, 126.98)
-            assert not destination.contains(48.8, 2.3)
-        else:
-            with pytest.raises(ValueError):
-                await provider.resolve_destination('대한민국', '서울')
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize('case', ['related_shop', 'ambiguous_ids', 'parenthetical_alias', 'english_fallback', 'nonfood_meal'])
 async def test_named_place_identity_and_official_aliases(place_payload, case):
     import json
