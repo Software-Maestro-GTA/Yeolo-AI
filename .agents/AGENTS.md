@@ -1,81 +1,59 @@
-# Harness Multi-Agent System (에이전트 협업 지침서)
+# Yeolo-AI 하네스 운영
 
-본 프로젝트는 4종의 고유 라이브 에이전트(Planner, Tester, Coder, Reviewer)와 1종의 사후 개선 에이전트(Updater)가 상호 유기적으로 결합하여 TDD 기반의 코드 작성 및 검증을 수행하는 하네스(Harness) 시스템입니다.
+[공통 규칙](system.md)은 사용자 요청과 호스트의 시스템·개발자 지침 아래에서 적용합니다.
+`config.json`은 프로젝트 메타데이터이며 그 자체로 샌드박스 권한이나 실행을 보장하지 않습니다.
 
-본 지침서는 하네스 시스템을 새 프로젝트인 `Yeolo-AI`에 이식하고 에이전트들을 안전하게 구동시키기 위한 협업 흐름과 전체 프로젝트 디렉토리 구조를 규정합니다.
+## 작업 흐름
 
----
+1. 사용자 요청, `git status`, 관련 코드와 기존 테스트를 확인합니다.
+2. 변경 목적과 검증 범위를 정합니다. 비즈니스 동작 변경이면 관련 `.agents/Yeolo-SPEC/` 명세를 읽고, 하네스·문서 정리에는 관련 없는 명세 탐색을 생략합니다.
+3. 기존 테스트를 먼저 활용합니다. 새로운 동작·버그에 필요한 회귀 테스트만 추가하고, 구현을 그대로 반복하는 테스트나 동일 분기의 중복 사례는 늘리지 않습니다.
+4. 변경된 영역부터 검증하고 마지막에 필요한 전체 검증을 수행합니다. 실행한 명령과 실제 결과, 남은 제약을 보고합니다.
+5. 커밋과 푸시는 사용자가 각각 요청한 경우에만 수행합니다.
 
-## 프로젝트 환경 설정 (Project Customization)
+한 에이전트가 이 흐름을 수행할 수 있습니다. 여러 에이전트 사용이 허용되고 독립된 작업으로 나눌 이점이 있을 때만 역할을 위임합니다. 역할별 담당 파일과 인수 조건을 정하고, 실제 위임하지 않은 역할을 실행한 것처럼 기록하지 않습니다.
 
-하네스를 구동하기 전에, 대상 프로젝트의 환경에 맞춰 아래 가변 설정 인자들을 에이전트 시스템에 올바르게 매핑해야 합니다:
+## 역할 지침
 
-- **대상 프로젝트 기술 스택**: `Python 3.14+ / uv / FastAPI / LangChain / pytest / ruff`
-- **소스코드 경로**: `app/` (FastAPI 기반 백엔드 및 AI 에이전트 서비스)
-- **테스트코드 경로**: `tests/` (pytest 테스트 코드)
-- **개발 명세 보관소**: `.agents/Yeolo-SPEC/` (요구사항, 기능, 도메인, API 기획 보관소)
-- **검증 명령어 세트**:
-  - 스타일 검사: `uv run ruff check .`
-  - 타입 검사: `uv run ruff check .` (정적 코드 분석 겸용)
-  - 단위 테스트: `uv run pytest`
+| 역할 | 적용 시점 | 주 담당 |
+| --- | --- | --- |
+| [Planner](agents/planner.md) | 여러 단계의 기능 기획 | 관련 명세 분석, 구현·검증 계획 |
+| [Tester](agents/tester.md) | 독립적인 테스트 설계가 필요할 때 | 테스트 및 fixture |
+| [Coder](agents/coder.md) | 구현을 별도 위임할 때 | 지정한 구현 파일 |
+| [Reviewer](agents/reviewer.md) | 검토를 별도 위임할 때 | 읽기 전용 리뷰와 검증 |
+| [Updater](agents/updater.md) | 개발 하네스 개선 요청 | 지침·훅·설정·관련 테스트 |
 
----
+역할은 협업을 위한 기본 담당 범위입니다. 사용자 승인 범위의 테스트 수정이나 하네스 개선을 막는 별도 권한 체계가 아닙니다. 동시 작업자는 같은 파일을 수정하기 전에 담당자와 조율합니다.
 
-## 프로젝트 전체 디렉토리 구조 (Overall Project Directory Structure)
+## 실행 명령
 
-하네스 시스템이 대상 프로젝트에 삽입될 때 구축되는 전체 프로젝트 레이아웃입니다. 하네스의 코어 소스들은 대상 프로젝트 루트 하위의 `.agents/` 디렉토리에 통합 보관되어 구동됩니다:
+저장소 루트에서 실행합니다. 다른 위치에서는 스크립트의 절대 경로를 사용합니다. Bash 스크립트이므로 `sh`로 실행하지 않습니다.
 
-```
-Yeolo-AI (대상 프로젝트 루트)
-├── app/                      (프로덕션 로직 컴포넌트 및 서비스 코드)
-├── tests/                    (인수/단위 테스트 코드)
-├── .agents/Yeolo-SPEC/       (Given-When-Then 요구사항 및 기능 명세서 보관소)
-├── .agents/                  (하네스 시스템 코어 패키지)
-│   ├── agents/               (에이전트별 시스템 프롬프트: planner.md, tester.md 등)
-│   ├── hooks/                (초기화 및 빌드 검증 셸 스크립트: init.sh, test.sh)
-│   ├── skills/               (진척도 및 리뷰 포맷 확장 스킬 가이드 SKILL.md들)
-│   ├── templates/            (progress.md의 원본 양식 progress_template.md)
-│   └── system.md             (모든 에이전트의 권한 한계를 제약하는 글로벌 룰셋)
-└── progress.md               (전체 에이전트의 기동 상황 및 할 일을 기록하는 진척 보드)
+```bash
+uv sync --locked
+bash .agents/hooks/init.sh
+bash .agents/hooks/preflight.sh
+bash .agents/hooks/test.sh
+bash .agents/hooks/test.sh -- tests/test_gemini_parameters.py
 ```
 
----
+- `init.sh`: 작업 보드가 필요할 때만 사용합니다. 루트 `progress.md`와 `log.md` 중 없는 파일만 생성하며 기존 기록을 지우지 않습니다.
+- `preflight.sh`: uv·가상환경 도구와 Python 요구 버전, 잠금 파일 및 개발 의존성 일치 여부를 읽기 전용으로 확인합니다. 기본 환경은 `.venv`이며 `UV_PROJECT_ENVIRONMENT`를 지원합니다.
+- `test.sh`: 저장소 루트로 이동하여 훅의 Bash 문법, 환경 사전 점검, `scripts/check_harness.py`, Ruff, pytest를 순서대로 검사합니다. 실패하면 중단하고 해당 종료 코드를 반환합니다.
+- 검증은 `uv --no-cache run --no-sync --offline`으로 실행합니다. 의존성 설치와 잠금 파일 변경은 별도 작업입니다.
+- 인자가 없으면 `tests/` 전체를 실행합니다. `--` 뒤에 pytest 인자를 전달하면 `TARGETED`로 표시합니다. 환경변수 `PYTEST_ADDOPTS`는 제거합니다.
+- 명령과 종료 코드는 루트 `log.md`에 누적하고 상세 출력은 터미널에 남깁니다. 테스트 실행 중 tracing을 비활성화합니다.
+- 정적 타입 검사기는 아직 구성되지 않았습니다. Ruff는 타입 검사를 대신하지 않으며 훅의 성공은 배포·병합 승인이나 실제 외부 API 검증을 뜻하지 않습니다.
 
-## 에이전트 협업 파이프라인 (Collaboration Pipeline)
+작업 기록은 필요할 때 [progress-manager](skills/progress-manager/SKILL.md)를 따릅니다. 기존 `.agents/progress.md`, `.agents/log.md`는 과거 기록이며 새 실행은 루트 파일만 사용합니다.
 
-에이전트는 사용자로부터 기능 구현 태스크가 할당되면 아래 단방향 협업 흐름에 따라 작업을 수행하며, Reviewer의 승인 완료 시 즉시 프로세스가 종료됩니다.
+## CI와 하네스 자체 검사
 
-```mermaid
-graph TD
-    User([사용자 백로그 할당]) --> Planner[1. Planner]
-    Planner -->|기획 및 체크리스트 완료| Tester[2. Tester]
-    Tester -->|인수 테스트 코드 작성 완료| Coder[3. Coder]
-    Coder -->|코드 구현 완료| Reviewer[4. Reviewer]
-    Reviewer -->|테스트 오류 발견 시 환류| Tester
-    Reviewer -->|로직/타입/린트 오류 발견 시 환류| Coder
-    Reviewer -->|최종 통과 시 progress.md 완료 마킹| Close([종료])
-```
+- `.github/workflows/validate.yml`은 모든 PR과 수동 실행에서 전체 검증을 수행하며 배포 워크플로에서도 재사용합니다. 빌드·이미지 푸시는 검증 성공에 의존합니다.
+- CI는 `.python-version`과 `uv.lock`으로 환경을 준비하고 실제 외부 API 자격 증명 없이 검증합니다. 명세 서브모듈 체크아웃은 필요하지 않습니다.
+- `scripts/check_harness.py`는 스킬의 YAML 필수 필드, 운영 문서의 인라인 파일 링크, 설정에 있는 훅 경로를 검사합니다. 코드 예제·인라인 코드·과거 기록·명세 서브모듈·외부 URL·앵커는 링크 검사에서 제외합니다. Markdown 전체 문법 검사나 외부 사이트 접속은 수행하지 않습니다.
+- 검증 후 관련 파일을 수정했다면 영향을 받는 검증을 다시 실행합니다. PR 검증을 병합 필수 조건으로 지정하려면 GitHub 브랜치 보호 설정에 해당 검사를 등록해야 합니다.
 
----
-
-## 에이전트 역할 및 시스템 프롬프트 명세
-
-### 1. [Planner](./agents/planner.md) (기획 및 분석 에이전트)
-- **목적**: 요구사항을 기반으로 기존 명세서들을 분석하고 백로그 구현 체크리스트를 수립합니다.
-- **주요 산출물**: `progress.md` 내 백로그 기본 정보 및 세부 구현 체크리스트 기입.
-
-### 2. [Tester](./agents/tester.md) (테스트 설계 및 작성 에이전트)
-- **목적**: `{{SPECIFICATION_DIR}}` 내의 Given-When-Then 인수 조건과 기술 설계서 사양에 부합하는 테스트 코드를 작성합니다.
-- **주요 산출물**: `{{TEST_CODE_DIR}}` 내 단위/통합 테스트 코드.
-
-### 3. [Coder](./agents/coder.md) (프로덕션 로직 및 컴포넌트 구현 에이전트)
-- **목적**: Tester가 작성한 테스트를 통과하고 Planner의 세부 체크리스트를 만족하는 프로덕션 비즈니스 코드와 UI 컴포넌트를 구현합니다. (테스트 파일 무단 변경 금지)
-- **주요 산출물**: `{{PRODUCTION_CODE_DIR}}` 내 프로덕션 코드 구현.
-
-### 4. [Reviewer](./agents/reviewer.md) (통합 무결성 검증 및 승인 에이전트)
-- **목적**: Coder의 코드가 빌드, 린트, 전체 테스트 스크립트를 완벽하게 만족하는지 검증(`sh hooks/test.sh` 실행)하고 실패 시 문제점을 분석하여 원인을 제공한 에이전트(Tester 또는 Coder)로 피드백 리포트를 발행하며, 최종 승인 시 `progress.md`를 완료 마킹하고 파이프라인을 종료합니다. (최종 Git 커밋은 인간 개발자가 검수 후 직접 진행합니다)
-- **주요 산출물**: 피드백 리뷰 리포트 및 파이프라인 승인 종료.
-
-### 5. [Updater](./agents/updater.md) (에이전트/규칙 개선 에이전트 - 사후 독립 구동)
-- **목적**: 사용자의 질의 응답 완료 후 기동하여 하네스 개선이 필요하다고 판단 시, 사용자에게 변경 전후 diff를 제시하여 명시적 승인을 얻은 후 `agents/`, `hooks/`, `skills/` 등의 코어 인프라를 안전하게 개선합니다.
-- **주요 산출물**: 변경 대비 diff 리포트 및 사용자 최종 승인 하에 패치된 프롬프트, 셸 스크립트, 스킬 규칙셋.
+- 설정의 테스트·린트 명령은 전체 검증 훅과 동일한 읽기 전용 명령만 허용합니다. 임의 실행 대상이나 선택·수집 전용·자동 수정 옵션은 거부합니다.
+- 워크플로·셸 파일 변경 시 actionlint와 ShellCheck를 설치하고 `sh scripts/check_static.sh`를 실행합니다. CI에서는 버전을 고정한 검사 컨테이너로 같은 검사를 먼저 수행하며 실패 시 Python 검증 및 배포를 중단합니다.
+- PR 브랜치명 같은 외부 입력은 GitHub 표현식을 `run` 본문에 직접 삽입하지 않고 `env`로 전달하여 따옴표로 감싼 셸 변수로 읽습니다.

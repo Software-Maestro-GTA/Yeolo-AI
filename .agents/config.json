@@ -33,8 +33,10 @@
       "path": "./",
       "package_manager": "uv",
       "test_runner": "pytest",
-      "test_command": "uv run pytest",
-      "lint_command": "uv run ruff check"
+      "test_command": "uv --no-cache run --no-sync --offline pytest -q tests",
+      "lint_command": "uv --no-cache run --no-sync --offline ruff check .",
+      "verify_command": "bash .agents/hooks/test.sh",
+      "init_command": "bash .agents/hooks/init.sh"
     }
   },
   "harness": {
