@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import settings
@@ -15,7 +15,6 @@ router = APIRouter(prefix="/internal/ai", tags=["Course Generation"])
 @router.post("/courses")
 async def generate_course_api(
     request: CourseRequestSchema,
-    raw_request: Request,
     x_internal_api_key: str = Header(None, alias="X-Internal-Api-Key"),
 ):
     """
@@ -54,4 +53,3 @@ async def generate_course_api(
             status_code=500,
             content={"status": 500, "message": "AI 코스 생성 중 오류가 발생했습니다.", "data": None},
         )
-

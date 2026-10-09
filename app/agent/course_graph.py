@@ -840,7 +840,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             except MapsProviderError as error:
                 pass_failures[key] = error
                 raise
-            if valid_route(route, left, right):
+            if valid_route(route):
                 cache[key] = route
             return route
 
@@ -889,7 +889,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                     if state['destination'].country_code == 'KR':
                         departure = datetime.combine(day_date, time(), tzinfo=ZoneInfo('Asia/Seoul')) + timedelta(minutes=arrival + candidate.stay_minutes)
                     route = await lookup(venue, right[1], departure)
-                    if not valid_route(route, venue, right[1]):
+                    if not valid_route(route):
                         raise CourseGenerationError(f'{candidate.name} → {right[0].name}: 경로 정보가 불완전하거나 이동 시간이 90분을 초과합니다.')
                     routes.append(route)
                     current = arrival + candidate.stay_minutes + route.minutes + 10
@@ -983,7 +983,7 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
         if len(state['selected']) != expected or len(state['routes']) != expected or not all(ids) or len(ids) != len(set(ids)):
             raise CourseGenerationError('전체 날짜의 장소 중복 또는 일정 누락을 확인했습니다.')
         for selected, routes in zip(state['selected'], state['routes']):
-            if len(routes) != len(selected) - 1 or any(not valid_route(route, left[1], right[1]) for (left, right), route in zip(pairwise(selected), routes)):
+            if len(routes) != len(selected) - 1 or any(not valid_route(route) for route in routes):
                 raise CourseGenerationError('실제로 확인되지 않은 이동 경로가 있습니다.')
         start_date = date.fromisoformat(state['request'].tripCondition.startDate)
         days = [_schedule_day(selected, state['routes'][index], start_date + timedelta(days=index), index + 1, compact=bool(state['validated_days'][index].get('compact'))) for index, selected in enumerate(state['selected'])]

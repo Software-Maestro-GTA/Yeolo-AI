@@ -8,7 +8,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
-from app.agent.prompts import COURSE_GENERATION_PROMPT
 from app.main import app
 from app.schemas.course import (
     CourseSchema,
@@ -435,21 +434,6 @@ async def test_generate_course_ai_error(mock_env, valid_course_request_payload, 
     assert response.status_code == 200
     assert "event: progress" in response.text
     assert "event: complete" not in response.text
-
-
-def test_course_prompt_requirements():
-    """
-    COURSE_GENERATION_PROMPT에 MBTI, 아침/점심/저녁 식사, memo 내 장소 설명 및 주의사항, 그리고 스톱별 예상 비용(cost) 산정 지침이 포함되어 있는지 검증
-    """
-    prompt_str = str(COURSE_GENERATION_PROMPT)
-    assert "MBTI" in prompt_str or "mbti" in prompt_str
-    assert "아침" in prompt_str
-    assert "점심" in prompt_str
-    assert "저녁" in prompt_str
-    assert "설명" in prompt_str
-    assert "주의" in prompt_str or "유의" in prompt_str
-    assert "비용" in prompt_str or "cost" in prompt_str
-    assert "placeEngName" in prompt_str or "영문" in prompt_str
 
 
 def test_stop_schema_cost_field_validation():

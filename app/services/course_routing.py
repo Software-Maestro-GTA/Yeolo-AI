@@ -50,7 +50,7 @@ def is_estimated_walking(route: TransportToNextSchema) -> bool:
     return route.type == 'walking' and route.distance is None and (route.memo or '').startswith(ESTIMATE_MARKER)
 
 
-def valid_route(route: object, origin: VerifiedPlace, destination: VerifiedPlace) -> bool:
+def valid_route(route: object) -> bool:
     """Accept positive provider metrics and reject coordinate-based estimates."""
     if not isinstance(route, TransportToNextSchema) or route.type == 'none' or route.minutes is None or not 0 < route.minutes <= 90:
         return False

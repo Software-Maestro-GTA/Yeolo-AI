@@ -2,7 +2,6 @@
 
 import html
 import re
-from datetime import datetime
 from typing import Any
 
 ROUTE_METRIC_FIELDS = frozenset({'routes.duration', 'routes.distanceMeters'})
@@ -35,16 +34,13 @@ def _mapping(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def fallback_route_guidance(mode: str, destination_name: str, departure_time: datetime | None = None) -> str:
+def fallback_route_guidance(mode: str) -> str:
     """Return a generic action without inventing missing navigation details.
 
     Args:
         mode: Existing transport type.
-        destination_name: Verified destination name.
-        departure_time: Actual aware transit query departure, if supplied.
     Returns:
         Short mode-specific action without repeated destination or query metadata.
-        The retained destination/time parameters preserve the provider interface.
     """
     return {
         'walking': '지도 앱의 도보 길찾기를 열고 안내된 보행 경로를 따라가세요.',
@@ -70,20 +66,18 @@ def _memo(actions: list[str]) -> str:
     return ' '.join(actions)
 
 
-def format_route_guidance(data: dict, mode: str, destination_name: str, departure_time: datetime | None = None) -> str:
+def format_route_guidance(data: dict, mode: str) -> str:
     """Summarize supplied navigation, including transit connections and final walk.
 
     Args:
         data: Already validated route response; optional steps may be malformed.
         mode: Existing transport type.
-        destination_name: Verified arrival venue name.
-        departure_time: Actual transit query departure, when supplied.
     Returns:
         One paragraph of at most 240 characters and three complete action units.
         All transit connections must fit; otherwise a generic action is returned.
         No route fact is inferred and no identifier or instruction is sliced.
     """
-    fallback = fallback_route_guidance(mode, destination_name, departure_time)
+    fallback = fallback_route_guidance(mode)
     routes = _mapping(data).get('routes')
     if not isinstance(routes, list) or not routes:
         return fallback

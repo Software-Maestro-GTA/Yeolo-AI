@@ -10,23 +10,12 @@ from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree
 
 from app.agent.taste_profile_chains import taste_profile_chain
-from app.schemas.behavior import BehaviorAnalysisRequest, BehaviorItemSchema
+from app.schemas.behavior import BehaviorAnalysisRequest
 from app.schemas.taste_profile import TasteProfileSchema
 from app.services.behavior_evidence import guard_taste_profile
 from app.services.behavior_statistics import build_behavior_statistics
 
 logger = logging.getLogger(__name__)
-
-
-def summarize_raw_metadata(items: list[BehaviorItemSchema]) -> str:
-    """Return deterministic visit JSON, excluding user and photo identifiers.
-
-    Args:
-        items: Preprocessed photo metadata.
-    Returns:
-        Structured visit statistics JSON for compatibility with callers.
-    """
-    return json.dumps(build_behavior_statistics(items), ensure_ascii=False, sort_keys=True)
 
 
 @traceable(name="taste_profile_analysis", run_type="chain")
