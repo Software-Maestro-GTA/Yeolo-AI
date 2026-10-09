@@ -55,6 +55,7 @@ async def test_sdk_deadline_is_fixed_and_local_budget_is_independent(mocker, req
     """The valid ten-second boundary must not become an invalid SDK deadline."""
     mocker.patch('app.agent.course_graph.asyncio.get_running_loop', return_value=SimpleNamespace(time=lambda: 100.))
     model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
+    model.return_value.client.aio.aclose = AsyncMock()
     model.return_value.with_structured_output.return_value = RunnableLambda(respond_with_draft)
     timeout = mocker.spy(asyncio, 'timeout')
     result = await course_graph._draft_day_candidates(request_data, [], day_index=0, seed='test', deadline=None if remaining is None else 100 + remaining)
@@ -68,6 +69,7 @@ async def test_sdk_deadline_is_fixed_and_local_budget_is_independent(mocker, req
 async def test_insufficient_daily_budget_starts_no_model_request(mocker, request_data, remaining):
     mocker.patch('app.agent.course_graph.asyncio.get_running_loop', return_value=SimpleNamespace(time=lambda: 100.))
     model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
+    model.return_value.client.aio.aclose = AsyncMock()
     model.return_value.with_structured_output.return_value = RunnableLambda(respond_with_draft)
     with pytest.raises(TimeoutError):
         await course_graph._draft_day_candidates(request_data, [], day_index=0, seed='test', deadline=100 + remaining)
@@ -85,6 +87,7 @@ async def test_local_timeout_cancels_inflight_call_without_short_sdk_deadline(mo
             closed.set()
 
     model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
+    model.return_value.client.aio.aclose = AsyncMock()
     model.return_value.with_structured_output.return_value = RunnableLambda(blocked)
     real_timeout = asyncio.timeout
     # Accelerate the local timer, leaving the requested budget observable.
@@ -156,6 +159,7 @@ async def test_queued_day_does_not_start_after_semaphore_wait_consumes_budget(mo
     clock = [100.]
     mocker.patch('app.agent.course_graph.asyncio.get_running_loop', return_value=SimpleNamespace(time=lambda: clock[0]))
     model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
+    model.return_value.client.aio.aclose = AsyncMock()
     entered = 0
     ready = asyncio.Event()
 
@@ -215,3 +219,15 @@ async def test_service_propagates_configured_budget_before_preflight(mocker, req
     source = await generate_course_service(request_data)
     assert [event async for event in source]
     assert captured[0] - before == pytest.approx(300, abs=.1)
+
+
+@pytest.mark.asyncio
+async def test_client_cleanup_error_cannot_discard_valid_daily_candidates(mocker, request_data):
+    model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
+    model.return_value.with_structured_output.return_value = RunnableLambda(respond_with_draft)
+    model.return_value.client.aio.aclose = AsyncMock(side_effect=RuntimeError('private cleanup detail'))
+    model.return_value.client.close.side_effect = RuntimeError('private cleanup detail')
+    result = await course_graph._draft_day_candidates(request_data, [], day_index=0, seed='offline')
+    assert result == day_draft()
+    model.return_value.client.aio.aclose.assert_awaited_once()
+    model.return_value.client.close.assert_called_once()

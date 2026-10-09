@@ -1,4 +1,9 @@
-"""Explicit, bounded LangGraph pipeline for personal, verified travel courses."""
+"""Generate personal travel courses with an explicit, bounded LangGraph.
+
+Start at build_course_graph for node connections, CourseState for shared data,
+and _CourseGraphNodes for node behavior. Helpers construct candidate proposals
+and schedules; only provider-verified places and routes reach the final course.
+"""
 
 import asyncio
 import copy
@@ -20,6 +25,7 @@ from langchain_core.exceptions import OutputParserException
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field, ValidationError
 
 from app.agent.prompts import COURSE_CANDIDATE_PROMPT
@@ -65,8 +71,8 @@ from app.services.day_summary import MAX_DAY_SUMMARY_LENGTH, compose_day_summary
 from app.services.maps_cost import MapsCostMetrics
 
 logger = logging.getLogger(__name__)
-DAILY_DRAFT_TIMEOUT_SECONDS = 60.
-MIN_DAILY_DRAFT_BUDGET_SECONDS = 10.
+DAILY_DRAFT_TIMEOUT_SECONDS = 60.0
+MIN_DAILY_DRAFT_BUDGET_SECONDS = 10.0
 MAX_FULLNESS_REFILLS = 2
 
 
@@ -78,13 +84,13 @@ class Candidate(BaseModel):
     """Internal proposal; contains no invented map facts or arrival times."""
 
     name: str = Field(min_length=1, max_length=160)
-    english_name: str = Field(default='', max_length=160)
-    category: str = 'attraction'
+    english_name: str = Field(default="", max_length=160)
+    category: str = "attraction"
     stay_minutes: int = Field(default=60, ge=15, le=240)
     cost: int = Field(default=0, ge=0)
-    reason: str = ''
-    meal: Literal['none', 'breakfast', 'lunch', 'dinner'] = 'none'
-    planned_area: str = Field(default='', max_length=100)
+    reason: str = ""
+    meal: Literal["none", "breakfast", "lunch", "dinner"] = "none"
+    planned_area: str = Field(default="", max_length=100)
     experiences: list[Experience] = Field(default_factory=list, max_length=5)
 
 
@@ -99,48 +105,146 @@ class CourseDraft(BaseModel):
     days: list[DraftDay]
 
 
+type Visit = tuple[Candidate, VerifiedPlace]
+
+
+class ValidatedDay(TypedDict):
+    """Keep accepted venues, actual routes and their checked schedule together."""
+
+    selected: list[Visit]
+    routes: list[TransportToNextSchema]
+    day: DayItinerarySchema
+
+
 class CourseState(TypedDict, total=False):
+    """Request-local drafts, verified facts, recovery state and final output."""
+
+    # Request conditions and the absolute processing deadline.
     request: CourseRequestSchema
-    attempt: int
     destination: Destination
-    recent: list[set[str]]
+    deadline: float
+
+    # Daily model proposals and feedback for bounded retries.
+    attempt: int
     draft_data: CourseDraft
-    selected: list[list[tuple[Candidate, VerifiedPlace]]]
-    routes: list[list[TransportToNextSchema]]
-    days: list[DayItinerarySchema]
+    partial_drafts: dict[int, DraftDay]
     feedback: str
-    course: CourseSchema
-    day_plans: list[list[list[tuple[Candidate, VerifiedPlace]]]]
-    validated_days: dict[int, dict]
+
+    # Verified facts, retained candidates and possible daily combinations.
     place_cache: dict[tuple, Any]
     route_cache: dict[tuple, Any]
+    candidate_pools: dict[int, dict[tuple[str, str], Visit]]
+    day_plans: list[list[list[Visit]]]
+    validated_days: dict[int, ValidatedDay]
+    selected: list[list[Visit]]
+    routes: list[list[TransportToNextSchema]]
     failures: list[str]
-    candidate_pools: dict[int, dict[tuple[str, str], tuple[Candidate, VerifiedPlace]]]
     rejected_plans: dict[int, set[tuple]]
-    repairing: bool
+
+    # Recent history guides diversity after venue and schedule safety.
+    recent: list[set[str]]
+    recent_profiles: list[dict]
     history_unavailable: bool
     repeated: bool
-    discovered_days: set[int]
-    deadline: float
-    recent_profiles: list[dict]
-    verified_fallback: dict
-    restore_fallback: bool
     diversity_scores: dict
-    partial_drafts: dict[int, DraftDay]
+
+    # Recovery retains successful days and the best complete safe snapshot.
+    repairing: bool
     refill_attempt: int
     refilling: bool
+    discovered_days: set[int]
     attraction_discovered_days: set[int]
+    verified_fallback: dict
+    restore_fallback: bool
+
+    # Final schedules and the public course response.
+    days: list[DayItinerarySchema]
+    course: CourseSchema
+
+
+type CourseNode = Callable[[CourseState], Awaitable[dict]]
+type CourseRouter = Callable[[CourseState], Awaitable[str]]
+
+
+def build_course_graph(
+    provider: VerifiedMapsProvider, history: CourseHistory
+) -> CompiledStateGraph:
+    """Compile the normal generation flow and its existing recovery branches.
+
+    Normal flow:
+        prepare → draft → verify_places → verify_routes → schedule → finalize
+        → enrich_images. Failed or insufficient proposals may draft again,
+        refill missing days, repair verified candidates or restore a snapshot.
+
+    Args:
+        provider: Injectable place, route and photo provider.
+        history: Injectable recent course history storage.
+
+    Returns:
+        Compiled graph with the existing node names and recursion limit.
+
+    Raises:
+        CourseGenerationError: During execution, no feasible verified course
+            remains after the existing bounded recovery attempts.
+    """
+    nodes = _CourseGraphNodes(provider, history)
+    graph = StateGraph(CourseState)
+
+    # Only proposals and verification use the existing fallback time budget.
+    graph.add_node("prepare", nodes.prepare)
+    graph.add_node("draft", nodes.bounded(nodes.draft))
+    graph.add_node("verify_places", nodes.bounded(nodes.verify_places))
+    graph.add_node("verify_routes", nodes.bounded(nodes.verify_routes))
+    graph.add_node("schedule", nodes.schedule)
+    graph.add_node("finalize", nodes.finalize)
+    graph.add_node("enrich_images", nodes.enrich_images)
+    graph.add_node("refill", nodes.bounded(nodes.refill))
+    graph.add_node("repair", nodes.repair)
+    graph.add_node("restore", nodes.restore)
+
+    # Entry and recovery paths have unconditional successors.
+    graph.add_edge(START, "prepare")
+    graph.add_edge("prepare", "draft")
+    graph.add_edge("repair", "verify_routes")
+    graph.add_edge("restore", "schedule")
+    graph.add_edge("enrich_images", END)
+
+    # Every main stage shares the same bounded retry and snapshot decision.
+    for source, successor in (
+        ("draft", "verify_places"),
+        ("refill", "verify_places"),
+        ("verify_places", "verify_routes"),
+        ("verify_routes", "schedule"),
+        ("schedule", "finalize"),
+        ("finalize", "enrich_images"),
+    ):
+        graph.add_conditional_edges(
+            source,
+            nodes.route_after(successor),
+            [successor, "draft", "refill", "repair", "restore"],
+        )
+
+    return graph.compile().with_config({"recursion_limit": 50})
 
 
 class PartialDraftError(TimeoutError):
     """Retain completed day proposals when a subset of model calls failed."""
 
     def __init__(self, days: dict[int, DraftDay], errors: dict[int, Exception]):
-        super().__init__('Some daily candidate calls did not complete')
+        super().__init__("Some daily candidate calls did not complete")
         self.days, self.errors = days, errors
 
 
-async def _draft_day_candidates(request: CourseRequestSchema, recent_ids: list[str], feedback: str = '', *, day_index: int, seed: str, deadline: float | None = None, day_hints: list[str] | None = None) -> CourseDraft:
+async def _draft_day_candidates(
+    request: CourseRequestSchema,
+    recent_ids: list[str],
+    feedback: str = "",
+    *,
+    day_index: int,
+    seed: str,
+    deadline: float | None = None,
+    day_hints: list[str] | None = None,
+) -> CourseDraft:
     """Generate exactly one assigned day, keeping whole-trip planning context.
 
     The SDK receives a valid 60-second deadline; the local timer additionally
@@ -151,62 +255,143 @@ async def _draft_day_candidates(request: CourseRequestSchema, recent_ids: list[s
         TimeoutError: Insufficient budget to start, or local execution timed out.
         ValueError: The provider did not return exactly one day.
     """
-    remaining = DAILY_DRAFT_TIMEOUT_SECONDS if deadline is None else min(DAILY_DRAFT_TIMEOUT_SECONDS, deadline - asyncio.get_running_loop().time())
+    remaining = (
+        DAILY_DRAFT_TIMEOUT_SECONDS
+        if deadline is None
+        else min(
+            DAILY_DRAFT_TIMEOUT_SECONDS, deadline - asyncio.get_running_loop().time()
+        )
+    )
     if remaining < MIN_DAILY_DRAFT_BUDGET_SECONDS:
-        raise TimeoutError('Insufficient budget to start a daily candidate request')
-    assigned = date.fromisoformat(request.tripCondition.startDate) + timedelta(days=day_index)
-    context = f'이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. reason은 25자 이내 한 문장만 작성하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{feedback}'
+        raise TimeoutError("Insufficient budget to start a daily candidate request")
+    assigned = date.fromisoformat(request.tripCondition.startDate) + timedelta(
+        days=day_index
+    )
+    context = f"이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. reason은 25자 이내 한 문장만 작성하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{feedback}"
     # The provider deadline stays valid even when the local request expires sooner.
-    model = ChatGoogleGenerativeAI(model=settings.GEMINI_MODEL_NAME, google_api_key=settings.GEMINI_API_KEY, thinking_level='low', max_retries=0, timeout=DAILY_DRAFT_TIMEOUT_SECONDS, max_output_tokens=5000)
-    # Suppress LangChain's candidate_count=1 default; GenAI omits None on the wire.
-    chain = COURSE_CANDIDATE_PROMPT | model.with_structured_output(CourseDraft).bind(generation_config={'candidate_count': None})
-    async with asyncio.timeout(remaining):
-        result = await chain.ainvoke({
-            'mbti': request.mbti or '미제공',
-            'taste_profile': request.tasteProfile.model_dump_json() if request.tasteProfile else '미제공',
-            'trip_condition': request.tripCondition.model_dump_json(),
-            'recent_ids': ','.join(recent_ids[:120]), 'feedback': context, 'seed': seed,
-        })
-    if len(result.days) != 1:
-        raise OutputParserException('Return only the assigned day in days')
-    return result
+    model = ChatGoogleGenerativeAI(
+        model=settings.GEMINI_MODEL_NAME,
+        google_api_key=settings.GEMINI_API_KEY,
+        thinking_level="low",
+        max_retries=0,
+        timeout=DAILY_DRAFT_TIMEOUT_SECONDS,
+        max_output_tokens=5000,
+    )
+    try:
+        # Suppress LangChain's candidate_count=1 default; GenAI omits None on the wire.
+        chain = COURSE_CANDIDATE_PROMPT | model.with_structured_output(
+            CourseDraft
+        ).bind(generation_config={"candidate_count": None})
+        async with asyncio.timeout(remaining):
+            result = await chain.ainvoke(
+                {
+                    "mbti": request.mbti or "미제공",
+                    "taste_profile": request.tasteProfile.model_dump_json()
+                    if request.tasteProfile
+                    else "미제공",
+                    "trip_condition": request.tripCondition.model_dump_json(),
+                    "recent_ids": ",".join(recent_ids[:120]),
+                    "feedback": context,
+                    "seed": seed,
+                }
+            )
+        if len(result.days) != 1:
+            raise OutputParserException("Return only the assigned day in days")
+        return result
+    finally:
+        try:
+            try:
+                await model.client.aio.aclose()
+            except Exception:  # noqa: BLE001 - client cleanup must not discard valid candidates
+                logger.warning("Course model async client cleanup unavailable")
+        finally:
+            try:
+                model.client.close()
+            except Exception:  # noqa: BLE001 - preserve the original result or failure
+                logger.warning("Course model client cleanup unavailable")
 
 
-async def draft_candidates(request: CourseRequestSchema, recent_ids: list[str], feedback: str = '', *, pending_days: list[int] | None = None, existing_days: dict[int, DraftDay] | None = None, deadline: float | None = None) -> CourseDraft:
+async def draft_candidates(
+    request: CourseRequestSchema,
+    recent_ids: list[str],
+    feedback: str = "",
+    *,
+    pending_days: list[int] | None = None,
+    existing_days: dict[int, DraftDay] | None = None,
+    deadline: float | None = None,
+) -> CourseDraft:
     """Generate days concurrently; retry only failed calls and retain every success.
 
     Day indices are assigned by the caller, never inferred from model output.
     Cancellation always joins started children before returning.
     """
     days = dict(existing_days or {})
-    pending = list(range(request.tripCondition.totalDays)) if pending_days is None else pending_days
+    pending = (
+        list(range(request.tripCondition.totalDays))
+        if pending_days is None
+        else pending_days
+    )
     seed = uuid.uuid4().hex[:12]
-    directions = ('도심 중심 권역', '도심 동쪽 권역', '도심 서쪽 권역', '도심 남쪽 권역', '도심 북쪽 권역')
+    directions = (
+        "도심 중심 권역",
+        "도심 동쪽 권역",
+        "도심 서쪽 권역",
+        "도심 남쪽 권역",
+        "도심 북쪽 권역",
+    )
     shift = int(seed[:4], 16) % len(directions)
     directions = directions[shift:] + directions[:shift]
-    hints = [f'{i + 1}일차: {directions[i % len(directions)]}, 다른 날짜와 구분되는 인접한 개별 장소 묶음 {i + 1}' for i in range(request.tripCondition.totalDays)]
+    hints = [
+        f"{i + 1}일차: {directions[i % len(directions)]}, 다른 날짜와 구분되는 인접한 개별 장소 묶음 {i + 1}"
+        for i in range(request.tripCondition.totalDays)
+    ]
     if days:
-        feedback += '\n유지할 다른 날짜의 장소(중복 금지): ' + '; '.join(f'{index + 1}일차: ' + ', '.join(candidate.name for candidate in day.candidates) for index, day in sorted(days.items()))
+        feedback += "\n유지할 다른 날짜의 장소(중복 금지): " + "; ".join(
+            f"{index + 1}일차: "
+            + ", ".join(candidate.name for candidate in day.candidates)
+            for index, day in sorted(days.items())
+        )
     semaphore = asyncio.Semaphore(5)
     errors: dict[int, Exception] = {}
+
     async def one(index: int) -> None:
         async with semaphore:
             for attempt in range(2):
                 started = asyncio.get_running_loop().time()
                 try:
-                    result = await _draft_day_candidates(request, recent_ids, feedback, day_index=index, seed=seed, deadline=deadline, day_hints=hints)
+                    result = await _draft_day_candidates(
+                        request,
+                        recent_ids,
+                        feedback,
+                        day_index=index,
+                        seed=seed,
+                        deadline=deadline,
+                        day_hints=hints,
+                    )
                     days[index] = result.days[0]
                     errors.pop(index, None)
                     return
                 except Exception as error:
                     provider_error = _draft_api_error(error)
-                    logger.warning('Course daily draft failed: day=%d attempt=%d error=%s code=%s elapsed=%.2f', index + 1, attempt + 1, type(error).__name__, provider_error.code if provider_error is not None else None, asyncio.get_running_loop().time() - started)
+                    logger.warning(
+                        "Course daily draft failed: day=%d attempt=%d error=%s code=%s elapsed=%.2f",
+                        index + 1,
+                        attempt + 1,
+                        type(error).__name__,
+                        provider_error.code if provider_error is not None else None,
+                        asyncio.get_running_loop().time() - started,
+                    )
                     if not _recoverable_draft(error):
                         raise
                     errors[index] = error
-                    if attempt or (deadline is not None and deadline - asyncio.get_running_loop().time() < MIN_DAILY_DRAFT_BUDGET_SECONDS + .2):
+                    if attempt or (
+                        deadline is not None
+                        and deadline - asyncio.get_running_loop().time()
+                        < MIN_DAILY_DRAFT_BUDGET_SECONDS + 0.2
+                    ):
                         return
-                    await asyncio.sleep(.2)
+                    await asyncio.sleep(0.2)
+
     tasks = [asyncio.create_task(one(index)) for index in pending]
     try:
         await asyncio.gather(*tasks)
@@ -217,14 +402,21 @@ async def draft_candidates(request: CourseRequestSchema, recent_ids: list[str], 
         await asyncio.gather(*tasks, return_exceptions=True)
     if errors or len(days) != request.tripCondition.totalDays:
         raise PartialDraftError(days, errors)
-    return CourseDraft(title=f'{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행', reason='', tags=[], days=[days[index] for index in range(request.tripCondition.totalDays)])
+    return CourseDraft(
+        title=f"{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행",
+        reason="",
+        tags=[],
+        days=[days[index] for index in range(request.tripCondition.totalDays)],
+    )
 
 
 def _progress(message: str) -> None:
-    get_stream_writer()({'step': 'GENERATING_ROUTE', 'message': message})
+    get_stream_writer()({"step": "GENERATING_ROUTE", "message": message})
 
 
-async def _parallel(items: list[Any], operation: Callable[[Any], Awaitable[Any]]) -> list[Any]:
+async def _parallel(
+    items: list[Any], operation: Callable[[Any], Awaitable[Any]]
+) -> list[Any]:
     """Bound work and always cancel/join children when a request is cancelled."""
     semaphore = asyncio.Semaphore(max(1, min(settings.COURSE_MAPS_CONCURRENCY, 8)))
 
@@ -242,7 +434,9 @@ async def _parallel(items: list[Any], operation: Callable[[Any], Awaitable[Any]]
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def _opening_start(periods: list[dict] | None, day: date, earliest: int, duration: int, latest: int) -> int | None:
+def _opening_start(
+    periods: list[dict] | None, day: date, earliest: int, duration: int, latest: int
+) -> int | None:
     """Fit a visit to regular weekly hours, supporting overnight and 24h periods.
 
     Unknown hours are allowed but disclosed. Malformed supplied periods fail closed.
@@ -253,27 +447,36 @@ def _opening_start(periods: list[dict] | None, day: date, earliest: int, duratio
     intervals: list[tuple[int, int]] = []
     for period in periods:
         try:
-            opening = period['open']
-            opening_day = int(opening['day'])
-            hour, minute = int(opening.get('hour', 0)), int(opening.get('minute', 0))
+            opening = period["open"]
+            opening_day = int(opening["day"])
+            hour, minute = int(opening.get("hour", 0)), int(opening.get("minute", 0))
             if not 0 <= opening_day <= 6 or not 0 <= hour < 24 or not 0 <= minute < 60:
                 return None
-            if 'close' not in period:
+            if "close" not in period:
                 if opening_day == 0 and hour == minute == 0:
                     return earliest if earliest + duration <= latest else None
                 return None
-            closing = period['close']
-            closing_day = int(closing['day'])
-            close_hour, close_minute = int(closing.get('hour', 0)), int(closing.get('minute', 0))
-            if not 0 <= closing_day <= 6 or not 0 <= close_hour < 24 or not 0 <= close_minute < 60:
+            closing = period["close"]
+            closing_day = int(closing["day"])
+            close_hour, close_minute = (
+                int(closing.get("hour", 0)),
+                int(closing.get("minute", 0)),
+            )
+            if (
+                not 0 <= closing_day <= 6
+                or not 0 <= close_hour < 24
+                or not 0 <= close_minute < 60
+            ):
                 return None
             start = opening_day * 1440 + hour * 60 + minute
             end = closing_day * 1440 + close_hour * 60 + close_minute
             if end <= start:
                 end += 7 * 1440
             for offset in (-7 * 1440, 0, 7 * 1440):
-                intervals.append((start + offset - weekday * 1440, end + offset - weekday * 1440))
-        except (KeyError, TypeError, ValueError):
+                intervals.append(
+                    (start + offset - weekday * 1440, end + offset - weekday * 1440)
+                )
+        except KeyError, TypeError, ValueError:
             return None
     for start, end in sorted(intervals):
         arrival = max(earliest, start)
@@ -282,80 +485,171 @@ def _opening_start(periods: list[dict] | None, day: date, earliest: int, duratio
     return None
 
 
-def _distance(left: VerifiedPlace, right: VerifiedPlace) -> float:
-    return distance_meters(left, right)
-
-
 # A small local search explores verified alternatives before asking the LLM again.
 MAX_DAY_PLANS = 4
-MEAL_WINDOWS = {'none': (540, 1260), 'breakfast': (540, 660), 'lunch': (690, 840), 'dinner': (1050, 1200)}
-type Visit = tuple[Candidate, VerifiedPlace]
+MEAL_WINDOWS = {
+    "none": (540, 1260),
+    "breakfast": (540, 660),
+    "lunch": (690, 840),
+    "dinner": (1050, 1200),
+}
 
 
-def _schedule_day(selected: list[Visit], routes: list[TransportToNextSchema], day_date: date, day_number: int, *, compact: bool = False) -> DayItinerarySchema:
+def _schedule_day(
+    selected: list[Visit],
+    routes: list[TransportToNextSchema],
+    day_date: date,
+    day_number: int,
+    *,
+    compact: bool = False,
+) -> DayItinerarySchema:
     """Build one day using actual routes; reject any full-visit window violation."""
     if len(routes) != len(selected) - 1:
-        raise CourseGenerationError(f'{day_number}일차: 이동 경로가 누락되었습니다.')
+        raise CourseGenerationError(f"{day_number}일차: 이동 경로가 누락되었습니다.")
     current, stops = 540, []
     for index, (candidate, venue) in enumerate(selected):
         opening, latest = MEAL_WINDOWS[candidate.meal]
-        arrival = _opening_start(venue.periods, day_date, max(current, opening), candidate.stay_minutes, latest)
+        arrival = _opening_start(
+            venue.periods,
+            day_date,
+            max(current, opening),
+            candidate.stay_minutes,
+            latest,
+        )
         if arrival is None:
-            raise CourseGenerationError(f'{day_number}일차 {day_date} {candidate.meal} {candidate.name}: 영업/식사 시간 안에 {candidate.stay_minutes}분 체류할 수 없습니다.')
+            raise CourseGenerationError(
+                f"{day_number}일차 {day_date} {candidate.meal} {candidate.name}: 영업/식사 시간 안에 {candidate.stay_minutes}분 체류할 수 없습니다."
+            )
         last = index == len(selected) - 1
-        transport = TransportToNextSchema(type='none', distance=0, minutes=0, cost=0, memo='이 장소에서 오늘의 계획된 일정을 종료합니다. 숙소 이동은 포함되지 않습니다.') if last else routes[index]
+        transport = (
+            TransportToNextSchema(
+                type="none",
+                distance=0,
+                minutes=0,
+                cost=0,
+                memo="이 장소에서 오늘의 계획된 일정을 종료합니다. 숙소 이동은 포함되지 않습니다.",
+            )
+            if last
+            else routes[index]
+        )
         note = visit_tip(venue.place.category)
         if venue.periods is None:
-            note += ' 영업시간 미확인: 방문 전 확인이 필요합니다.'
-        stops.append(StopSchema(sequence=index + 1, arrivalTime=f'{arrival // 60:02d}:{arrival % 60:02d}', stayMinutes=candidate.stay_minutes, memo=note, reason=candidate.reason, cost=candidate.cost, place=venue.place, transportToNext=transport))
-        current = arrival + candidate.stay_minutes + (transport.minutes or 0) + (0 if last else 10)
+            note += " 영업시간 미확인: 방문 전 확인이 필요합니다."
+        stops.append(
+            StopSchema(
+                sequence=index + 1,
+                arrivalTime=f"{arrival // 60:02d}:{arrival % 60:02d}",
+                stayMinutes=candidate.stay_minutes,
+                memo=note,
+                reason=candidate.reason,
+                cost=candidate.cost,
+                place=venue.place,
+                transportToNext=transport,
+            )
+        )
+        current = (
+            arrival
+            + candidate.stay_minutes
+            + (transport.minutes or 0)
+            + (0 if last else 10)
+        )
     try:
         summary = compose_day_summary(stops, day_number, compact=compact)
-        if not isinstance(summary, str) or not summary.strip() or len(summary) > MAX_DAY_SUMMARY_LENGTH:
-            raise ValueError('Invalid optional day summary')
+        if (
+            not isinstance(summary, str)
+            or not summary.strip()
+            or len(summary) > MAX_DAY_SUMMARY_LENGTH
+        ):
+            raise ValueError("Invalid optional day summary")
     except Exception:  # noqa: BLE001 - optional prose cannot invalidate a verified schedule; cancellation propagates
-        summary = '새로운 장소를 만나며 나만의 여행 이야기를 만들어보세요.'
+        summary = "새로운 장소를 만나며 나만의 여행 이야기를 만들어보세요."
         if compact:
-            summary += f' 오늘은 이동과 식사 시간을 고려해 {len(stops)}곳을 둘러보세요.'
-    return DayItinerarySchema(day=day_number, date=day_date.isoformat(), memo=summary, stops=stops)
+            summary += f" 오늘은 이동과 식사 시간을 고려해 {len(stops)}곳을 둘러보세요."
+    return DayItinerarySchema(
+        day=day_number, date=day_date.isoformat(), memo=summary, stops=stops
+    )
 
 
 def _meal_capable(venue: VerifiedPlace) -> bool:
-    return any(meal_category_supported(venue.place.category, meal) for meal in ('lunch', 'dinner'))
+    return any(
+        meal_category_supported(venue.place.category, meal)
+        for meal in ("lunch", "dinner")
+    )
 
 
 def _core_visit(item: Visit) -> bool:
     """Count verified sightseeing venues; food and cafe stops never replace them."""
     candidate, venue = item
-    return candidate.meal == 'none' and not _meal_capable(venue) and venue.place.category not in CAFE
+    return (
+        candidate.meal == "none"
+        and not _meal_capable(venue)
+        and venue.place.category not in CAFE
+    )
 
 
 def _visit_shortage(selected: list[Visit]) -> tuple[int, int]:
     """Return common normal floor deficits, independent of optional pace targets."""
-    return max(0, 5 - len(selected)), max(0, 3 - sum(_core_visit(item) for item in selected))
+    return max(0, 5 - len(selected)), max(
+        0, 3 - sum(_core_visit(item) for item in selected)
+    )
 
 
-def _shorter_visits(available: list[Visit], request: CourseRequestSchema) -> list[Visit]:
+def _shorter_visits(
+    available: list[Visit], request: CourseRequestSchema
+) -> list[Visit]:
     """Adjust only short local visit types, preserving deliberate slow stays."""
-    pace = request.tasteProfile.travelPaceDensity if request.tasteProfile else 'balanced'
-    if pace in {'slow_stay', 'long_stay'}:
+    pace = (
+        request.tasteProfile.travelPaceDensity if request.tasteProfile else "balanced"
+    )
+    if pace in {"slow_stay", "long_stay"}:
         return available
-    limits = {'museum': 60, 'art_gallery': 60, 'park': 45, 'garden': 45, 'botanical_garden': 60, 'historical_landmark': 45, 'monument': 45, 'book_store': 45, 'gift_shop': 45, 'souvenir_store': 45}
-    return [(candidate.model_copy(update={'stay_minutes': min(candidate.stay_minutes, 45 if candidate.meal in {'lunch', 'dinner'} else limits.get(venue.place.category, candidate.stay_minutes))}), venue) for candidate, venue in available]
+    limits = {
+        "museum": 60,
+        "art_gallery": 60,
+        "park": 45,
+        "garden": 45,
+        "botanical_garden": 60,
+        "historical_landmark": 45,
+        "monument": 45,
+        "book_store": 45,
+        "gift_shop": 45,
+        "souvenir_store": 45,
+    }
+    return [
+        (
+            candidate.model_copy(
+                update={
+                    "stay_minutes": min(
+                        candidate.stay_minutes,
+                        45
+                        if candidate.meal in {"lunch", "dinner"}
+                        else limits.get(venue.place.category, candidate.stay_minutes),
+                    )
+                }
+            ),
+            venue,
+        )
+        for candidate, venue in available
+    ]
 
 
 def _pace_limit(request: CourseRequestSchema) -> int:
-    pace = request.tasteProfile.travelPaceDensity if request.tasteProfile else 'balanced'
-    return {'slow_stay': 5, 'long_stay': 5, 'dense_schedule': 7}.get(pace, 6)
+    pace = (
+        request.tasteProfile.travelPaceDensity if request.tasteProfile else "balanced"
+    )
+    return {"slow_stay": 5, "long_stay": 5, "dense_schedule": 7}.get(pace, 6)
 
 
 def _plan_signature(selected: list[Visit]) -> tuple:
     """Identify the exact ordered visits whose real travel feasibility was checked."""
-    return tuple((venue.place.placeId, candidate.meal, candidate.stay_minutes) for candidate, venue in selected)
+    return tuple(
+        (venue.place.placeId, candidate.meal, candidate.stay_minutes)
+        for candidate, venue in selected
+    )
 
 
 def _max_drafts(state: CourseState) -> int:
-    return 3 if state['request'].tripCondition.totalDays > 1 else 2
+    return 3 if state["request"].tripCondition.totalDays > 1 else 2
 
 
 def _draft_api_error(error: BaseException) -> APIError | None:
@@ -383,45 +677,114 @@ def _recoverable_draft(error: BaseException) -> bool:
     provider_error = _draft_api_error(error)
     if provider_error is not None:
         return provider_error.code == 429 or 500 <= provider_error.code < 600
-    return isinstance(error, (TimeoutError, httpx.TimeoutException, httpx.NetworkError, OutputParserException, ValidationError))
+    return isinstance(
+        error,
+        (
+            TimeoutError,
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            OutputParserException,
+            ValidationError,
+        ),
+    )
 
 
 def _selection_metadata(selected: list[list[Visit]]) -> dict:
     """Remember only selected attraction IDs and their original model choices."""
-    attractions = [(candidate, venue) for day in selected for candidate, venue in day if _core_visit((candidate, venue))]
+    attractions = [
+        (candidate, venue)
+        for day in selected
+        for candidate, venue in day
+        if _core_visit((candidate, venue))
+    ]
     return {
-        'attraction_ids': sorted({venue.place.placeId for _, venue in attractions}),
-        'areas': sorted({normalize_area(candidate.planned_area) for candidate, _ in attractions if candidate.planned_area.strip()}),
-        'experiences': sorted({value for candidate, _ in attractions for value in candidate.experiences}),
+        "attraction_ids": sorted({venue.place.placeId for _, venue in attractions}),
+        "areas": sorted(
+            {
+                normalize_area(candidate.planned_area)
+                for candidate, _ in attractions
+                if candidate.planned_area.strip()
+            }
+        ),
+        "experiences": sorted(
+            {value for candidate, _ in attractions for value in candidate.experiences}
+        ),
     }
 
 
 def _diversity_rank(path: list[Visit], profiles: list[dict]) -> tuple:
     metadata = _selection_metadata([path])
-    scores = overlap_scores([venue.place.placeId for _, venue in path], metadata['attraction_ids'], profiles)
+    scores = overlap_scores(
+        [venue.place.placeId for _, venue in path], metadata["attraction_ids"], profiles
+    )
     # Rank diversity after the common visit floor; extra stops are optional.
-    areas = {normalize_area(candidate.planned_area) for candidate, _ in path if candidate.planned_area.strip()}
-    area_overlap = planning_overlap(metadata['areas'], profiles, 'areas')
-    misses_target = max(scores['attraction_overlap'], scores['place_overlap'], area_overlap) > MAX_OVERLAP
-    return (misses_target, scores['attraction_overlap'], scores['place_overlap'], area_overlap, max(0, len(areas) - 1), planning_overlap(metadata['experiences'], profiles, 'experiences'))
+    areas = {
+        normalize_area(candidate.planned_area)
+        for candidate, _ in path
+        if candidate.planned_area.strip()
+    }
+    area_overlap = planning_overlap(metadata["areas"], profiles, "areas")
+    misses_target = (
+        max(scores["attraction_overlap"], scores["place_overlap"], area_overlap)
+        > MAX_OVERLAP
+    )
+    return (
+        misses_target,
+        scores["attraction_overlap"],
+        scores["place_overlap"],
+        area_overlap,
+        max(0, len(areas) - 1),
+        planning_overlap(metadata["experiences"], profiles, "experiences"),
+    )
 
 
-def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_visits: int, recent_ids: set[str], rejected_plans: set[tuple] | None = None, *, plan_limit: int = MAX_DAY_PLANS, compact: bool = False, recent_profiles: list[dict] | None = None) -> list[list[Visit]]:
+def _day_plans(
+    available: list[Visit],
+    day_date: date,
+    max_stops: int,
+    minimum_visits: int,
+    recent_ids: set[str],
+    rejected_plans: set[tuple] | None = None,
+    *,
+    plan_limit: int = MAX_DAY_PLANS,
+    compact: bool = False,
+    recent_profiles: list[dict] | None = None,
+) -> list[list[Visit]]:
     """Find up to four optimistic plans; only real routes can confirm feasibility.
 
     The beam is capped at 48 states per depth, with at most 30 retained proposals.
     Zero travel is used only to discard impossible orderings, never as a route.
     """
-    options = [item for item in available if meal_category_supported(item[1].place.category, item[0].meal)]
+    options = [
+        item
+        for item in available
+        if meal_category_supported(item[1].place.category, item[0].meal)
+    ]
     # A verified restaurant may serve another meal if that full visit fits its hours.
     for candidate, venue in available:
         if not _meal_capable(venue):
             continue
-        for meal in ('lunch', 'dinner'):
-            if candidate.meal != meal and meal_category_supported(venue.place.category, meal):
-                options.append((candidate.model_copy(update={'meal': meal}), venue))
-    options = [item for item in options if _opening_start(item[1].periods, day_date, MEAL_WINDOWS[item[0].meal][0], item[0].stay_minutes, MEAL_WINDOWS[item[0].meal][1]) is not None]
-    unique = {(venue.place.placeId, candidate.meal): (candidate, venue) for candidate, venue in reversed(options)}
+        for meal in ("lunch", "dinner"):
+            if candidate.meal != meal and meal_category_supported(
+                venue.place.category, meal
+            ):
+                options.append((candidate.model_copy(update={"meal": meal}), venue))
+    options = [
+        item
+        for item in options
+        if _opening_start(
+            item[1].periods,
+            day_date,
+            MEAL_WINDOWS[item[0].meal][0],
+            item[0].stay_minutes,
+            MEAL_WINDOWS[item[0].meal][1],
+        )
+        is not None
+    ]
+    unique = {
+        (venue.place.placeId, candidate.meal): (candidate, venue)
+        for candidate, venue in reversed(options)
+    }
     options = list(reversed(unique.values()))
     completed: list[tuple[list[Visit], int, float]] = []
     beam: list[tuple[list[Visit], int, float]] = [([], 540, 0.0)]
@@ -429,65 +792,138 @@ def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_v
         following = []
         for path, current, distance in beam:
             ids = {venue.place.placeId for _, venue in path}
-            meals = {candidate.meal for candidate, _ in path if candidate.meal != 'none'}
+            meals = {
+                candidate.meal for candidate, _ in path if candidate.meal != "none"
+            }
             for item in options:
                 candidate, venue = item
-                if venue.place.placeId in ids or (candidate.meal != 'none' and candidate.meal in meals):
+                if venue.place.placeId in ids or (
+                    candidate.meal != "none" and candidate.meal in meals
+                ):
                     continue
-                if candidate.meal == 'breakfast' and ('lunch' in meals or 'dinner' in meals):
+                if candidate.meal == "breakfast" and (
+                    "lunch" in meals or "dinner" in meals
+                ):
                     continue
-                if candidate.meal == 'dinner' and 'lunch' not in meals:
+                if candidate.meal == "dinner" and "lunch" not in meals:
                     continue
                 earliest, latest = MEAL_WINDOWS[candidate.meal]
-                arrival = _opening_start(venue.periods, day_date, max(current, earliest), candidate.stay_minutes, latest)
+                arrival = _opening_start(
+                    venue.periods,
+                    day_date,
+                    max(current, earliest),
+                    candidate.stay_minutes,
+                    latest,
+                )
                 if arrival is None:
                     continue
                 new_path = [*path, item]
                 new_meals = meals | {candidate.meal}
                 visits = sum(_core_visit(entry) for entry in new_path)
-                required = len({'lunch', 'dinner'} - new_meals) + max(0, minimum_visits - visits)
+                required = len({"lunch", "dinner"} - new_meals) + max(
+                    0, minimum_visits - visits
+                )
                 if max_stops - depth - 1 < required:
                     continue
-                new_distance = distance + (_distance(path[-1][1], venue) if path else 0)
+                new_distance = distance + (
+                    distance_meters(path[-1][1], venue) if path else 0
+                )
                 # Ten minutes of transfer buffer is known even before route lookup.
-                new_state = (new_path, arrival + candidate.stay_minutes + 10, new_distance)
+                new_state = (
+                    new_path,
+                    arrival + candidate.stay_minutes + 10,
+                    new_distance,
+                )
                 following.append(new_state)
                 if not required:
                     completed.append(new_state)
-        following.sort(key=lambda state: ((_diversity_rank(state[0], recent_profiles) if recent_profiles else ()), state[1], sum(venue.place.placeId in recent_ids for _, venue in state[0]), state[2]))
+        following.sort(
+            key=lambda state: (
+                (_diversity_rank(state[0], recent_profiles) if recent_profiles else ()),
+                state[1],
+                sum(venue.place.placeId in recent_ids for _, venue in state[0]),
+                state[2],
+            )
+        )
         beam = following[:48]
         if not beam:
             break
-    completed.sort(key=lambda state: (_visit_shortage(state[0]), (_diversity_rank(state[0], recent_profiles) if recent_profiles else ()), len(state[0]) if compact else -len(state[0]), not any(candidate.meal == 'breakfast' for candidate, _ in state[0]), sum(venue.place.placeId in recent_ids for _, venue in state[0]), state[2], state[1]))
+    completed.sort(
+        key=lambda state: (
+            _visit_shortage(state[0]),
+            (_diversity_rank(state[0], recent_profiles) if recent_profiles else ()),
+            len(state[0]) if compact else -len(state[0]),
+            not any(candidate.meal == "breakfast" for candidate, _ in state[0]),
+            sum(venue.place.placeId in recent_ids for _, venue in state[0]),
+            state[2],
+            state[1],
+        )
+    )
     # Keep an already feasible original proposal first; this avoids gratuitous reorder.
     original = []
     used: set[str] = set()
     ordered = sorted(available, key=lambda item: item[1].place.placeId in recent_ids)
-    for meal in ('breakfast', 'lunch', 'dinner'):
-        matches = [item for item in ordered if item[0].meal == meal and item[1].place.placeId not in used]
+    for meal in ("breakfast", "lunch", "dinner"):
+        matches = [
+            item
+            for item in ordered
+            if item[0].meal == meal and item[1].place.placeId not in used
+        ]
         if matches:
             original.append(matches[0])
             used.add(matches[0][1].place.placeId)
     for item in ordered:
-        if len(original) < max_stops and item[0].meal == 'none' and item[1].place.placeId not in used:
+        if (
+            len(original) < max_stops
+            and item[0].meal == "none"
+            and item[1].place.placeId not in used
+        ):
             original.append(item)
             used.add(item[1].place.placeId)
     order = {id(candidate): index for index, (candidate, _) in enumerate(available)}
     original.sort(key=lambda item: order[id(item[0])])
-    valid_meals = [candidate.meal for candidate, _ in original if candidate.meal != 'none']
-    original_key = tuple((venue.place.placeId, candidate.meal) for candidate, venue in original)
-    preferred = next((state for state in completed if tuple((venue.place.placeId, candidate.meal) for candidate, venue in state[0]) == original_key), None)
-    if not recent_profiles and not compact and preferred and len(preferred[0]) == len(completed[0][0]) and valid_meals in (['lunch', 'dinner'], ['breakfast', 'lunch', 'dinner']):
+    valid_meals = [
+        candidate.meal for candidate, _ in original if candidate.meal != "none"
+    ]
+    original_key = tuple(
+        (venue.place.placeId, candidate.meal) for candidate, venue in original
+    )
+    preferred = next(
+        (
+            state
+            for state in completed
+            if tuple(
+                (venue.place.placeId, candidate.meal) for candidate, venue in state[0]
+            )
+            == original_key
+        ),
+        None,
+    )
+    if (
+        not recent_profiles
+        and not compact
+        and preferred
+        and len(preferred[0]) == len(completed[0][0])
+        and valid_meals in (["lunch", "dinner"], ["breakfast", "lunch", "dinner"])
+    ):
         completed.remove(preferred)
         completed.insert(0, preferred)
     plans: list[list[Visit]] = []
     signatures: set[tuple] = set()
     meal_sets: set[tuple] = set()
-    for diverse in ((False,) if recent_profiles else (True, False)):
+    for diverse in (False,) if recent_profiles else (True, False):
         for path, _, _ in completed:
             signature = _plan_signature(path)
-            meal_set = tuple((candidate.meal, venue.place.placeId) for candidate, venue in path if candidate.meal != 'none')
-            if signature in signatures or signature in (rejected_plans or set()) or (diverse and meal_set in meal_sets):
+            meal_set = tuple(
+                (candidate.meal, venue.place.placeId)
+                for candidate, venue in path
+                if candidate.meal != "none"
+            )
+            if (
+                signature in signatures
+                or signature in (rejected_plans or set())
+                or (diverse and meal_set in meal_sets)
+            ):
                 continue
             plans.append(path)
             signatures.add(signature)
@@ -498,16 +934,27 @@ def _day_plans(available: list[Visit], day_date: date, max_stops: int, minimum_v
 
 
 def _canonical_id(value: str) -> str:
-    return value.strip().removeprefix('places/')
+    return value.strip().removeprefix("places/")
 
 
-def _choose_disjoint_plans(day_plans: dict[int, list[list[Visit]]], reserved_ids: set[str], search_budget: int = 5000) -> dict[int, list[Visit]]:
+def _choose_disjoint_plans(
+    day_plans: dict[int, list[list[Visit]]],
+    reserved_ids: set[str],
+    search_budget: int = 5000,
+) -> dict[int, list[Visit]]:
     """Find a bounded global assignment, protecting days with few alternatives."""
     reserved = {_canonical_id(value) for value in reserved_ids}
-    options = {index: [(plan, {_canonical_id(venue.place.placeId) for _, venue in plan}) for plan in plans] for index, plans in day_plans.items()}
+    options = {
+        index: [
+            (plan, {_canonical_id(venue.place.placeId) for _, venue in plan})
+            for plan in plans
+        ]
+        for index, plans in day_plans.items()
+    }
     order = sorted(options, key=lambda index: (len(options[index]), index))
     best: dict[int, list[Visit]] = {}
     visited = 0
+
     def search(offset: int, used: set[str], chosen: dict[int, list[Visit]]) -> bool:
         nonlocal best, visited
         visited += 1
@@ -526,188 +973,221 @@ def _choose_disjoint_plans(day_plans: dict[int, list[list[Visit]]], reserved_ids
                 return True
             chosen.pop(index)
         return search(offset + 1, used, chosen)
+
     search(0, reserved, {})
     return dict(sorted(best.items()))
 
 
-def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -> Any:
-    """Compile explicit generation nodes using injectable provider/history boundaries.
+class _CourseGraphNodes:
+    """Implement nodes using injected boundaries and request-local graph state.
 
-    Returns a compiled LangGraph; validation failures receive one repair, or two for multi-day trips.
+    Args:
+        provider: Venue, route and photo verification boundary.
+        history: Recent course storage boundary.
+
+    Dependencies live here; drafts, caches, retries and snapshots live only in
+    CourseState. Each node returns the same partial state updates as before.
     """
-    async def read_history(request: CourseRequestSchema) -> tuple[list[set[str]], list[dict]]:
-        recent = await history.recent(history_key(request))
-        read_profiles = getattr(history, 'recent_profiles', None)
-        if inspect.iscoroutinefunction(read_profiles):
-            profiles = await read_profiles(history_key(request))
-            if isinstance(profiles, list):
-                return recent, profiles
-        return recent, [{'place_ids': sorted(ids)} for ids in recent]
 
-    def optional_budget(state: CourseState) -> float:
-        remaining = state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.
-        return min(25., max(0., remaining))
+    def __init__(self, provider: VerifiedMapsProvider, history: CourseHistory) -> None:
+        self.provider = provider
+        self.history = history
 
-    def needs_fullness(state: CourseState) -> bool:
-        """Distinguish required missing visits from optional history diversity."""
-        snapshot = state.get('verified_fallback', {})
-        return bool(snapshot and any(snapshot['rank'][:2]))
+    # Normal generation.
 
-    def can_refill(state: CourseState) -> bool:
-        remaining = state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.
-        return state.get('refill_attempt', 0) < MAX_FULLNESS_REFILLS and remaining >= MIN_DAILY_DRAFT_BUDGET_SECONDS
-
-    async def optional_node(node: Callable[[CourseState], Awaitable[dict]], state: CourseState) -> dict:
-        """Bound novelty-only work while preserving time for safe completion."""
-        if not state.get('verified_fallback'):
-            return await node(state)
-        compulsory = needs_fullness(state) or state.get('refilling')
-        budget = max(0., state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.) if compulsory else optional_budget(state)
-        if budget <= .1:
-            return {'restore_fallback': True, 'feedback': ''}
-        try:
-            async with asyncio.timeout(None if math.isinf(budget) else budget):
-                return await node(state)
-        except TimeoutError:
-            logger.info('Course verified fallback: %s validation timeout', 'required' if compulsory else 'optional')
-            return {'restore_fallback': True, 'feedback': ''}
-
-    def history_feedback(state: CourseState) -> str:
-        profiles = state.get('recent_profiles', [])
-        areas = sorted({value for item in profiles for value in item.get('areas', [])})
-        experiences = sorted({value for item in profiles for value in item.get('experiences', [])})
-        return ('최근 계획 권역: ' + ', '.join(areas[:30]) + '. 최근 경험 구성: ' + ', '.join(experiences) + '. '
-                '사용자의 높은 취향을 유지하며 최근 계획과 다른 권역을 우선하세요. 권역은 하루 안에서 가까운 장소로 묶으세요. 낮은 취향을 다양성 때문에 강제하지 마세요. '
-                '각 후보에 모델 계획 planned_area와 experiences를 작성하세요. 권역 이름만 바꿔 동일 장소를 다시 제안하지 마세요.') if profiles else ''
-
-    async def prepare(state: CourseState) -> dict:
-        _progress('여행 조건과 최근 코스 이력을 확인하고 있습니다.')
-        request = state['request']
+    async def prepare(self, state: CourseState) -> dict:
+        """Resolve the destination and initialize request-local state."""
+        _progress("여행 조건과 최근 코스 이력을 확인하고 있습니다.")
+        request = state["request"]
         date.fromisoformat(request.tripCondition.startDate)
-        destination = await provider.resolve_destination(request.tripCondition.destinationCountry, request.tripCondition.destinationCity)
+        destination = await self.provider.resolve_destination(
+            request.tripCondition.destinationCountry,
+            request.tripCondition.destinationCity,
+        )
         unavailable = False
         try:
-            async with asyncio.timeout(1.):
-                recent, profiles = await read_history(request)
-        except (OSError, sqlite3.Error, TimeoutError):
-            logger.warning('Course history read unavailable')
+            async with asyncio.timeout(1.0):
+                recent, profiles = await self._read_history(request)
+        except OSError, sqlite3.Error, TimeoutError:
+            logger.warning("Course history read unavailable")
             recent, profiles, unavailable = [], [], True
-        return {'destination': destination, 'recent': recent, 'recent_profiles': profiles, 'history_unavailable': unavailable, 'attempt': 0, 'feedback': '', 'validated_days': {}, 'place_cache': {}, 'route_cache': {}, 'candidate_pools': {}, 'rejected_plans': {}, 'repairing': False, 'repeated': False, 'discovered_days': set(), 'restore_fallback': False, 'verified_fallback': {}, 'refill_attempt': 0, 'refilling': False, 'attraction_discovered_days': set()}
+        return {
+            "destination": destination,
+            "recent": recent,
+            "recent_profiles": profiles,
+            "history_unavailable": unavailable,
+            "attempt": 0,
+            "feedback": "",
+            "validated_days": {},
+            "place_cache": {},
+            "route_cache": {},
+            "candidate_pools": {},
+            "rejected_plans": {},
+            "repairing": False,
+            "repeated": False,
+            "discovered_days": set(),
+            "restore_fallback": False,
+            "verified_fallback": {},
+            "refill_attempt": 0,
+            "refilling": False,
+            "attraction_discovered_days": set(),
+        }
 
-    async def draft(state: CourseState) -> dict:
-        _progress('취향에 맞는 장소 후보와 식사 대안을 구성하고 있습니다.')
-        existing = dict(state.get('partial_drafts', {}))
-        existing.update({index: DraftDay(candidates=[candidate for candidate, _ in saved['selected']]) for index, saved in state.get('validated_days', {}).items()})
-        pending = [index for index in range(state['request'].tripCondition.totalDays) if index not in existing]
+    async def draft(self, state: CourseState) -> dict:
+        """Propose missing days while retaining successful day drafts."""
+        _progress("취향에 맞는 장소 후보와 식사 대안을 구성하고 있습니다.")
+        existing = dict(state.get("partial_drafts", {}))
+        existing.update(
+            {
+                index: DraftDay(
+                    candidates=[candidate for candidate, _ in saved["selected"]]
+                )
+                for index, saved in state.get("validated_days", {}).items()
+            }
+        )
+        pending = [
+            index
+            for index in range(state["request"].tripCondition.totalDays)
+            if index not in existing
+        ]
         try:
-            draft_deadline = state['deadline'] - 28. if 'deadline' in state else None
-            result = await draft_candidates(state['request'], sorted(set().union(*state['recent'])) if state['recent'] else [], history_feedback(state) + '\n' + state.get('feedback', ''), pending_days=pending, existing_days=existing, deadline=draft_deadline)
+            draft_deadline = state["deadline"] - 28.0 if "deadline" in state else None
+            result = await draft_candidates(
+                state["request"],
+                sorted(set().union(*state["recent"])) if state["recent"] else [],
+                self._history_feedback(state) + "\n" + state.get("feedback", ""),
+                pending_days=pending,
+                existing_days=existing,
+                deadline=draft_deadline,
+            )
         except PartialDraftError as error:
-            return {'partial_drafts': error.days, 'attempt': state['attempt'] + 1, 'feedback': '일부 일자 후보 응답이 지연되었습니다. 완료한 일자는 유지하고 누락한 일자만 보충하세요.'}
+            return {
+                "partial_drafts": error.days,
+                "attempt": state["attempt"] + 1,
+                "feedback": "일부 일자 후보 응답이 지연되었습니다. 완료한 일자는 유지하고 누락한 일자만 보충하세요.",
+            }
         except Exception as error:
             if not _recoverable_draft(error):
                 raise
-            if state.get('verified_fallback') and not needs_fullness(state):
-                return {'attempt': state['attempt'] + 1, 'restore_fallback': True, 'feedback': ''}
-            return {'attempt': state['attempt'] + 1, 'feedback': '모델의 일시적 응답 오류입니다. 기존에 확인한 장소를 유지하고 필요한 대안을 다시 제안하세요.'}
-        if len(result.days) != state['request'].tripCondition.totalDays:
-            if state.get('verified_fallback') and not needs_fullness(state):
-                return {'attempt': state['attempt'] + 1, 'restore_fallback': True, 'feedback': ''}
-            return {'attempt': state['attempt'] + 1, 'feedback': '요청한 여행 일수와 초안의 days 개수를 일치시키세요.'}
+            if state.get("verified_fallback") and not self._needs_fullness(state):
+                return {
+                    "attempt": state["attempt"] + 1,
+                    "restore_fallback": True,
+                    "feedback": "",
+                }
+            return {
+                "attempt": state["attempt"] + 1,
+                "feedback": "모델의 일시적 응답 오류입니다. 기존에 확인한 장소를 유지하고 필요한 대안을 다시 제안하세요.",
+            }
+        if len(result.days) != state["request"].tripCondition.totalDays:
+            if state.get("verified_fallback") and not self._needs_fullness(state):
+                return {
+                    "attempt": state["attempt"] + 1,
+                    "restore_fallback": True,
+                    "feedback": "",
+                }
+            return {
+                "attempt": state["attempt"] + 1,
+                "feedback": "요청한 여행 일수와 초안의 days 개수를 일치시키세요.",
+            }
         result = result.model_copy(deep=True)
-        for index, saved in state.get('validated_days', {}).items():
-            result.days[index] = DraftDay(candidates=[candidate for candidate, _ in saved['selected']])
-        return {'draft_data': result, 'partial_drafts': {}, 'attempt': state['attempt'] + 1, 'feedback': ''}
+        for index, saved in state.get("validated_days", {}).items():
+            result.days[index] = DraftDay(
+                candidates=[candidate for candidate, _ in saved["selected"]]
+            )
+        return {
+            "draft_data": result,
+            "partial_drafts": {},
+            "attempt": state["attempt"] + 1,
+            "feedback": "",
+        }
 
-    async def refill(state: CourseState) -> dict:
-        """Supplement only unfinished dates with an independent bounded budget.
+    async def verify_places(self, state: CourseState) -> dict:
+        """Verify venue facts, supplement nearby candidates and form day plans."""
+        _progress("장소의 실제 위치·도시·영업 정보를 병렬로 확인하고 있습니다.")
+        saved = state["validated_days"]
+        reserved_ids = {
+            venue.place.placeId
+            for value in saved.values()
+            for _, venue in value["selected"]
+        }
+        cache = state["place_cache"]
+        pools = {index: dict(pool) for index, pool in state["candidate_pools"].items()}
+        discovered_days = set(state.get("discovered_days", set()))
+        attraction_discovered_days = set(state.get("attraction_discovered_days", set()))
 
-        Successful dates and verified candidate/route caches remain unchanged.
-        Temporary model failures still reach Maps supplementation and local
-        recombination, rather than restoring a short snapshot immediately.
-        """
-        _progress('장소가 부족한 일차에 가까운 명소를 보충하고 있습니다.')
-        saved = {index: value for index, value in state['validated_days'].items() if not any(_visit_shortage(value['selected']))}
-        existing = dict(state.get('partial_drafts', {})) if not state.get('draft_data') else {}
-        existing.update({index: DraftDay(candidates=[candidate for candidate, _ in value['selected']]) for index, value in saved.items()})
-        pending = [index for index in range(state['request'].tripCondition.totalDays) if index not in existing]
-        feedback = state.get('feedback', '') + '\n최소 5곳과 관광·체험 3곳을 채우는 보충입니다. 기존 취향을 유지하고 아래 확인된 명소 주변의 가까운 공식 장소를 우선하세요. slow_stay/long_stay의 긴 체류와 테마파크·하이킹 같은 긴 활동은 유지하세요. 그 밖의 일정에서 꼭 필요한 경우에만 박물관·미술관 60분, 근거리 공원·정원 45분, 식사 45분을 계획 대안으로 제안하세요.\n'
-        for index in pending:
-            values = list(state['candidate_pools'].get(index, {}).values())
-            feedback += f'{index + 1}일차 확인된 후보 유지: ' + ', '.join(f'{candidate.name}({venue.place.category}, {candidate.meal})' for candidate, venue in values) + '\n'
-        updates = {'refill_attempt': state.get('refill_attempt', 0) + 1, 'refilling': True, 'repairing': False, 'validated_days': saved, 'restore_fallback': False, 'feedback': ''}
-        try:
-            deadline = state['deadline'] - 10. if 'deadline' in state else None
-            result = await draft_candidates(state['request'], sorted(set().union(*state['recent'])) if state['recent'] else [], history_feedback(state) + '\n' + feedback, pending_days=pending, existing_days=existing, deadline=deadline)
-        except PartialDraftError as error:
-            if state.get('draft_data'):
-                result = state['draft_data'].model_copy(deep=True)
-                for index, day in error.days.items():
-                    result.days[index] = day
-            else:
-                updates['partial_drafts'] = error.days
-                updates['feedback'] = '부족한 일차의 후보 응답을 다시 확인합니다.'
-                return updates
-        except Exception as error:
-            if not _recoverable_draft(error):
-                raise
-            if not state.get('draft_data'):
-                updates['feedback'] = '부족한 일차의 후보 응답을 다시 확인합니다.'
-                return updates
-            result = state['draft_data'].model_copy(deep=True)
-        if len(result.days) != state['request'].tripCondition.totalDays:
-            if not state.get('draft_data'):
-                updates['feedback'] = '요청한 여행 일수와 후보 개수가 일치하지 않습니다.'
-                return updates
-            result = state['draft_data'].model_copy(deep=True)
-        else:
-            result = result.model_copy(deep=True)
-        for index, value in existing.items():
-            result.days[index] = value
-        updates.update({'draft_data': result, 'partial_drafts': {}})
-        return updates
-
-    async def verify_places(state: CourseState) -> dict:
-        _progress('장소의 실제 위치·도시·영업 정보를 병렬로 확인하고 있습니다.')
-        saved = state['validated_days']
-        reserved_ids = {venue.place.placeId for value in saved.values() for _, venue in value['selected']}
-        cache = state['place_cache']
-        pools = {index: dict(pool) for index, pool in state['candidate_pools'].items()}
-        discovered_days = set(state.get('discovered_days', set()))
-        attraction_discovered_days = set(state.get('attraction_discovered_days', set()))
         def key(candidate: Candidate) -> tuple:
-            return (candidate.name.strip().casefold(), candidate.english_name.strip().casefold(), candidate.meal)
-        unique = {key(candidate): candidate for index, day in enumerate(state['draft_data'].days) if index not in saved for candidate in day.candidates if key(candidate) not in cache}
-        results = await _parallel(list(unique.values()), lambda candidate: provider.search(candidate, state['destination']))
-        temporary_names = {candidate.name for candidate, result in zip(unique.values(), results) if isinstance(result, MapsProviderError) and result.transient}
+            return (
+                candidate.name.strip().casefold(),
+                candidate.english_name.strip().casefold(),
+                candidate.meal,
+            )
+
+        unique = {
+            key(candidate): candidate
+            for index, day in enumerate(state["draft_data"].days)
+            if index not in saved
+            for candidate in day.candidates
+            if key(candidate) not in cache
+        }
+        results = await _parallel(
+            list(unique.values()),
+            lambda candidate: self.provider.search(candidate, state["destination"]),
+        )
+        temporary_names = {
+            candidate.name
+            for candidate, result in zip(unique.values(), results)
+            if isinstance(result, MapsProviderError) and result.transient
+        }
         for candidate_key, venue in zip(unique, results):
             if isinstance(venue, asyncio.CancelledError):
                 raise venue
-            if isinstance(venue, MapsProviderError) and venue.kind in {'unauthorized', 'invalid'}:
+            if isinstance(venue, MapsProviderError) and venue.kind in {
+                "unauthorized",
+                "invalid",
+            }:
                 raise venue
             if isinstance(venue, VerifiedPlace):
-                venue.place.placeId = ('places/' + _canonical_id(venue.place.placeId)) if _canonical_id(venue.place.placeId) else ''
+                venue.place.placeId = (
+                    ("places/" + _canonical_id(venue.place.placeId))
+                    if _canonical_id(venue.place.placeId)
+                    else ""
+                )
                 cache[candidate_key] = venue
-        recent_ids = set().union(*state['recent']) if state['recent'] else set()
-        max_stops = _pace_limit(state['request'])
+        recent_ids = set().union(*state["recent"]) if state["recent"] else set()
+        max_stops = _pace_limit(state["request"])
         minimum_visits = 3
         all_plans, failures = [], []
-        for index, day in enumerate(state['draft_data'].days):
+        for index, day in enumerate(state["draft_data"].days):
             await asyncio.sleep(0)
             if index in saved:
-                all_plans.append([saved[index]['selected']])
+                all_plans.append([saved[index]["selected"]])
                 continue
-            day_date = date.fromisoformat(state['request'].tripCondition.startDate) + timedelta(days=index)
+            day_date = date.fromisoformat(
+                state["request"].tripCondition.startDate
+            ) + timedelta(days=index)
             pool = pools.setdefault(index, {})
             current_keys = []
             rejected = []
             for candidate in day.candidates:
                 venue = cache.get(key(candidate))
-                if isinstance(venue, BaseException) or not isinstance(venue, VerifiedPlace):
+                if isinstance(venue, BaseException) or not isinstance(
+                    venue, VerifiedPlace
+                ):
                     rejected.append(candidate.name)
                     continue
                 place = venue.place
-                if not individual_place_category_supported(place.category) or place.placeId in reserved_ids or not place.placeId or not place.address or not math.isfinite(place.latitude) or not math.isfinite(place.longitude) or not state['destination'].contains(place.latitude, place.longitude):
+                if (
+                    not individual_place_category_supported(place.category)
+                    or place.placeId in reserved_ids
+                    or not place.placeId
+                    or not place.address
+                    or not math.isfinite(place.latitude)
+                    or not math.isfinite(place.longitude)
+                    or not state["destination"].contains(
+                        place.latitude, place.longitude
+                    )
+                ):
                     rejected.append(candidate.name)
                     continue
                 if not meal_category_supported(place.category, candidate.meal):
@@ -717,118 +1197,345 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                 current_keys.append((place.placeId, candidate.meal))
             # Recheck retained facts against other days: a later successful day can
             # reserve a venue that was available when this day's pool was created.
-            pool = {key: item for key, item in pool.items() if item[1].place.placeId not in reserved_ids and individual_place_category_supported(item[1].place.category) and meal_category_supported(item[1].place.category, item[0].meal) and item[1].place.address and math.isfinite(item[1].place.latitude) and math.isfinite(item[1].place.longitude) and state['destination'].contains(item[1].place.latitude, item[1].place.longitude)}
+            pool = {
+                key: item
+                for key, item in pool.items()
+                if item[1].place.placeId not in reserved_ids
+                and individual_place_category_supported(item[1].place.category)
+                and meal_category_supported(item[1].place.category, item[0].meal)
+                and item[1].place.address
+                and math.isfinite(item[1].place.latitude)
+                and math.isfinite(item[1].place.longitude)
+                and state["destination"].contains(
+                    item[1].place.latitude, item[1].place.longitude
+                )
+            }
             # Three drafts of at most ten candidates is the request-wide hard cap.
             ordered_keys = dict.fromkeys([*current_keys, *pool])
             pools[index] = {key: pool[key] for key in ordered_keys if key in pool}
             pools[index] = dict(list(pools[index].items())[:30])
             available = list(pools[index].values())
             meal_ids = {
-                meal: {venue.place.placeId for candidate, venue in available if meal_category_supported(venue.place.category, meal) and _opening_start(venue.periods, day_date, MEAL_WINDOWS[meal][0], candidate.stay_minutes, MEAL_WINDOWS[meal][1]) is not None}
-                for meal in ('lunch', 'dinner')
+                meal: {
+                    venue.place.placeId
+                    for candidate, venue in available
+                    if meal_category_supported(venue.place.category, meal)
+                    and _opening_start(
+                        venue.periods,
+                        day_date,
+                        MEAL_WINDOWS[meal][0],
+                        candidate.stay_minutes,
+                        MEAL_WINDOWS[meal][1],
+                    )
+                    is not None
+                }
+                for meal in ("lunch", "dinner")
             }
-            enough_meals = any(lunch != dinner for lunch in meal_ids['lunch'] for dinner in meal_ids['dinner'])
-            anchor = next((venue for candidate, venue in available if candidate.meal == 'none' and not _meal_capable(venue)), None)
-            discover = getattr(provider, 'discover_meals', None)
-            if not enough_meals and anchor and index not in discovered_days and inspect.iscoroutinefunction(discover):
-                _progress(f'{index + 1}일차의 확인된 명소 주변에서 실제 식당 대안을 보충하고 있습니다.')
-                discovered_days.add(index)
+            enough_meals = any(
+                lunch != dinner
+                for lunch in meal_ids["lunch"]
+                for dinner in meal_ids["dinner"]
+            )
+            anchor = next(
+                (
+                    venue
+                    for candidate, venue in available
+                    if candidate.meal == "none" and not _meal_capable(venue)
+                ),
+                None,
+            )
+            discover = getattr(self.provider, "discover_meals", None)
+            if (
+                not enough_meals
+                and anchor
+                and index not in discovered_days
+                and inspect.iscoroutinefunction(discover)
+            ):
+                _progress(
+                    f"{index + 1}일차의 확인된 명소 주변에서 실제 식당 대안을 보충하고 있습니다."
+                )
                 try:
-                    meals = await discover(state['destination'], anchor)
+                    meals = await discover(state["destination"], anchor)
+                    discovered_days.add(index)
                 except MapsProviderError as error:
-                    if error.kind in {'unauthorized', 'invalid'}:
+                    if error.kind in {"unauthorized", "invalid"}:
                         raise
+                    if not error.transient:
+                        discovered_days.add(index)
                     meals = []
-                meal_costs = [candidate.cost for candidate in day.candidates if candidate.meal in {'lunch', 'dinner'} and candidate.cost > 0]
-                planned_cost = round(sum(meal_costs) / len(meal_costs)) if meal_costs else 18000
+                meal_costs = [
+                    candidate.cost
+                    for candidate in day.candidates
+                    if candidate.meal in {"lunch", "dinner"} and candidate.cost > 0
+                ]
+                planned_cost = (
+                    round(sum(meal_costs) / len(meal_costs)) if meal_costs else 18000
+                )
                 additions = {}
                 for venue in meals[:5]:
-                    if not isinstance(venue, VerifiedPlace) or venue.place.placeId in reserved_ids or not _meal_capable(venue):
+                    if (
+                        not isinstance(venue, VerifiedPlace)
+                        or venue.place.placeId in reserved_ids
+                        or not _meal_capable(venue)
+                    ):
                         continue
-                    if not venue.place.address or not individual_place_category_supported(venue.place.category) or not state['destination'].contains(venue.place.latitude, venue.place.longitude) or _distance(anchor, venue) > 1000:
+                    if (
+                        not venue.place.address
+                        or not individual_place_category_supported(venue.place.category)
+                        or not state["destination"].contains(
+                            venue.place.latitude, venue.place.longitude
+                        )
+                        or distance_meters(anchor, venue) > 1000
+                    ):
                         continue
-                    candidate = Candidate(name=venue.place.placeName, english_name=venue.place.placeEngName, meal='lunch', stay_minutes=45, cost=planned_cost)
-                    venue.place.placeId = ('places/' + _canonical_id(venue.place.placeId)) if _canonical_id(venue.place.placeId) else ''
-                    additions[(venue.place.placeId, candidate.meal)] = (candidate, venue)
+                    candidate = Candidate(
+                        name=venue.place.placeName,
+                        english_name=venue.place.placeEngName,
+                        meal="lunch",
+                        stay_minutes=45,
+                        cost=planned_cost,
+                    )
+                    venue.place.placeId = (
+                        ("places/" + _canonical_id(venue.place.placeId))
+                        if _canonical_id(venue.place.placeId)
+                        else ""
+                    )
+                    additions[(venue.place.placeId, candidate.meal)] = (
+                        candidate,
+                        venue,
+                    )
                 pools[index] = dict(list({**additions, **pools[index]}.items())[:30])
                 available = list(pools[index].values())
-            plans = _day_plans(available, day_date, max_stops, minimum_visits, recent_ids, state['rejected_plans'].get(index), recent_profiles=state.get('recent_profiles'))
-            discover_attractions = getattr(provider, 'discover_attractions', None)
-            if state.get('refilling') and index not in attraction_discovered_days and inspect.iscoroutinefunction(discover_attractions):
-                profile = state['request'].tasteProfile
-                preferred_categories = set().union(*(rule.categories for rule in RULES if profile and getattr(getattr(profile, rule.section), rule.field) >= 4))
-                anchors = [item for item in available if _core_visit(item) and tourism_category_supported(item[1].place.category)]
-                anchors.sort(key=lambda item: item[1].place.category not in preferred_categories)
+            plans = _day_plans(
+                available,
+                day_date,
+                max_stops,
+                minimum_visits,
+                recent_ids,
+                state["rejected_plans"].get(index),
+                recent_profiles=state.get("recent_profiles"),
+            )
+            discover_attractions = getattr(self.provider, "discover_attractions", None)
+            if (
+                state.get("refilling")
+                and index not in attraction_discovered_days
+                and inspect.iscoroutinefunction(discover_attractions)
+            ):
+                profile = state["request"].tasteProfile
+                preferred_categories = set().union(
+                    *(
+                        rule.categories
+                        for rule in RULES
+                        if profile
+                        and getattr(getattr(profile, rule.section), rule.field) >= 4
+                    )
+                )
+                anchors = [
+                    item
+                    for item in available
+                    if _core_visit(item)
+                    and tourism_category_supported(item[1].place.category)
+                ]
+                anchors.sort(
+                    key=lambda item: item[1].place.category not in preferred_categories
+                )
                 if anchors:
                     anchor_candidate, anchor = anchors[0]
-                    attraction_discovered_days.add(index)
                     try:
-                        attractions = await discover_attractions(state['destination'], anchor)
+                        attractions = await discover_attractions(
+                            state["destination"], anchor
+                        )
+                        attraction_discovered_days.add(index)
                     except MapsProviderError as error:
-                        if error.kind in {'unauthorized', 'invalid'}:
+                        if error.kind in {"unauthorized", "invalid"}:
                             raise
+                        if not error.transient:
+                            attraction_discovered_days.add(index)
                         attractions = []
-                    existing_ids = {_canonical_id(venue.place.placeId) for _, venue in available} | {_canonical_id(value) for value in reserved_ids}
+                    existing_ids = {
+                        _canonical_id(venue.place.placeId) for _, venue in available
+                    } | {_canonical_id(value) for value in reserved_ids}
                     additions = {}
                     for venue in attractions[:5]:
                         if not isinstance(venue, VerifiedPlace):
                             continue
                         place = venue.place
                         identifier = _canonical_id(place.placeId)
-                        if not identifier or identifier in existing_ids or not tourism_category_supported(place.category) or not place.address or not all(math.isfinite(value) for value in (place.latitude, place.longitude)) or not state['destination'].contains(place.latitude, place.longitude) or _distance(anchor, venue) > 2000:
+                        if (
+                            not identifier
+                            or identifier in existing_ids
+                            or not tourism_category_supported(place.category)
+                            or not place.address
+                            or not all(
+                                math.isfinite(value)
+                                for value in (place.latitude, place.longitude)
+                            )
+                            or not state["destination"].contains(
+                                place.latitude, place.longitude
+                            )
+                            or distance_meters(anchor, venue) > 2000
+                        ):
                             continue
-                        if preferred_categories & {item[1].place.category for item in anchors} and place.category not in preferred_categories:
+                        if (
+                            preferred_categories
+                            & {item[1].place.category for item in anchors}
+                            and place.category not in preferred_categories
+                        ):
                             continue
-                        place.placeId = 'places/' + identifier
-                        pace = profile.travelPaceDensity if profile else 'balanced'
-                        duration = anchor_candidate.stay_minutes if place.category == anchor.place.category or pace in {'slow_stay', 'long_stay'} else {'museum': 60, 'art_gallery': 60, 'park': 45, 'garden': 45}.get(place.category, anchor_candidate.stay_minutes)
-                        candidate = Candidate(name=place.placeName, english_name=place.placeEngName, category=place.category, stay_minutes=duration, cost=anchor_candidate.cost, planned_area=anchor_candidate.planned_area, experiences=anchor_candidate.experiences)
+                        place.placeId = "places/" + identifier
+                        pace = profile.travelPaceDensity if profile else "balanced"
+                        duration = (
+                            anchor_candidate.stay_minutes
+                            if place.category == anchor.place.category
+                            or pace in {"slow_stay", "long_stay"}
+                            else {
+                                "museum": 60,
+                                "art_gallery": 60,
+                                "park": 45,
+                                "garden": 45,
+                            }.get(place.category, anchor_candidate.stay_minutes)
+                        )
+                        candidate = Candidate(
+                            name=place.placeName,
+                            english_name=place.placeEngName,
+                            category=place.category,
+                            stay_minutes=duration,
+                            cost=anchor_candidate.cost,
+                            planned_area=anchor_candidate.planned_area,
+                            experiences=anchor_candidate.experiences,
+                        )
                         cache[key(candidate)] = venue
-                        additions[(place.placeId, 'none')] = (candidate, venue)
+                        additions[(place.placeId, "none")] = (candidate, venue)
                         existing_ids.add(identifier)
-                    pools[index] = dict(list({**additions, **pools[index]}.items())[:30])
+                    pools[index] = dict(
+                        list({**additions, **pools[index]}.items())[:30]
+                    )
                     available = list(pools[index].values())
-                    plans = _day_plans(available, day_date, max_stops, minimum_visits, recent_ids, state['rejected_plans'].get(index), recent_profiles=state.get('recent_profiles'))
-            if state.get('refilling'):
+                    plans = _day_plans(
+                        available,
+                        day_date,
+                        max_stops,
+                        minimum_visits,
+                        recent_ids,
+                        state["rejected_plans"].get(index),
+                        recent_profiles=state.get("recent_profiles"),
+                    )
+            if state.get("refilling"):
                 # Compare different real attraction subsets as well as ordering:
                 # the four nearest optimistic orders may share one unusable venue.
-                for _, excluded in [item for item in available if _core_visit(item)][:5]:
-                    alternatives = [item for item in available if item[1].place.placeId != excluded.place.placeId]
-                    for plan in _day_plans(alternatives, day_date, max_stops, 3, recent_ids, state['rejected_plans'].get(index), plan_limit=1, recent_profiles=state.get('recent_profiles')):
-                        if _plan_signature(plan) not in {_plan_signature(value) for value in plans}:
+                for _, excluded in [item for item in available if _core_visit(item)][
+                    :5
+                ]:
+                    alternatives = [
+                        item
+                        for item in available
+                        if item[1].place.placeId != excluded.place.placeId
+                    ]
+                    for plan in _day_plans(
+                        alternatives,
+                        day_date,
+                        max_stops,
+                        3,
+                        recent_ids,
+                        state["rejected_plans"].get(index),
+                        plan_limit=1,
+                        recent_profiles=state.get("recent_profiles"),
+                    ):
+                        if _plan_signature(plan) not in {
+                            _plan_signature(value) for value in plans
+                        }:
                             plans.append(plan)
-                shorter = _shorter_visits(available, state['request'])
-                for plan in _day_plans(shorter, day_date, 5, 3, recent_ids, state['rejected_plans'].get(index), recent_profiles=state.get('recent_profiles')):
-                    if _plan_signature(plan) not in {_plan_signature(value) for value in plans}:
+                shorter = _shorter_visits(available, state["request"])
+                for plan in _day_plans(
+                    shorter,
+                    day_date,
+                    5,
+                    3,
+                    recent_ids,
+                    state["rejected_plans"].get(index),
+                    recent_profiles=state.get("recent_profiles"),
+                ):
+                    if _plan_signature(plan) not in {
+                        _plan_signature(value) for value in plans
+                    }:
                         plans.append(plan)
                 plans = plans[:12]
             if not plans:
                 # This is an internal safety snapshot, never a completed result
                 # until independent fullness supplementation is exhausted.
                 for core_count in (2, 1):
-                    plans = _day_plans(available, day_date, max_stops, core_count, recent_ids, state['rejected_plans'].get(index), recent_profiles=state.get('recent_profiles'))
+                    plans = _day_plans(
+                        available,
+                        day_date,
+                        max_stops,
+                        core_count,
+                        recent_ids,
+                        state["rejected_plans"].get(index),
+                        recent_profiles=state.get("recent_profiles"),
+                    )
                     if plans:
                         break
             all_plans.append(plans)
             if not plans:
-                failures.append(f'{index + 1}일차 {day_date}: 점심·저녁과 명소 {minimum_visits}곳의 영업/식사 시간 조합 부족. 확인된 후보: {", ".join(candidate.name for candidate, _ in available)}. 일시 조회 실패(재조회 가능): {", ".join(name for name in rejected if name in temporary_names)}. 이름/위치 검증 미충족: {", ".join(name for name in rejected if name not in temporary_names)}. 다른 공식 장소명과 식사 대안을 제안하세요.')
-        return {'day_plans': all_plans, 'failures': failures, 'feedback': '', 'place_cache': cache, 'candidate_pools': pools, 'discovered_days': discovered_days, 'attraction_discovered_days': attraction_discovered_days}
+                failures.append(
+                    f"{index + 1}일차 {day_date}: 점심·저녁과 명소 {minimum_visits}곳의 영업/식사 시간 조합 부족. 확인된 후보: {', '.join(candidate.name for candidate, _ in available)}. 일시 조회 실패(재조회 가능): {', '.join(name for name in rejected if name in temporary_names)}. 이름/위치 검증 미충족: {', '.join(name for name in rejected if name not in temporary_names)}. 다른 공식 장소명과 식사 대안을 제안하세요."
+                )
+        return {
+            "day_plans": all_plans,
+            "failures": failures,
+            "feedback": "",
+            "place_cache": cache,
+            "candidate_pools": pools,
+            "discovered_days": discovered_days,
+            "attraction_discovered_days": attraction_discovered_days,
+        }
 
-    async def verify_routes(state: CourseState) -> dict:
-        _progress('실제 이동 시간으로 일정을 확인하고, 맞지 않으면 검증된 대안을 비교하고 있습니다.')
-        validated = dict(state['validated_days'])
-        cache = state['route_cache']
-        failures = list(state['failures'])
-        rejected_plans = {index: set(signatures) for index, signatures in state['rejected_plans'].items()}
-        used = {_canonical_id(venue.place.placeId) for value in validated.values() for _, venue in value['selected']}
+    async def verify_routes(self, state: CourseState) -> dict:
+        """Check real travel and visit windows; retain feasible complete snapshots."""
+        _progress(
+            "실제 이동 시간으로 일정을 확인하고, 맞지 않으면 검증된 대안을 비교하고 있습니다."
+        )
+        validated = dict(state["validated_days"])
+        cache = state["route_cache"]
+        failures = list(state["failures"])
+        rejected_plans = {
+            index: set(signatures)
+            for index, signatures in state["rejected_plans"].items()
+        }
+        used = {
+            _canonical_id(venue.place.placeId)
+            for value in validated.values()
+            for _, venue in value["selected"]
+        }
         # Share one failed lookup within this validation pass only. A fresh draft
         # can retry a transient edge; failures never enter the successful cache.
         pass_failures: dict[tuple, MapsProviderError] = {}
-        def route_key(left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None, mode: str | None = None) -> tuple:
-            mode = mode or ('transit' if state['destination'].country_code == 'KR' or _distance(left, right) > 1500 else 'walking')
-            return (left.place.placeId, right.place.placeId, mode, departure.isoformat() if departure and mode == 'transit' else None)
 
-        async def actual_route(left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None, mode: str) -> TransportToNextSchema:
+        def route_key(
+            left: VerifiedPlace,
+            right: VerifiedPlace,
+            departure: datetime | None,
+            mode: str | None = None,
+        ) -> tuple:
+            mode = mode or (
+                "transit"
+                if state["destination"].country_code == "KR"
+                or distance_meters(left, right) > 1500
+                else "walking"
+            )
+            return (
+                left.place.placeId,
+                right.place.placeId,
+                mode,
+                departure.isoformat() if departure and mode == "transit" else None,
+            )
+
+        async def actual_route(
+            left: VerifiedPlace,
+            right: VerifiedPlace,
+            departure: datetime | None,
+            mode: str,
+        ) -> TransportToNextSchema:
             """Share successful and failed actual mode lookups within their bounds."""
             key = route_key(left, right, departure, mode)
             if key in cache:
@@ -836,7 +1543,12 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             if key in pass_failures:
                 raise pass_failures[key]
             try:
-                route = await provider.route(left, right, mode=mode, departure_time=departure if mode == 'transit' else None)
+                route = await self.provider.route(
+                    left,
+                    right,
+                    mode=mode,
+                    departure_time=departure if mode == "transit" else None,
+                )
             except MapsProviderError as error:
                 pass_failures[key] = error
                 raise
@@ -844,7 +1556,9 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                 cache[key] = route
             return route
 
-        async def lookup(left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None) -> TransportToNextSchema:
+        async def lookup(
+            left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None
+        ) -> TransportToNextSchema:
             key = route_key(left, right, departure)
             mode = key[2]
             if key in cache:
@@ -852,29 +1566,32 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
             try:
                 return await actual_route(left, right, departure, mode)
             except MapsProviderError as error:
-                if error.kind not in {'no_route', 'route_data', 'transient'}:
+                if error.kind not in {"no_route", "route_data", "transient"}:
                     raise
                 alternative = None
-                if mode == 'transit' and _distance(left, right) <= 3000:
-                    alternative = 'walking'
-                elif mode == 'walking' and error.kind in {'no_route', 'route_data'}:
-                    alternative = 'transit'
+                if mode == "transit" and distance_meters(left, right) <= 3000:
+                    alternative = "walking"
+                elif mode == "walking" and error.kind in {"no_route", "route_data"}:
+                    alternative = "transit"
                 if alternative:
                     try:
                         # A valid but overlong route must remain a failed plan;
                         # its successful response cannot become a short estimate.
                         return await actual_route(left, right, departure, alternative)
                     except MapsProviderError as alternative_error:
-                        if alternative_error.kind not in {'no_route', 'route_data', 'transient'}:
-                            raise
-                        if _distance(left, right) > 1000:
+                        if alternative_error.kind not in {
+                            "no_route",
+                            "route_data",
+                            "transient",
+                        }:
                             raise
                 raise
 
-
         async def verify_one(item: tuple[int, list[Visit]]) -> tuple:
             index, selected = item
-            day_date = date.fromisoformat(state['request'].tripCondition.startDate) + timedelta(days=index)
+            day_date = date.fromisoformat(
+                state["request"].tripCondition.startDate
+            ) + timedelta(days=index)
             routes = []
             current = 540
             temporary_failure = False
@@ -882,31 +1599,62 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                 for left, right in pairwise(selected):
                     candidate, venue = left
                     opening, latest = MEAL_WINDOWS[candidate.meal]
-                    arrival = _opening_start(venue.periods, day_date, max(current, opening), candidate.stay_minutes, latest)
+                    arrival = _opening_start(
+                        venue.periods,
+                        day_date,
+                        max(current, opening),
+                        candidate.stay_minutes,
+                        latest,
+                    )
                     if arrival is None:
-                        raise CourseGenerationError(f'{candidate.name}: 영업/식사 시간 안에 방문할 수 없습니다.')
+                        raise CourseGenerationError(
+                            f"{candidate.name}: 영업/식사 시간 안에 방문할 수 없습니다."
+                        )
                     departure = None
-                    if state['destination'].country_code == 'KR':
-                        departure = datetime.combine(day_date, time(), tzinfo=ZoneInfo('Asia/Seoul')) + timedelta(minutes=arrival + candidate.stay_minutes)
+                    if state["destination"].country_code == "KR":
+                        departure = datetime.combine(
+                            day_date, time(), tzinfo=ZoneInfo("Asia/Seoul")
+                        ) + timedelta(minutes=arrival + candidate.stay_minutes)
                     route = await lookup(venue, right[1], departure)
                     if not valid_route(route):
-                        raise CourseGenerationError(f'{candidate.name} → {right[0].name}: 경로 정보가 불완전하거나 이동 시간이 90분을 초과합니다.')
+                        raise CourseGenerationError(
+                            f"{candidate.name} → {right[0].name}: 경로 정보가 불완전하거나 이동 시간이 90분을 초과합니다."
+                        )
                     routes.append(route)
                     current = arrival + candidate.stay_minutes + route.minutes + 10
-                day = _schedule_day(selected, routes, day_date, index + 1, compact=any(_visit_shortage(selected)))
+                day = _schedule_day(
+                    selected,
+                    routes,
+                    day_date,
+                    index + 1,
+                    compact=any(_visit_shortage(selected)),
+                )
             except MapsProviderError as error:
-                if error.kind in {'unauthorized', 'invalid'}:
+                if error.kind in {"unauthorized", "invalid"}:
                     raise
                 temporary_failure = error.transient
-                last_error = ('일시적인 경로 조회 장애' if temporary_failure else '경로 미확인') + f': {left[0].name} → {right[0].name}. 서로 가까운 다른 장소가 필요합니다.'
+                last_error = (
+                    ("일시적인 경로 조회 장애" if temporary_failure else "경로 미확인")
+                    + f": {left[0].name} → {right[0].name}. 서로 가까운 다른 장소가 필요합니다."
+                )
             except (CourseGenerationError, ValueError) as error:
                 last_error = str(error)
             else:
-                return {'selected': selected, 'routes': routes, 'day': day, 'compact': any(_visit_shortage(selected))}, '', False
+                return {"selected": selected, "routes": routes, "day": day}, "", False
             return None, last_error, temporary_failure
 
-        plan_limit = 16 if state.get('repairing') else 12 if state.get('refilling') else MAX_DAY_PLANS
-        remaining = {index: list(plans[:plan_limit]) for index, plans in enumerate(state['day_plans']) if index not in validated and plans}
+        plan_limit = (
+            16
+            if state.get("repairing")
+            else 12
+            if state.get("refilling")
+            else MAX_DAY_PLANS
+        )
+        remaining = {
+            index: list(plans[:plan_limit])
+            for index, plans in enumerate(state["day_plans"])
+            if index not in validated and plans
+        }
         last_errors: dict[int, str] = {}
         while remaining:
             assignments = _choose_disjoint_plans(remaining, used)
@@ -919,185 +1667,634 @@ def build_course_graph(provider: VerifiedMapsProvider, history: CourseHistory) -
                 record, error, temporary = outcome
                 if record is not None:
                     validated[index] = record
-                    used.update(_canonical_id(venue.place.placeId) for _, venue in selected)
+                    used.update(
+                        _canonical_id(venue.place.placeId) for _, venue in selected
+                    )
                     remaining.pop(index, None)
                 else:
                     last_errors[index] = error
                     remaining[index].remove(selected)
                     if not temporary:
-                        rejected_plans.setdefault(index, set()).add(_plan_signature(selected))
+                        rejected_plans.setdefault(index, set()).add(
+                            _plan_signature(selected)
+                        )
                     if not remaining[index]:
                         remaining.pop(index)
-        for index in range(len(state['day_plans'])):
-            if index not in validated and state['day_plans'][index]:
-                failures.append(f'{index + 1}일차: ' + last_errors.get(index, '다른 일차와 겹치지 않는 실제 장소 조합이 부족합니다.'))
+        for index in range(len(state["day_plans"])):
+            if index not in validated and state["day_plans"][index]:
+                failures.append(
+                    f"{index + 1}일차: "
+                    + last_errors.get(
+                        index, "다른 일차와 겹치지 않는 실제 장소 조합이 부족합니다."
+                    )
+                )
         if failures:
-            if state.get('verified_fallback') and not needs_fullness(state) and not state.get('refilling'):
-                return {'route_cache': cache, 'restore_fallback': True, 'feedback': ''}
-            preserved = '; '.join(f'{index + 1}일차 유지: {", ".join(candidate.name for candidate, _ in value["selected"])}' for index, value in sorted(validated.items()))
-            return {'validated_days': validated, 'route_cache': cache, 'rejected_plans': rejected_plans, 'feedback': ' / '.join(failures) + ' / ' + preserved}
-        selected = [validated[index]['selected'] for index in range(len(state['day_plans']))]
-        routes = [validated[index]['routes'] for index in range(len(state['day_plans']))]
+            if (
+                state.get("verified_fallback")
+                and not self._needs_fullness(state)
+                and not state.get("refilling")
+            ):
+                return {"route_cache": cache, "restore_fallback": True, "feedback": ""}
+            preserved = "; ".join(
+                f"{index + 1}일차 유지: {', '.join(candidate.name for candidate, _ in value['selected'])}"
+                for index, value in sorted(validated.items())
+            )
+            return {
+                "validated_days": validated,
+                "route_cache": cache,
+                "rejected_plans": rejected_plans,
+                "feedback": " / ".join(failures) + " / " + preserved,
+            }
+        selected = [
+            validated[index]["selected"] for index in range(len(state["day_plans"]))
+        ]
+        routes = [
+            validated[index]["routes"] for index in range(len(state["day_plans"]))
+        ]
         metadata = _selection_metadata(selected)
-        scores = overlap_scores({venue.place.placeId for day in selected for _, venue in day}, metadata['attraction_ids'], state.get('recent_profiles', []))
-        area_overlap = planning_overlap(metadata['areas'], state.get('recent_profiles', []), 'areas')
+        scores = overlap_scores(
+            {venue.place.placeId for day in selected for _, venue in day},
+            metadata["attraction_ids"],
+            state.get("recent_profiles", []),
+        )
+        area_overlap = planning_overlap(
+            metadata["areas"], state.get("recent_profiles", []), "areas"
+        )
         repeated = max(scores.values()) > MAX_OVERLAP or area_overlap > MAX_OVERLAP
         shortages = [_visit_shortage(day) for day in selected]
-        rank = (sum(value[0] for value in shortages), sum(value[1] for value in shortages), max(scores.values()), area_overlap)
-        snapshot = copy.deepcopy({'draft_data': state['draft_data'], 'validated_days': validated, 'selected': selected, 'routes': routes, 'diversity_scores': {**scores, 'planned_area_overlap': area_overlap}, 'repeated': repeated, 'rank': rank})
-        previous = state.get('verified_fallback')
-        if previous and previous['rank'] <= rank:
+        rank = (
+            sum(value[0] for value in shortages),
+            sum(value[1] for value in shortages),
+            max(scores.values()),
+            area_overlap,
+        )
+        snapshot = copy.deepcopy(
+            {
+                "draft_data": state["draft_data"],
+                "validated_days": validated,
+                "selected": selected,
+                "routes": routes,
+                "diversity_scores": {**scores, "planned_area_overlap": area_overlap},
+                "repeated": repeated,
+                "rank": rank,
+            }
+        )
+        previous = state.get("verified_fallback")
+        if previous and previous["rank"] <= rank:
             snapshot = previous
-        logger.info('Course diversity: place_overlap=%.2f attraction_overlap=%.2f planned_area_overlap=%.2f attempt=%d', scores['place_overlap'], scores['attraction_overlap'], area_overlap, state['attempt'])
-        updates = {'validated_days': validated, 'route_cache': cache, 'selected': selected, 'routes': routes, 'repeated': repeated, 'feedback': '', 'verified_fallback': snapshot, 'diversity_scores': {**scores, 'planned_area_overlap': area_overlap}}
+        logger.info(
+            "Course diversity: place_overlap=%.2f attraction_overlap=%.2f planned_area_overlap=%.2f attempt=%d",
+            scores["place_overlap"],
+            scores["attraction_overlap"],
+            area_overlap,
+            state["attempt"],
+        )
+        updates = {
+            "validated_days": validated,
+            "route_cache": cache,
+            "selected": selected,
+            "routes": routes,
+            "repeated": repeated,
+            "feedback": "",
+            "verified_fallback": snapshot,
+            "diversity_scores": {**scores, "planned_area_overlap": area_overlap},
+        }
         underfull = any(any(value) for value in shortages)
-        if underfull and not state.get('repairing') and (state['attempt'] < _max_drafts(state) or can_refill(state)) and (state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1. >= MIN_DAILY_DRAFT_BUDGET_SECONDS):
-            retained = {index: value for index, value in validated.items() if not any(_visit_shortage(value['selected']))}
-            missing = '; '.join(f'{index + 1}일차: 총 장소 {count}곳, 관광·체험 명소 {core}곳 부족. 검증된 가까운 후보 유지: ' + ', '.join(candidate.name for candidate, _ in validated[index]['selected']) for index, (count, core) in enumerate(shortages) if count or core)
-            updates.update({'validated_days': retained, 'feedback': missing + '. 부족한 관광·체험 슬롯을 가까운 실제 명소로 보충하고 성공한 일차는 유지하세요.'})
-        elif underfull and not state.get('repairing'):
-            if state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1. < MIN_DAILY_DRAFT_BUDGET_SECONDS:
-                updates['restore_fallback'] = True
+        if (
+            underfull
+            and not state.get("repairing")
+            and (state["attempt"] < _max_drafts(state) or self._can_refill(state))
+            and (
+                state.get("deadline", float("inf"))
+                - asyncio.get_running_loop().time()
+                - 1.0
+                >= MIN_DAILY_DRAFT_BUDGET_SECONDS
+            )
+        ):
+            retained = {
+                index: value
+                for index, value in validated.items()
+                if not any(_visit_shortage(value["selected"]))
+            }
+            missing = "; ".join(
+                f"{index + 1}일차: 총 장소 {count}곳, 관광·체험 명소 {core}곳 부족. 검증된 가까운 후보 유지: "
+                + ", ".join(
+                    candidate.name for candidate, _ in validated[index]["selected"]
+                )
+                for index, (count, core) in enumerate(shortages)
+                if count or core
+            )
+            updates.update(
+                {
+                    "validated_days": retained,
+                    "feedback": missing
+                    + ". 부족한 관광·체험 슬롯을 가까운 실제 명소로 보충하고 성공한 일차는 유지하세요.",
+                }
+            )
+        elif underfull and not state.get("repairing"):
+            if (
+                state.get("deadline", float("inf"))
+                - asyncio.get_running_loop().time()
+                - 1.0
+                < MIN_DAILY_DRAFT_BUDGET_SECONDS
+            ):
+                updates["restore_fallback"] = True
             else:
-                retained = {index: value for index, value in validated.items() if not any(_visit_shortage(value['selected']))}
-                updates.update({'validated_days': retained, 'feedback': '부족한 일차의 기존 후보로 최소 5곳의 실제 이동과 체류 시간을 마지막으로 비교합니다.'})
-        elif underfull and previous and previous['rank'] <= rank:
-            updates['restore_fallback'] = True
-        elif repeated and not state.get('refilling') and state['attempt'] < _max_drafts(state) and optional_budget(state) > .1:
-            updates.update({'validated_days': {}, 'feedback': '최근 코스의 명소 또는 계획 권역이 반복됩니다. 취향을 유지하고 다른 권역의 실제 장소를 제안하세요. 이미 확인한 후보: ' + ', '.join(candidate.name for value in validated.values() for candidate, _ in value['selected'])})
-        elif repeated and not state.get('refilling') and previous and previous['rank'] <= rank:
-            updates['restore_fallback'] = True
+                retained = {
+                    index: value
+                    for index, value in validated.items()
+                    if not any(_visit_shortage(value["selected"]))
+                }
+                updates.update(
+                    {
+                        "validated_days": retained,
+                        "feedback": "부족한 일차의 기존 후보로 최소 5곳의 실제 이동과 체류 시간을 마지막으로 비교합니다.",
+                    }
+                )
+        elif underfull and previous and previous["rank"] <= rank:
+            updates["restore_fallback"] = True
+        elif (
+            repeated
+            and not state.get("refilling")
+            and state["attempt"] < _max_drafts(state)
+            and self._optional_budget(state) > 0.1
+        ):
+            updates.update(
+                {
+                    "validated_days": {},
+                    "feedback": "최근 코스의 명소 또는 계획 권역이 반복됩니다. 취향을 유지하고 다른 권역의 실제 장소를 제안하세요. 이미 확인한 후보: "
+                    + ", ".join(
+                        candidate.name
+                        for value in validated.values()
+                        for candidate, _ in value["selected"]
+                    ),
+                }
+            )
+        elif (
+            repeated
+            and not state.get("refilling")
+            and previous
+            and previous["rank"] <= rank
+        ):
+            updates["restore_fallback"] = True
         return updates
 
-    async def restore(state: CourseState) -> dict:
-        """Restore a complete feasible snapshot, including its own draft metadata."""
-        _progress('확인된 장소와 이동 경로를 유지하여 일정을 마무리하고 있습니다.')
-        logger.info('Course diversity fallback: retained verified itinerary')
-        snapshot = state['verified_fallback']
-        return {**{key: copy.deepcopy(value) for key, value in snapshot.items() if key != 'rank'}, 'feedback': '', 'restore_fallback': False, 'attempt': _max_drafts(state)}
+    async def schedule(self, state: CourseState) -> dict:
+        """Confirm final consistency and reuse the already validated day schedules."""
+        _progress("검증을 마친 일자별 일정과 방문 팁을 최종 확인하고 있습니다.")
+        expected = state["request"].tripCondition.totalDays
+        ids = [
+            _canonical_id(venue.place.placeId)
+            for selected in state["selected"]
+            for _, venue in selected
+        ]
+        if (
+            len(state["selected"]) != expected
+            or len(state["routes"]) != expected
+            or not all(ids)
+            or len(ids) != len(set(ids))
+        ):
+            raise CourseGenerationError(
+                "전체 날짜의 장소 중복 또는 일정 누락을 확인했습니다."
+            )
+        start_date = date.fromisoformat(state["request"].tripCondition.startDate)
+        days = []
+        for index, (selected, routes) in enumerate(
+            zip(state["selected"], state["routes"])
+        ):
+            if len(routes) != len(selected) - 1 or any(
+                not valid_route(route) for route in routes
+            ):
+                raise CourseGenerationError(
+                    "실제로 확인되지 않은 이동 경로가 있습니다."
+                )
+            record = state["validated_days"].get(index, {})
+            day = record.get("day")
+            if (
+                not isinstance(day, DayItinerarySchema)
+                or record.get("selected") != selected
+                or record.get("routes") != routes
+                or day.day != index + 1
+                or day.date != (start_date + timedelta(days=index)).isoformat()
+                or [stop.place.placeId for stop in day.stops]
+                != [venue.place.placeId for _, venue in selected]
+            ):
+                raise CourseGenerationError(
+                    "검증된 일정과 최종 장소·경로가 일치하지 않습니다."
+                )
+            # Real routes, opening/meal windows and full stays were checked by
+            # verify_one. Copy that accepted day instead of formatting it twice.
+            days.append(day.model_copy(deep=True))
+        return {"days": days, "feedback": ""}
 
-    async def schedule(state: CourseState) -> dict:
-        _progress('검증을 마친 일자별 일정과 방문 팁을 최종 확인하고 있습니다.')
-        expected = state['request'].tripCondition.totalDays
-        ids = [_canonical_id(venue.place.placeId) for selected in state['selected'] for _, venue in selected]
-        if len(state['selected']) != expected or len(state['routes']) != expected or not all(ids) or len(ids) != len(set(ids)):
-            raise CourseGenerationError('전체 날짜의 장소 중복 또는 일정 누락을 확인했습니다.')
-        for selected, routes in zip(state['selected'], state['routes']):
-            if len(routes) != len(selected) - 1 or any(not valid_route(route) for route in routes):
-                raise CourseGenerationError('실제로 확인되지 않은 이동 경로가 있습니다.')
-        start_date = date.fromisoformat(state['request'].tripCondition.startDate)
-        days = [_schedule_day(selected, state['routes'][index], start_date + timedelta(days=index), index + 1, compact=bool(state['validated_days'][index].get('compact'))) for index, selected in enumerate(state['selected'])]
-        return {'days': days, 'feedback': ''}
-
-    async def finalize(state: CourseState) -> dict:
-        _progress('확정한 일정의 추천 이유를 작성하고 최근 코스의 중복 여부를 확인하고 있습니다.')
-        request = state['request']
+    async def finalize(self, state: CourseState) -> dict:
+        """Compose grounded course copy and atomically record recent history."""
+        _progress(
+            "확정한 일정의 추천 이유를 작성하고 최근 코스의 중복 여부를 확인하고 있습니다."
+        )
+        request = state["request"]
         trip = request.tripCondition
-        course = CourseSchema(title=f'{trip.destinationCity} {trip.totalDays}일 여행', destinationCountry=trip.destinationCountry, destinationCity=trip.destinationCity, startDate=trip.startDate, totalDays=trip.totalDays, tags=verified_course_tags(state['days']), recommendationReason=apply_personalized_reasons(request, state['days']), itinerary=ItinerarySchema(days=state['days']))
-        ids = {stop.place.placeId for day in course.itinerary.days for stop in day.stops}
-        unavailable = state.get('history_unavailable', False)
+        course = CourseSchema(
+            title=f"{trip.destinationCity} {trip.totalDays}일 여행",
+            destinationCountry=trip.destinationCountry,
+            destinationCity=trip.destinationCity,
+            startDate=trip.startDate,
+            totalDays=trip.totalDays,
+            tags=verified_course_tags(state["days"]),
+            recommendationReason=apply_personalized_reasons(request, state["days"]),
+            itinerary=ItinerarySchema(days=state["days"]),
+        )
+        ids = {
+            stop.place.placeId for day in course.itinerary.days for stop in day.stops
+        }
+        unavailable = state.get("history_unavailable", False)
         novel = False
         try:
-            budget = min(2., optional_budget(state))
-            if budget <= .1:
-                raise TimeoutError('History storage skipped to preserve completion margin')
+            budget = min(2.0, self._optional_budget(state))
+            if budget <= 0.1:
+                raise TimeoutError(
+                    "History storage skipped to preserve completion margin"
+                )
             async with asyncio.timeout(budget):
-                record = history.record_if_novel
+                record = self.history.record_if_novel
                 parameters = inspect.signature(record).parameters
-                supports_metadata = 'metadata' in parameters or any(value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values())
-                kwargs = {'metadata': _selection_metadata(state['selected']), 'max_overlap': None if state.get('repeated') else MAX_OVERLAP} if supports_metadata else {}
+                supports_metadata = "metadata" in parameters or any(
+                    value.kind == inspect.Parameter.VAR_KEYWORD
+                    for value in parameters.values()
+                )
+                kwargs = (
+                    {
+                        "metadata": _selection_metadata(state["selected"]),
+                        "max_overlap": None if state.get("repeated") else MAX_OVERLAP,
+                    }
+                    if supports_metadata
+                    else {}
+                )
                 novel = await record(history_key(request), ids, **kwargs)
-                if not novel and state['attempt'] < _max_drafts(state) and optional_budget(state) > .1:
-                    recent, profiles = await read_history(request)
-                    return {'validated_days': {}, 'feedback': '동시에 생성된 최근 코스와 유사합니다. 취향과 검증된 후보를 유지하며 다른 권역·명소를 제안하세요.', 'recent': recent, 'recent_profiles': profiles}
-                if not novel and supports_metadata and not state.get('repeated'):
+                if (
+                    not novel
+                    and state["attempt"] < _max_drafts(state)
+                    and self._optional_budget(state) > 0.1
+                ):
+                    recent, profiles = await self._read_history(request)
+                    return {
+                        "validated_days": {},
+                        "feedback": "동시에 생성된 최근 코스와 유사합니다. 취향과 검증된 후보를 유지하며 다른 권역·명소를 제안하세요.",
+                        "recent": recent,
+                        "recent_profiles": profiles,
+                    }
+                if not novel and supports_metadata and not state.get("repeated"):
                     # Explicit soft acceptance after bounded concurrency retries.
-                    novel = await record(history_key(request), ids, metadata=_selection_metadata(state['selected']))
-                    state = {**state, 'repeated': True}
-        except (OSError, sqlite3.Error, TimeoutError):
-            logger.warning('Course history write unavailable')
+                    novel = await record(
+                        history_key(request),
+                        ids,
+                        metadata=_selection_metadata(state["selected"]),
+                    )
+                    state = {**state, "repeated": True}
+        except OSError, sqlite3.Error, TimeoutError:
+            logger.warning("Course history write unavailable")
             unavailable = True
         if unavailable:
-            course.recommendationReason += ' 생성 이력 확인·저장이 일시적으로 제한되어 최근 코스와 겹칠 수 있어요.'
-        elif not novel or state.get('repeated'):
-            course.recommendationReason += ' 확인 가능한 장소와 일정 조건이 제한되어 이전 코스와 일부 방문 장소 또는 계획 권역이 겹칠 수 있어요.'
-        return {'course': course, 'feedback': ''}
+            course.recommendationReason += (
+                " 생성 이력 확인·저장이 일시적으로 제한되어 최근 코스와 겹칠 수 있어요."
+            )
+        elif not novel or state.get("repeated"):
+            course.recommendationReason += " 확인 가능한 장소와 일정 조건이 제한되어 이전 코스와 일부 방문 장소 또는 계획 권역이 겹칠 수 있어요."
+        return {"course": course, "feedback": ""}
 
-
-    async def enrich_images(state: CourseState) -> dict:
+    async def enrich_images(self, state: CourseState) -> dict:
         """Use only residual optional time for final-place photos and attribution."""
-        _progress('확정한 장소의 실제 사진과 대표 이미지를 준비하고 있습니다.')
+        _progress("확정한 장소의 실제 사진과 대표 이미지를 준비하고 있습니다.")
         budget = 5.0
-        if 'deadline' in state:
-            budget = min(budget, state['deadline'] - asyncio.get_running_loop().time() - 1)
-        course = await enrich_course_images(state['course'], provider, timeout_seconds=max(0, budget))
-        return {'course': course}
+        if "deadline" in state:
+            budget = min(
+                budget, state["deadline"] - asyncio.get_running_loop().time() - 1
+            )
+        try:
+            course = await enrich_course_images(
+                state["course"], self.provider, timeout_seconds=max(0, budget)
+            )
+        except Exception:  # noqa: BLE001 - optional images cannot invalidate a verified course
+            logger.warning("Optional course image enrichment unavailable")
+            course = state["course"]
+        return {"course": course}
 
-    async def repair(state: CourseState) -> dict:
+    # Recovery with verified candidates and snapshots.
+
+    async def refill(self, state: CourseState) -> dict:
+        """Supplement only unfinished dates with an independent bounded budget.
+
+        Successful dates and verified candidate/route caches remain unchanged.
+        Temporary model failures still reach Maps supplementation and local
+        recombination, rather than restoring a short snapshot immediately.
+        """
+        _progress("장소가 부족한 일차에 가까운 명소를 보충하고 있습니다.")
+        saved = {
+            index: value
+            for index, value in state["validated_days"].items()
+            if not any(_visit_shortage(value["selected"]))
+        }
+        existing = (
+            dict(state.get("partial_drafts", {})) if not state.get("draft_data") else {}
+        )
+        existing.update(
+            {
+                index: DraftDay(
+                    candidates=[candidate for candidate, _ in value["selected"]]
+                )
+                for index, value in saved.items()
+            }
+        )
+        pending = [
+            index
+            for index in range(state["request"].tripCondition.totalDays)
+            if index not in existing
+        ]
+        feedback = (
+            state.get("feedback", "")
+            + "\n최소 5곳과 관광·체험 3곳을 채우는 보충입니다. 기존 취향을 유지하고 아래 확인된 명소 주변의 가까운 공식 장소를 우선하세요. slow_stay/long_stay의 긴 체류와 테마파크·하이킹 같은 긴 활동은 유지하세요. 그 밖의 일정에서 꼭 필요한 경우에만 박물관·미술관 60분, 근거리 공원·정원 45분, 식사 45분을 계획 대안으로 제안하세요.\n"
+        )
+        for index in pending:
+            values = list(state["candidate_pools"].get(index, {}).values())
+            feedback += (
+                f"{index + 1}일차 확인된 후보 유지: "
+                + ", ".join(
+                    f"{candidate.name}({venue.place.category}, {candidate.meal})"
+                    for candidate, venue in values
+                )
+                + "\n"
+            )
+        updates = {
+            "refill_attempt": state.get("refill_attempt", 0) + 1,
+            "refilling": True,
+            "repairing": False,
+            "validated_days": saved,
+            "restore_fallback": False,
+            "feedback": "",
+        }
+        try:
+            deadline = state["deadline"] - 10.0 if "deadline" in state else None
+            result = await draft_candidates(
+                state["request"],
+                sorted(set().union(*state["recent"])) if state["recent"] else [],
+                self._history_feedback(state) + "\n" + feedback,
+                pending_days=pending,
+                existing_days=existing,
+                deadline=deadline,
+            )
+        except PartialDraftError as error:
+            if state.get("draft_data"):
+                result = state["draft_data"].model_copy(deep=True)
+                for index, day in error.days.items():
+                    result.days[index] = day
+            else:
+                updates["partial_drafts"] = error.days
+                updates["feedback"] = "부족한 일차의 후보 응답을 다시 확인합니다."
+                return updates
+        except Exception as error:
+            if not _recoverable_draft(error):
+                raise
+            if not state.get("draft_data"):
+                updates["feedback"] = "부족한 일차의 후보 응답을 다시 확인합니다."
+                return updates
+            result = state["draft_data"].model_copy(deep=True)
+        if len(result.days) != state["request"].tripCondition.totalDays:
+            if not state.get("draft_data"):
+                updates["feedback"] = (
+                    "요청한 여행 일수와 후보 개수가 일치하지 않습니다."
+                )
+                return updates
+            result = state["draft_data"].model_copy(deep=True)
+        else:
+            result = result.model_copy(deep=True)
+        for index, value in existing.items():
+            result.days[index] = value
+        updates.update({"draft_data": result, "partial_drafts": {}})
+        return updates
+
+    async def repair(self, state: CourseState) -> dict:
         """Use retained real venues for one final bounded, less dense schedule."""
-        _progress('확인한 장소로 이동과 식사에 여유가 있는 대안 일정을 구성하고 있습니다.')
-        saved = {index: value for index, value in state['validated_days'].items() if not any(_visit_shortage(value['selected']))}
-        reserved = {venue.place.placeId for value in saved.values() for _, venue in value['selected']}
-        recent_ids = set().union(*state['recent']) if state['recent'] else set()
-        start = date.fromisoformat(state['request'].tripCondition.startDate)
+        _progress(
+            "확인한 장소로 이동과 식사에 여유가 있는 대안 일정을 구성하고 있습니다."
+        )
+        saved = {
+            index: value
+            for index, value in state["validated_days"].items()
+            if not any(_visit_shortage(value["selected"]))
+        }
+        reserved = {
+            venue.place.placeId
+            for value in saved.values()
+            for _, venue in value["selected"]
+        }
+        recent_ids = set().union(*state["recent"]) if state["recent"] else set()
+        start = date.fromisoformat(state["request"].tripCondition.startDate)
         plans, failures = [], []
-        for index in range(state['request'].tripCondition.totalDays):
+        for index in range(state["request"].tripCondition.totalDays):
             if index in saved:
-                plans.append([saved[index]['selected']])
+                plans.append([saved[index]["selected"]])
                 continue
-            available = [item for item in state['candidate_pools'].get(index, {}).values() if item[1].place.placeId not in reserved]
-            alternatives = _day_plans(available, start + timedelta(days=index), 5, 3, recent_ids, state['rejected_plans'].get(index), plan_limit=4, compact=True, recent_profiles=state.get('recent_profiles'))
-            shorter = _shorter_visits(available, state['request'])
-            alternatives.extend(_day_plans(shorter, start + timedelta(days=index), 5, 3, recent_ids, state['rejected_plans'].get(index), plan_limit=4, compact=True, recent_profiles=state.get('recent_profiles')))
+            available = [
+                item
+                for item in state["candidate_pools"].get(index, {}).values()
+                if item[1].place.placeId not in reserved
+            ]
+            alternatives = _day_plans(
+                available,
+                start + timedelta(days=index),
+                5,
+                3,
+                recent_ids,
+                state["rejected_plans"].get(index),
+                plan_limit=4,
+                compact=True,
+                recent_profiles=state.get("recent_profiles"),
+            )
+            shorter = _shorter_visits(available, state["request"])
+            alternatives.extend(
+                _day_plans(
+                    shorter,
+                    start + timedelta(days=index),
+                    5,
+                    3,
+                    recent_ids,
+                    state["rejected_plans"].get(index),
+                    plan_limit=4,
+                    compact=True,
+                    recent_profiles=state.get("recent_profiles"),
+                )
+            )
             for stop_count, core_count in ((4, 2), (3, 1)):
-                alternatives.extend(_day_plans(available, start + timedelta(days=index), stop_count, core_count, recent_ids, state['rejected_plans'].get(index), plan_limit=4, compact=True, recent_profiles=state.get('recent_profiles')))
-            alternatives = list({_plan_signature(plan): plan for plan in alternatives}.values())
+                alternatives.extend(
+                    _day_plans(
+                        available,
+                        start + timedelta(days=index),
+                        stop_count,
+                        core_count,
+                        recent_ids,
+                        state["rejected_plans"].get(index),
+                        plan_limit=4,
+                        compact=True,
+                        recent_profiles=state.get("recent_profiles"),
+                    )
+                )
+            alternatives = list(
+                {_plan_signature(plan): plan for plan in alternatives}.values()
+            )
             plans.append(alternatives)
             if not alternatives:
-                failures.append(f'{index + 1}일차: 점심·저녁과 명소를 포함한 검증 가능한 대안이 없습니다.')
-        return {'validated_days': saved, 'day_plans': plans, 'failures': failures, 'feedback': '', 'repairing': True}
+                failures.append(
+                    f"{index + 1}일차: 점심·저녁과 명소를 포함한 검증 가능한 대안이 없습니다."
+                )
+        return {
+            "validated_days": saved,
+            "day_plans": plans,
+            "failures": failures,
+            "feedback": "",
+            "repairing": True,
+        }
 
-    def next_node(success: str) -> Callable[[CourseState], Awaitable[str]]:
+    async def restore(self, state: CourseState) -> dict:
+        """Restore a complete feasible snapshot, including its own draft metadata."""
+        _progress("확인된 장소와 이동 경로를 유지하여 일정을 마무리하고 있습니다.")
+        logger.info("Course diversity fallback: retained verified itinerary")
+        snapshot = state["verified_fallback"]
+        return {
+            **{
+                key: copy.deepcopy(value)
+                for key, value in snapshot.items()
+                if key != "rank"
+            },
+            "feedback": "",
+            "restore_fallback": False,
+            "attempt": _max_drafts(state),
+        }
+
+    # Shared history, time budgets and conditional routing.
+
+    async def _read_history(
+        self, request: CourseRequestSchema
+    ) -> tuple[list[set[str]], list[dict]]:
+        # One transaction supplies both views of the same recent history.
+        key = history_key(request)
+        read_profiles = getattr(self.history, "recent_profiles", None)
+        if inspect.iscoroutinefunction(read_profiles):
+            profiles = await read_profiles(key)
+            if isinstance(profiles, list):
+                return [set(item["place_ids"]) for item in profiles], profiles
+        recent = await self.history.recent(key)
+        return recent, [{"place_ids": sorted(ids)} for ids in recent]
+
+    def _history_feedback(self, state: CourseState) -> str:
+        profiles = state.get("recent_profiles", [])
+        areas = sorted({value for item in profiles for value in item.get("areas", [])})
+        experiences = sorted(
+            {value for item in profiles for value in item.get("experiences", [])}
+        )
+        return (
+            (
+                "최근 계획 권역: "
+                + ", ".join(areas[:30])
+                + ". 최근 경험 구성: "
+                + ", ".join(experiences)
+                + ". "
+                "사용자의 높은 취향을 유지하며 최근 계획과 다른 권역을 우선하세요. 권역은 하루 안에서 가까운 장소로 묶으세요. 낮은 취향을 다양성 때문에 강제하지 마세요. "
+                "각 후보에 모델 계획 planned_area와 experiences를 작성하세요. 권역 이름만 바꿔 동일 장소를 다시 제안하지 마세요."
+            )
+            if profiles
+            else ""
+        )
+
+    def _optional_budget(self, state: CourseState) -> float:
+        remaining = (
+            state.get("deadline", float("inf"))
+            - asyncio.get_running_loop().time()
+            - 1.0
+        )
+        return min(25.0, max(0.0, remaining))
+
+    def _needs_fullness(self, state: CourseState) -> bool:
+        """Distinguish required missing visits from optional history diversity."""
+        snapshot = state.get("verified_fallback", {})
+        return bool(snapshot and any(snapshot["rank"][:2]))
+
+    def _can_refill(self, state: CourseState) -> bool:
+        remaining = (
+            state.get("deadline", float("inf"))
+            - asyncio.get_running_loop().time()
+            - 1.0
+        )
+        return (
+            state.get("refill_attempt", 0) < MAX_FULLNESS_REFILLS
+            and remaining >= MIN_DAILY_DRAFT_BUDGET_SECONDS
+        )
+
+    async def _run_with_fallback(self, node: CourseNode, state: CourseState) -> dict:
+        """Bound novelty-only work while preserving time for safe completion."""
+        if not state.get("verified_fallback"):
+            return await node(state)
+        compulsory = self._needs_fullness(state) or state.get("refilling")
+        budget = (
+            max(
+                0.0,
+                state.get("deadline", float("inf"))
+                - asyncio.get_running_loop().time()
+                - 1.0,
+            )
+            if compulsory
+            else self._optional_budget(state)
+        )
+        if budget <= 0.1:
+            return {"restore_fallback": True, "feedback": ""}
+        try:
+            async with asyncio.timeout(None if math.isinf(budget) else budget):
+                return await node(state)
+        except TimeoutError:
+            logger.info(
+                "Course verified fallback: %s validation timeout",
+                "required" if compulsory else "optional",
+            )
+            return {"restore_fallback": True, "feedback": ""}
+
+    def bounded(self, node: CourseNode) -> CourseNode:
+        """Apply the existing fallback budget to candidate and verification nodes."""
+
+        async def run(state: CourseState) -> dict:
+            return await self._run_with_fallback(node, state)
+
+        return run
+
+    def route_after(self, success: str) -> CourseRouter:
         async def decide(state: CourseState) -> str:
-            if state.get('restore_fallback'):
-                return 'restore'
-            if not state.get('feedback'):
+            if state.get("restore_fallback"):
+                return "restore"
+            if not state.get("feedback"):
                 return success
-            if state['attempt'] >= _max_drafts(state) or state.get('refilling'):
-                if not state.get('repairing') and can_refill(state) and (needs_fullness(state) or not state.get('verified_fallback')):
-                    return 'refill'
-                if needs_fullness(state) and not state.get('repairing'):
-                    return 'repair'
-                if state.get('verified_fallback'):
-                    return 'restore'
-                if not state.get('repairing') and state.get('draft_data'):
-                    return 'repair'
-                raise CourseGenerationError(state['feedback'])
-            return 'draft'
+            if state["attempt"] >= _max_drafts(state) or state.get("refilling"):
+                if (
+                    not state.get("repairing")
+                    and self._can_refill(state)
+                    and (
+                        self._needs_fullness(state)
+                        or not state.get("verified_fallback")
+                    )
+                ):
+                    return "refill"
+                if self._needs_fullness(state) and not state.get("repairing"):
+                    return "repair"
+                if state.get("verified_fallback"):
+                    return "restore"
+                if not state.get("repairing") and state.get("draft_data"):
+                    return "repair"
+                raise CourseGenerationError(state["feedback"])
+            return "draft"
+
         return decide
 
-    graph = StateGraph(CourseState)
-    for name, node in [('prepare', prepare), ('draft', draft), ('refill', refill), ('verify_places', verify_places), ('verify_routes', verify_routes), ('schedule', schedule), ('finalize', finalize), ('repair', repair), ('enrich_images', enrich_images)]:
-        if name in {'draft', 'refill', 'verify_places', 'verify_routes'}:
-            async def bounded(state: CourseState, operation: Callable = node) -> dict:
-                return await optional_node(operation, state)
-            graph.add_node(name, bounded)
-        else:
-            graph.add_node(name, node)
-    graph.add_node('restore', restore)
-    graph.add_edge('restore', 'schedule')
-    graph.add_edge(START, 'prepare')
-    graph.add_edge('prepare', 'draft')
-    graph.add_conditional_edges('draft', next_node('verify_places'), ['verify_places', 'draft', 'refill', 'repair', 'restore'])
-    graph.add_conditional_edges('refill', next_node('verify_places'), ['verify_places', 'draft', 'refill', 'repair', 'restore'])
-    graph.add_edge('repair', 'verify_routes')
-    for node, successor in [('verify_places', 'verify_routes'), ('verify_routes', 'schedule'), ('schedule', 'finalize'), ('finalize', 'enrich_images')]:
-        graph.add_conditional_edges(node, next_node(successor), [successor, 'draft', 'refill', 'repair', 'restore'])
-    graph.add_edge('enrich_images', END)
-    return graph.compile().with_config({'recursion_limit': 50})
 
-
-async def stream_course_generation(request: CourseRequestSchema, *, deadline: float | None = None) -> AsyncGenerator[tuple[str, dict]]:
+async def stream_course_generation(
+    request: CourseRequestSchema, *, deadline: float | None = None
+) -> AsyncGenerator[tuple[str, dict]]:
     """Stream existing progress/complete payloads while the graph actually executes.
 
     A request-wide timeout and generator closure cancel active graph work.
@@ -1106,23 +2303,38 @@ async def stream_course_generation(request: CourseRequestSchema, *, deadline: fl
     completed: dict | None = None
     provider = VerifiedMapsProvider(concurrency=settings.COURSE_MAPS_CONCURRENCY)
     now = asyncio.get_running_loop().time()
-    request_deadline = min(deadline if deadline is not None else float('inf'), now + settings.COURSE_TIMEOUT_SECONDS)
-    remaining = max(0., request_deadline - now)
+    request_deadline = min(
+        deadline if deadline is not None else float("inf"),
+        now + settings.COURSE_TIMEOUT_SECONDS,
+    )
+    remaining = max(0.0, request_deadline - now)
     # Leave up to one second for cancelled provider/graph work to close cleanly.
-    processing_deadline = request_deadline - min(1., remaining * .1)
+    processing_deadline = request_deadline - min(1.0, remaining * 0.1)
     try:
         async with asyncio.timeout_at(processing_deadline) as timeout:
             async with provider:
                 graph = build_course_graph(provider, CourseHistory())
-                async with aclosing(graph.astream({'request': request, 'attempt': 0, 'deadline': timeout.when()}, stream_mode=['custom', 'updates'])) as events:
+                async with aclosing(
+                    graph.astream(
+                        {"request": request, "attempt": 0, "deadline": timeout.when()},
+                        stream_mode=["custom", "updates"],
+                    )
+                ) as events:
                     async for mode, value in events:
-                        if mode == 'custom':
-                            yield 'progress', value
-                        elif 'enrich_images' in value and value['enrich_images'].get('course'):
-                            completed = {'course': value['enrich_images']['course'].model_dump()}
+                        if mode == "custom":
+                            yield "progress", value
+                        elif "enrich_images" in value and value["enrich_images"].get(
+                            "course"
+                        ):
+                            completed = {
+                                "course": value["enrich_images"]["course"].model_dump()
+                            }
     finally:
-        metrics = getattr(provider, 'metrics', None)
+        metrics = getattr(provider, "metrics", None)
         if isinstance(metrics, MapsCostMetrics):
-            logger.info('Maps request cost summary: %s', metrics.snapshot())
+            try:
+                logger.info("Maps request cost summary: %s", metrics.snapshot())
+            except Exception:  # noqa: BLE001 - diagnostic counters cannot discard a completed course
+                logger.warning("Maps request cost summary unavailable")
     if completed is not None:
-        yield 'complete', completed
+        yield "complete", completed

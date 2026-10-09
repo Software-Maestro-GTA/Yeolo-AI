@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.agent import course_graph
 from app.agent.course_graph import Candidate, CourseDraft, DraftDay
 from app.schemas.course import CourseRequestSchema, PlaceSchema, TransportToNextSchema
 
@@ -125,13 +126,13 @@ async def test_draft_cancellation_joins_all_started_daily_calls(mocker, trip_req
 async def test_daily_model_prompt_has_exact_assignment_and_whole_trip_context(mocker, trip_request):
     from langchain_core.runnables import RunnableLambda
 
-    from app.agent import course_graph
 
     captured = []
     def respond(prompt, **_kwargs):
         captured.append(prompt.to_string())
         return daily_draft(3)
     model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
+    model.return_value.client.aio.aclose = AsyncMock()
     model.return_value.with_structured_output.return_value = RunnableLambda(respond)
     result = await course_graph._draft_day_candidates(trip_request, ['places/avoid'], '다른 날과 장소를 겹치지 마세요', day_index=3, seed='shared-trip-seed')
     assert len(result.days) == 1 and len(captured) == 1

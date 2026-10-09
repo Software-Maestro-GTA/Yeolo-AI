@@ -487,3 +487,22 @@ async def test_partial_initial_day_proposals_are_retained_when_only_missing_day_
         assert call.kwargs['existing_days'][0].model_dump() == full.days[0].model_dump()
     assert provider.search.await_count == 10
     assert {stop.place.placeName for stop in course.itinerary.days[0].stops} == {candidate.name for candidate in full.days[0].candidates}
+
+
+@pytest.mark.asyncio
+async def test_transient_attraction_discovery_retries_on_next_refill_and_keeps_five(visit_dependencies):
+    """A temporary Maps outage must not permanently exhaust local supplementation."""
+    from app.agent.course_graph import build_course_graph
+    from app.agent.tools.verified_maps import MapsProviderError
+
+    request, provider, history, llm, places, make_draft = visit_dependencies
+    initial = make_draft(cores=2)
+    nearby = make_draft('recovered', cores=3).days[0].candidates[-1]
+    provider.discover_attractions.side_effect = [MapsProviderError('transient'), [places[nearby.name]]]
+    llm.return_value = initial
+    course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
+    assert len(course.itinerary.days[0].stops) == 5
+    assert len(core_ids(course.itinerary.days[0])) == 3
+    assert places[nearby.name].place.placeId in core_ids(course.itinerary.days[0])
+    assert provider.discover_attractions.await_count == 2
+    assert llm.await_count <= 4
