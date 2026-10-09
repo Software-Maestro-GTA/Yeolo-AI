@@ -1,4 +1,4 @@
-"""Keep short walking estimates bounded and distinct from provider verified routes."""
+"""Validate provider route metrics and reject unsupported route estimates."""
 
 import math
 
@@ -6,55 +6,47 @@ import pytest
 
 from app.agent.tools.verified_maps import VerifiedPlace
 from app.schemas.course import PlaceSchema, TransportToNextSchema
+from app.services.course_routing import distance_meters, valid_route
 
 
 def venue(identifier, latitude, longitude):
     return VerifiedPlace(PlaceSchema(placeId=identifier, placeName=identifier, category='museum', latitude=latitude, longitude=longitude))
 
 
-def test_estimate_has_null_route_distance_and_conservative_formula():
-    from app.services.course_routing import (
-        distance_meters,
-        estimated_walking,
-        is_estimated_walking,
-        valid_route,
-    )
-
+def test_distance_measures_proximity_without_generating_route_times():
     first, second = venue('a', 37.55, 126.98), venue('b', 37.554, 126.98)
-    result = estimated_walking(first, second)
-    assert result.minutes == math.ceil(distance_meters(first, second) / 1000 * 1.5 / 3 * 60 + 5)
-    assert result.type == 'walking' and result.distance is None and result.cost == 0
-    assert '[추정 도보]' in result.memo
-    assert second.place.placeName in result.memo
-    assert f'{result.minutes}분' in result.memo
-    assert '거리' in result.memo and ('예상' in result.memo or '추정' in result.memo)
-    assert '보행 경로' in result.memo and any(word in result.memo for word in ['미제공', '포함되지', '제공하지'])
-    assert not any(formula in result.memo for formula in ['우회 계수', '3km/h', '여유 5분'])
-    assert is_estimated_walking(result)
-    assert not valid_route(result)
-    assert set(result.model_dump()) == set(TransportToNextSchema.model_fields)
+    assert 440 < distance_meters(first, second) < 450
+    assert distance_meters(first, second) == pytest.approx(distance_meters(second, first))
+    assert distance_meters(first, first) == 0
 
 
-@pytest.mark.parametrize(('latitude', 'longitude'), [(37.56, 126.98), (math.nan, 126.98), (37.55, math.inf), (100, 126.98)])
-def test_estimate_rejects_distant_and_invalid_coordinates(latitude, longitude):
-    from app.services.course_routing import estimated_walking
-
+@pytest.mark.parametrize(('latitude', 'longitude'), [(math.nan, 126.98), (37.55, math.inf), (100, 126.98), (37.55, 181)])
+def test_proximity_rejects_invalid_coordinates(latitude, longitude):
     with pytest.raises(ValueError):
-        estimated_walking(venue('a', 37.55, 126.98), venue('b', latitude, longitude))
+        distance_meters(venue('a', 37.55, 126.98), venue('b', latitude, longitude))
 
 
-@pytest.mark.parametrize('alteration', [{'minutes': 1}, {'type': 'transit'}, {'distance': 100}, {'memo': 'confirmed walking'}])
-def test_estimate_marker_cannot_bypass_formula_or_provenance(alteration):
-    from app.services.course_routing import estimated_walking, valid_route
-
-    first, second = venue('a', 37.55, 126.98), venue('b', 37.554, 126.98)
-    route = estimated_walking(first, second).model_copy(update=alteration)
+@pytest.mark.parametrize(('mode', 'distance', 'memo'), [
+    ('walking', None, '[추정 도보] 임의 시간 안내'),
+    ('walking', 100, '[추정 도보] 임의 시간 안내'),
+    ('transit', 100, '[추정 도보] 임의 시간 안내'),
+    ('walking', None, 'confirmed walking'),
+])
+def test_unknown_or_estimated_route_is_never_accepted(mode, distance, memo):
+    route = TransportToNextSchema(type=mode, distance=distance, minutes=5, cost=0, memo=memo)
     assert not valid_route(route)
 
 
 @pytest.mark.parametrize('minutes', [91, 0, None])
 def test_known_route_metrics_still_enforce_duration_cap(minutes):
-    from app.services.course_routing import valid_route
-
     route = TransportToNextSchema(type='transit', distance=5000, minutes=minutes)
     assert not valid_route(route)
+
+
+@pytest.mark.parametrize('distance', [None, 0, -1, math.nan, math.inf])
+def test_provider_route_requires_positive_finite_distance(distance):
+    assert not valid_route(TransportToNextSchema(type='walking', distance=distance, minutes=10))
+
+
+def test_valid_provider_metrics_are_retained():
+    assert valid_route(TransportToNextSchema(type='transit', distance=500, minutes=10))
