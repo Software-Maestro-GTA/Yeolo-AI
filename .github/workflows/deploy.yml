@@ -20,7 +20,13 @@ env:
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+    permissions:
+      contents: read
+
   build-and-push:
+    needs: validate
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
     # EKS 노드가 Graviton(arm64, t4g)이므로 arm64 네이티브 러너에서 빌드한다.
     # amd64 러너로 빌드하면 노드에서 'exec format error' 로 CrashLoopBackOff.
