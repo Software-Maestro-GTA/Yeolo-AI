@@ -53,7 +53,7 @@ async def test_long_draft_splits_days_with_bounded_parallelism_and_preserves_ord
             active -= 1
 
     boundary = mocker.patch('app.agent.course_drafting._draft_day_candidates', side_effect=generate)
-    mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
+    mocker.patch('app.agent.course_drafting.ChatOpenAI', side_effect=AssertionError('Only the daily boundary may call the model'))
     result = await draft_candidates(trip_request, ['places/recent'])
     assert boundary.call_count == total_days
     assert 2 <= peak <= 6
@@ -64,7 +64,8 @@ async def test_long_draft_splits_days_with_bounded_parallelism_and_preserves_ord
 
 @pytest.mark.asyncio
 async def test_one_day_504_retries_only_that_day_and_keeps_successful_results(mocker, trip_request):
-    from google.genai.errors import APIError
+    import httpx
+    from openai import APIStatusError
 
     from app.agent.course_drafting import draft_candidates
 
@@ -72,11 +73,11 @@ async def test_one_day_504_retries_only_that_day_and_keeps_successful_results(mo
     async def generate(request, recent_ids, feedback='', *, day_index, **kwargs):
         calls[day_index] += 1
         if day_index == 2 and calls[day_index] == 1:
-            raise APIError(504, {'error': {'message': 'Deadline exceeded', 'status': 'DEADLINE_EXCEEDED'}})
+            raise APIStatusError('Deadline exceeded', response=httpx.Response(504, request=httpx.Request('POST', 'https://gateway.abto.app/v1/chat/completions')), body=None)
         await asyncio.sleep(.001)
         return daily_draft(day_index)
     mocker.patch('app.agent.course_drafting._draft_day_candidates', side_effect=generate)
-    mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
+    mocker.patch('app.agent.course_drafting.ChatOpenAI', side_effect=AssertionError('Only the daily boundary may call the model'))
     result = await draft_candidates(trip_request, [])
     assert calls == Counter({0: 1, 1: 1, 2: 2, 3: 1, 4: 1})
     assert len(result.days) == 5
@@ -108,7 +109,7 @@ async def test_draft_cancellation_joins_all_started_daily_calls(mocker, trip_req
         finally:
             closed.add(day_index)
     mocker.patch('app.agent.course_drafting._draft_day_candidates', side_effect=generate)
-    mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
+    mocker.patch('app.agent.course_drafting.ChatOpenAI', side_effect=AssertionError('Only the daily boundary may call the model'))
     task = asyncio.create_task(draft_candidates(trip_request, []))
     try:
         await asyncio.wait_for(started.wait(), .5)
@@ -131,8 +132,7 @@ async def test_daily_model_prompt_has_exact_assignment_and_whole_trip_context(mo
     def respond(prompt, **_kwargs):
         captured.append(prompt.to_string())
         return daily_draft(3)
-    model = mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI')
-    model.return_value.client.aio.aclose = AsyncMock()
+    model = mocker.patch('app.agent.course_drafting.ChatOpenAI')
     model.return_value.with_structured_output.return_value = RunnableLambda(respond)
     result = await course_drafting._draft_day_candidates(trip_request, ['places/avoid'], '다른 날과 장소를 겹치지 마세요', day_index=3, seed='shared-trip-seed')
     assert len(result.days) == 1 and len(captured) == 1
@@ -141,7 +141,7 @@ async def test_daily_model_prompt_has_exact_assignment_and_whole_trip_context(mo
     assert '도쿄' in prompt and 'places/avoid' in prompt and 'shared-trip-seed' in prompt
     assert 'totalDays' in prompt and '5' in prompt
     assert model.call_args.kwargs['max_retries'] == 0
-    assert model.call_args.kwargs['thinking_level'] == 'low'
+    assert model.call_args.kwargs['reasoning_effort'] == 'low'
 
 
 @pytest.mark.asyncio

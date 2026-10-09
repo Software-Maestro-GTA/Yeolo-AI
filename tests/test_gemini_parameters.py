@@ -1,201 +1,213 @@
-"""Check Gemini generation parameters on serialized, offline HTTP requests."""
+"""Verify Gemini-through-ABTO requests using real LangChain and offline transports."""
 
 import asyncio
 import json
-import warnings
+from uuid import UUID
 
 import httpx
 import pytest
-from google import genai
-from google.genai import errors, types
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.exceptions import OutputParserException
+from langchain_core.runnables import RunnableLambda
+from openai import APIStatusError
 
-from app.agent import course_drafting, course_graph, taste_profile_chains
+from app.agent import course_drafting, taste_profile_chains
+from app.core.config import settings
+from app.core.llm import get_abto
 from app.schemas.course import CourseRequestSchema
 from app.schemas.taste_profile import TasteProfileAnalysisOutput
+
+USER_ID = UUID('550e8400-e29b-41d4-a716-446655440000')
+FEATURES = {'taste': 'taste.profile.analysis', 'candidates': 'course.candidates.generate'}
+
+
+def output_for(operation):
+    if operation == 'candidates':
+        return {'title': '서울 여행', 'reason': '문화 탐방', 'days': [
+            {'candidates': [{'name': '국립중앙박물관'}, {'name': '서울숲'}]},
+        ]}
+    output = {
+        name: dict.fromkeys(TasteProfileAnalysisOutput.model_fields[name].annotation.model_fields, 3)
+        for name in ('travelPurpose', 'preferredLocationType', 'activityPreference', 'foodPreference')
+    }
+    output.update(travelPaceDensity='balanced', spendingTendency='moderate',
+                  companionType='solo', seasonalEnvironmentPreference=['warm_region'])
+    return output
+
+
+def completion(output):
+    return httpx.Response(200, headers={'x-abto-request-id': 'offline-request'}, json={
+        'id': 'chatcmpl-offline', 'object': 'chat.completion', 'created': 0,
+        'model': 'gemini-3.8-flash',
+        'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': json.dumps(output)}, 'finish_reason': 'stop'}],
+        'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15},
+    })
+
+
+async def invoke(operation, user_id=USER_ID):
+    if operation == 'taste':
+        return await taste_profile_chains.generate_taste_profile('{}', user_id=user_id)
+    request = CourseRequestSchema.model_validate({
+        'userId': str(user_id), 'mbti': 'INTJ',
+        'tripCondition': {'destinationCountry': '대한민국', 'destinationCity': '서울',
+                          'startDate': '2026-10-17', 'totalDays': 1, 'budgetType': 'moderate'},
+    })
+    return await course_drafting._draft_day_candidates(request, [], day_index=0, seed='offline')
+
+
+@pytest.fixture
+def offline_wire(mocker):
+    """Keep SDK-owned clients and auth injection real; replace only network I/O."""
+    clients = []
+    abto = get_abto()
+    for method in ('openai_options', 'async_openai_options'):
+        original = getattr(abto, method)
+        def record(*args, _original=original, **kwargs):
+            options = _original(*args, **kwargs)
+            clients.append(options['http_client'])
+            return options
+        mocker.patch.object(abto, method, side_effect=record)
+
+    def install(respond):
+        mocker.patch('httpx._client.HTTPTransport', side_effect=lambda **kwargs: httpx.MockTransport(
+            lambda request: pytest.fail('Async model invocation must not perform sync I/O'),
+        ))
+        mocker.patch('httpx._client.AsyncHTTPTransport', side_effect=lambda **kwargs: httpx.MockTransport(respond))
+        return clients
+    return install
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('operation', ['taste', 'candidates'])
-async def test_gemini_requests_omit_deprecated_generation_parameters(
-    operation, mocker,
-):
-    """Exercise real LangChain/GenAI serialization without sending network traffic."""
-    if operation == 'taste':
-        output = {
-            name: dict.fromkeys(TasteProfileAnalysisOutput.model_fields[name].annotation.model_fields, 3)
-            for name in ('travelPurpose', 'preferredLocationType', 'activityPreference', 'foodPreference')
-        }
-        output.update(
-            travelPaceDensity='balanced', spendingTendency='moderate',
-            companionType='solo', seasonalEnvironmentPreference=['warm_region'],
-        )
-    else:
-        output = {'title': '서울 여행', 'reason': '문화 탐방', 'days': [
-            {'candidates': [{'name': '국립중앙박물관'}, {'name': '서울숲'}]},
-        ]}
-
+async def test_gemini_gateway_request_preserves_schema_parameters_and_identity(operation, offline_wire, mocker):
     requests = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(json.loads(request.content))
-        return httpx.Response(200, json={
-            'candidates': [{
-                'content': {'role': 'model', 'parts': [{'text': json.dumps(output)}]},
-                'finishReason': 'STOP',
-            }],
-        })
-
-    transport = httpx.MockTransport(respond)
-    close_transport = mocker.spy(transport, 'aclose')
-    provider = genai.Client(
-        api_key='offline-gemini-key', vertexai=False,
-        http_options=types.HttpOptions(async_client_args={'transport': transport}),
-    )
-    close_async = mocker.spy(provider.aio, 'aclose')
-    close_sync = mocker.spy(provider, 'close')
-    mocker.patch('langchain_google_genai.chat_models.Client', return_value=provider)
-    mocker.patch.object(course_graph.settings, 'GEMINI_MODEL_NAME', 'gemini-3.8-flash')
-    mocker.patch.object(course_graph.settings, 'GEMINI_API_KEY', 'offline-gemini-key')
-    try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            if operation == 'taste':
-                result = await taste_profile_chains.generate_taste_profile('{}')
-                assert result.seasonalEnvironmentPreference == ['warm_region']
-            else:
-                request = CourseRequestSchema.model_validate({
-                    'userId': '550e8400-e29b-41d4-a716-446655440000', 'mbti': 'INTJ',
-                    'tripCondition': {
-                        'destinationCountry': '대한민국', 'destinationCity': '서울',
-                        'startDate': '2026-10-17', 'totalDays': 1, 'budgetType': 'moderate',
-                    },
-                })
-                result = await course_drafting._draft_day_candidates(request, [], day_index=0, seed='offline')
-                assert len(result.days) == 1
-            close_async.assert_awaited_once()
-            # LangChain's destructor also closes the sync client. The
-            # awaited async close and closed transport establish cleanup.
-            close_sync.assert_called()
-            close_transport.assert_awaited()
-    finally:
-        await provider.aio.aclose()
-        provider.close()
-
+    mocker.patch.object(settings, 'GEMINI_MODEL_NAME', 'gemini-3.8-flash')
+    def respond(request):
+        requests.append(request)
+        return completion(output_for(operation))
+    clients = offline_wire(respond)
+    result = await invoke(operation)
+    assert result.model_dump() == (TasteProfileAnalysisOutput.model_validate(output_for(operation)).model_dump()
+                                   if operation == 'taste' else course_drafting.CourseDraft.model_validate(output_for(operation)).model_dump())
     assert len(requests) == 1
-    config = requests[0]['generationConfig']
-    config_keys = {key.replace('_', '').lower() for key in config}
-    assert not {'temperature', 'topp', 'topk', 'candidatecount'} & config_keys
-    thinking = config.get('thinkingConfig', {})
-    thinking = {key.replace('_', '').lower(): value for key, value in thinking.items()}
-    assert 'thinkingbudget' not in thinking
-    assert not any('sampling' in str(warning.message) for warning in caught)
-    assert config['responseMimeType'] == 'application/json'
-    assert config.get('responseJsonSchema') or config.get('responseSchema')
-    if operation == 'taste':
-        assert 'thinkinglevel' not in thinking
+    request = requests[0]
+    assert str(request.url) == 'https://gateway.abto.app/v1/chat/completions'
+    assert request.headers['authorization'] == 'Bearer ck-abto-offline'
+    assert request.headers['x-abto-key-gemini'] == 'offline-gemini-key'
+    assert 'x-abto-key-openai' not in request.headers
+    assert request.headers['x-abto-device-id'] == str(USER_ID)
+    assert request.headers['x-abto-feature-id'] == FEATURES[operation]
+    assert request.extensions['timeout']['read'] == 60.
+    body = json.loads(request.content)
+    assert body['model'] == 'gemini-3.8-flash'
+    assert body['stream'] is False
+    assert body['response_format']['type'] == 'json_schema'
+    assert body['response_format']['json_schema']['schema']['properties']
+    assert not {'temperature', 'top_p', 'top_k', 'candidate_count', 'generation_config', 'thinking_budget',
+                'parallel_tool_calls', 'tools', 'stream_options', 'metadata', 'store'} & body.keys()
+    allowed = {'model', 'messages', 'stream', 'response_format', 'max_completion_tokens', 'reasoning_effort'}
+    assert set(body) <= allowed
+    if operation == 'candidates':
+        assert body['reasoning_effort'] == 'low'
+        assert body['max_completion_tokens'] == 5000
     else:
-        assert thinking['thinkinglevel'] == 'LOW'
-        assert config['maxOutputTokens'] == 5000
+        assert 'reasoning_effort' not in body
+        assert 'max_completion_tokens' not in body
+    assert get_abto().get_headers() == {}
+    assert len(clients) == 2 and all(client.is_closed for client in clients)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['taste', 'candidates'])
 @pytest.mark.parametrize('outcome', ['failure', 'cancellation'])
-async def test_taste_client_has_one_attempt_and_closes_on_failure_or_cancellation(mocker, outcome):
+async def test_gateway_failure_has_no_direct_fallback_and_closes_clients(operation, outcome, offline_wire):
     entered = asyncio.Event()
     requests = []
-
     async def respond(request):
         requests.append(request)
         entered.set()
         if outcome == 'cancellation':
             await asyncio.Event().wait()
-        return httpx.Response(503, json={'error': {'code': 503, 'message': 'offline provider failure'}})
-
-    transport = httpx.MockTransport(respond)
-    close_transport = mocker.spy(transport, 'aclose')
-    provider = genai.Client(
-        api_key='offline-key', vertexai=False,
-        http_options=types.HttpOptions(async_client_args={'transport': transport}),
-    )
-    close_provider = mocker.spy(provider, 'close')
-    close_async_provider = mocker.spy(provider.aio, 'aclose')
-    try:
-        mocker.patch('langchain_google_genai.chat_models.Client', return_value=provider)
-        mocker.patch.object(course_graph.settings, 'GEMINI_API_KEY', 'offline-key')
-        mocker.patch.object(course_graph.settings, 'TASTE_ANALYSIS_TIMEOUT_SECONDS', 60.)
-        task = asyncio.create_task(taste_profile_chains.generate_taste_profile('{}'))
-        await asyncio.wait_for(entered.wait(), timeout=2)
-        if outcome == 'cancellation':
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            with pytest.raises(errors.ServerError):
-                await asyncio.wait_for(task, timeout=2)
-        assert len(requests) == 1
-        assert requests[0].extensions['timeout']['read'] == 60.
-        close_async_provider.assert_awaited_once()
-        close_transport.assert_awaited()
-        close_provider.assert_called_once()
-    finally:
-        await provider.aio.aclose()
-        provider.close()
+        return httpx.Response(503, headers={'x-abto-error-source': 'gateway'}, json={
+            'error': {'message': 'offline gateway failure', 'type': 'server_error'},
+        })
+    clients = offline_wire(respond)
+    task = asyncio.create_task(invoke(operation))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    if outcome == 'cancellation':
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(APIStatusError) as raised:
+            await asyncio.wait_for(task, timeout=2)
+        assert raised.value.status_code == 503
+        # Application error logs use the message; raw HTTP headers are not logged.
+        assert 'ck-abto-offline' not in str(raised.value)
+        assert 'offline-gemini-key' not in str(raised.value)
+    assert len(requests) == 1
+    assert len(clients) == 2 and all(client.is_closed for client in clients)
+    assert get_abto().get_headers() == {}
 
 
 @pytest.mark.asyncio
-async def test_taste_model_is_not_created_without_credentials(mocker):
-    mocker.patch.object(course_graph.settings, 'GEMINI_API_KEY', '')
-    constructor = mocker.patch.object(taste_profile_chains, 'ChatGoogleGenerativeAI')
+async def test_invalid_daily_output_closes_clients(offline_wire):
+    clients = offline_wire(lambda _: completion({'title': '후보', 'reason': '', 'days': []}))
+    with pytest.raises(OutputParserException, match='assigned day'):
+        await invoke('candidates')
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('key', ['GEMINI_API_KEY', 'ABTO_CALLING_KEY'])
+@pytest.mark.parametrize('operation', ['taste', 'candidates'])
+async def test_missing_credentials_create_no_model(operation, key, mocker):
+    mocker.patch.object(settings, key, '')
+    module = taste_profile_chains if operation == 'taste' else course_drafting
+    constructor = mocker.patch.object(module, 'ChatOpenAI')
     with pytest.raises(ValueError, match='credentials'):
-        await taste_profile_chains.generate_taste_profile('{}')
+        await invoke(operation)
     constructor.assert_not_called()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('outcome', ['provider_failure', 'invalid_days', 'cancellation'])
-async def test_daily_course_client_closes_on_failure_and_cancellation(mocker, outcome):
-    """Execute the SDK transport, retaining errors and closing both client faces."""
-    from langchain_core.exceptions import OutputParserException
-
-    entered = asyncio.Event()
+async def test_parallel_features_keep_user_context_isolated(offline_wire):
     requests = []
+    ready = asyncio.Event()
     async def respond(request):
         requests.append(request)
-        entered.set()
-        if outcome == 'cancellation':
-            await asyncio.Event().wait()
-        if outcome == 'provider_failure':
-            return httpx.Response(503, json={'error': {'code': 503, 'message': 'offline failure'}})
-        return httpx.Response(200, json={
-            'candidates': [{'content': {'role': 'model', 'parts': [{'text': json.dumps({'title': '후보', 'reason': '', 'days': []})}]}, 'finishReason': 'STOP'}],
-        })
-    transport = httpx.MockTransport(respond)
-    provider = genai.Client(api_key='offline-key', vertexai=False, http_options=types.HttpOptions(async_client_args={'transport': transport}))
-    close_async = mocker.spy(provider.aio, 'aclose')
-    close_sync = mocker.spy(provider, 'close')
-    close_transport = mocker.spy(transport, 'aclose')
-    request = CourseRequestSchema.model_validate({
-        'userId': '550e8400-e29b-41d4-a716-446655440000', 'mbti': 'INTJ',
-        'tripCondition': {'destinationCountry': '일본', 'destinationCity': '도쿄', 'startDate': '2026-10-17', 'totalDays': 1, 'budgetType': 'moderate'},
-    })
-    try:
-        mocker.patch('langchain_google_genai.chat_models.Client', return_value=provider)
-        mocker.patch.object(course_graph.settings, 'GEMINI_API_KEY', 'offline-key')
-        task = asyncio.create_task(course_drafting._draft_day_candidates(request, [], day_index=0, seed='offline'))
-        await asyncio.wait_for(entered.wait(), 2)
-        if outcome == 'cancellation':
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            expected = errors.ServerError if outcome == 'provider_failure' else OutputParserException
-            with pytest.raises(expected):
-                await asyncio.wait_for(task, 2)
-        assert len(requests) == 1
-        assert requests[0].extensions['timeout']['read'] == 60.
-        close_async.assert_awaited_once()
-        close_sync.assert_called_once()
-        close_transport.assert_awaited()
-    finally:
-        await provider.aio.aclose()
-        provider.close()
+        if len(requests) == 2:
+            ready.set()
+        await ready.wait()
+        kind = 'taste' if request.headers['x-abto-feature-id'] == FEATURES['taste'] else 'candidates'
+        return completion(output_for(kind))
+    clients = offline_wire(respond)
+    second_id = UUID('660e8400-e29b-41d4-a716-446655440001')
+    await asyncio.wait_for(asyncio.gather(invoke('taste'), invoke('candidates', second_id)), timeout=3)
+    assert {(request.headers['x-abto-feature-id'], request.headers['x-abto-device-id']) for request in requests} == {
+        (FEATURES['taste'], str(USER_ID)), (FEATURES['candidates'], str(second_id)),
+    }
+    assert len(clients) == 4 and all(client.is_closed for client in clients)
+    assert get_abto().get_headers() == {}
+
+
+@pytest.mark.asyncio
+async def test_langchain_callbacks_keep_metadata_and_hide_keys(offline_wire):
+    starts, ends = [], []
+    class Capture(BaseCallbackHandler):
+        def on_chat_model_start(self, serialized, messages, **kwargs):
+            starts.append((serialized, messages, kwargs))
+        def on_llm_end(self, response, **kwargs):
+            ends.append(response)
+    offline_wire(lambda _: completion(output_for('taste')))
+    async def run(_):
+        return await invoke('taste')
+    await RunnableLambda(run).ainvoke(
+        {}, config={'callbacks': [Capture()], 'tags': ['existing-trace'], 'metadata': {'test_case': 'existing'}},
+    )
+    assert len(starts) == len(ends) == 1
+    assert 'existing-trace' in starts[0][2]['tags']
+    assert starts[0][2]['metadata']['test_case'] == 'existing'
+    serialized = json.dumps(starts[0][0], default=str)
+    assert 'ck-abto-offline' not in serialized and 'offline-gemini-key' not in serialized
+    assert ends[0].generations[0][0].message.usage_metadata['total_tokens'] == 15

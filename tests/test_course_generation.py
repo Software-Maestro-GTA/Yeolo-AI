@@ -502,7 +502,7 @@ async def test_unavailable_history_keeps_verified_sse_generation_available(
         side_effect=lambda request: successful_stream(sample_course_schema),
     )
     maps_provider = mocker.patch('app.agent.course_graph.VerifiedMapsProvider')
-    model = mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI')
+    model = mocker.patch('app.agent.course_drafting.ChatOpenAI')
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post(
             '/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY},

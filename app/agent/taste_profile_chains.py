@@ -1,17 +1,21 @@
 """Single structured-output chain for the complete taste profile."""
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from uuid import UUID
+
+from langchain_openai import ChatOpenAI
 
 from app.agent.prompts import TASTE_PROFILE_PROMPT
 from app.core.config import settings
+from app.core.llm import get_abto
 from app.schemas.taste_profile import TasteProfileAnalysisOutput
 
 
-async def generate_taste_profile(statistics_report: str) -> TasteProfileAnalysisOutput:
+async def generate_taste_profile(statistics_report: str, *, user_id: UUID) -> TasteProfileAnalysisOutput:
     """Create a request-scoped client and release it on success, failure or cancellation.
 
     Args:
         statistics_report: Sanitized visit statistics serialized as JSON.
+        user_id: Validated server user identity shared with the Calling context.
     Returns:
         The structured profile returned by Gemini.
     Raises:
@@ -20,21 +24,28 @@ async def generate_taste_profile(statistics_report: str) -> TasteProfileAnalysis
     """
     if not settings.GEMINI_API_KEY.strip():
         raise ValueError('Gemini credentials are not configured')
-    model = ChatGoogleGenerativeAI(
-        model=settings.GEMINI_MODEL_NAME,
-        google_api_key=settings.GEMINI_API_KEY,
-        # Keep the provider deadline valid even with a shorter local deadline.
-        timeout=max(10., settings.TASTE_ANALYSIS_TIMEOUT_SECONDS),
-        max_retries=0,
-    )
+    abto = get_abto()
+    sync_options = abto.openai_options()
+    async_options = None
     try:
-        # Suppress LangChain's candidate_count=1 default; GenAI omits None on the wire.
+        async_options = abto.async_openai_options()
+        model = ChatOpenAI(
+            model=settings.GEMINI_MODEL_NAME,
+            use_responses_api=False,
+            temperature=None,
+            timeout=max(10., settings.TASTE_ANALYSIS_TIMEOUT_SECONDS),
+            max_retries=0,
+            **sync_options,
+            http_async_client=async_options['http_client'],
+        )
         chain = TASTE_PROFILE_PROMPT | model.with_structured_output(
-            TasteProfileAnalysisOutput
-        ).bind(generation_config={'candidate_count': None})
-        return await chain.ainvoke({'statistics_report': statistics_report})
+            TasteProfileAnalysisOutput, method='json_schema', strict=False,
+        )
+        with abto.with_context(feature_id='taste.profile.analysis', device_id=str(user_id)):
+            return await chain.ainvoke({'statistics_report': statistics_report})
     finally:
         try:
-            await model.client.aio.aclose()
+            if async_options is not None:
+                await async_options['http_client'].aclose()
         finally:
-            model.client.close()
+            sync_options['http_client'].close()

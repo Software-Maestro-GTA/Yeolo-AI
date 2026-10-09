@@ -8,14 +8,15 @@ import uuid
 from datetime import date, timedelta
 
 import httpx
-from google.genai.errors import APIError
 from langchain_core.exceptions import OutputParserException
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+from openai import APIConnectionError, APIStatusError
 from pydantic import ValidationError
 
 from app.agent.course_state import CourseDraft, DraftDay, PartialDraftError
 from app.agent.prompts import COURSE_CANDIDATE_PROMPT
 from app.core.config import settings
+from app.core.llm import get_abto
 from app.schemas.course import (
     CourseRequestSchema,
 )
@@ -62,44 +63,52 @@ async def _draft_day_candidates(
     )
     context = f"이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. reason은 25자 이내 한 문장만 작성하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{feedback}"
     # The provider deadline stays valid even when the local request expires sooner.
-    model = ChatGoogleGenerativeAI(
-        model=settings.GEMINI_MODEL_NAME,
-        google_api_key=settings.GEMINI_API_KEY,
-        thinking_level="low",
-        max_retries=0,
-        timeout=DAILY_DRAFT_TIMEOUT_SECONDS,
-        max_output_tokens=5000,
-    )
+    abto = get_abto()
+    sync_options = abto.openai_options()
+    async_options = None
     try:
-        # Suppress LangChain's candidate_count=1 default; GenAI omits None on the wire.
+        async_options = abto.async_openai_options()
+        model = ChatOpenAI(
+            model=settings.GEMINI_MODEL_NAME,
+            use_responses_api=False,
+            temperature=None,
+            reasoning_effort="low",
+            max_retries=0,
+            timeout=DAILY_DRAFT_TIMEOUT_SECONDS,
+            max_tokens=5000,
+            **sync_options,
+            http_async_client=async_options['http_client'],
+        )
         chain = COURSE_CANDIDATE_PROMPT | model.with_structured_output(
-            CourseDraft
-        ).bind(generation_config={"candidate_count": None})
+            CourseDraft, method='json_schema', strict=False,
+        )
         async with asyncio.timeout(remaining):
-            result = await chain.ainvoke(
-                {
-                    "mbti": request.mbti or "미제공",
-                    "taste_profile": request.tasteProfile.model_dump_json()
-                    if request.tasteProfile
-                    else "미제공",
-                    "trip_condition": request.tripCondition.model_dump_json(),
-                    "recent_ids": ",".join(recent_ids[:120]),
-                    "feedback": context,
-                    "seed": seed,
-                }
-            )
+            with abto.with_context(feature_id='course.candidates.generate', device_id=str(request.userId)):
+                result = await chain.ainvoke(
+                    {
+                        "mbti": request.mbti or "미제공",
+                        "taste_profile": request.tasteProfile.model_dump_json()
+                        if request.tasteProfile
+                        else "미제공",
+                        "trip_condition": request.tripCondition.model_dump_json(),
+                        "recent_ids": ",".join(recent_ids[:120]),
+                        "feedback": context,
+                        "seed": seed,
+                    }
+                )
         if len(result.days) != 1:
             raise OutputParserException("Return only the assigned day in days")
         return result
     finally:
         try:
             try:
-                await model.client.aio.aclose()
+                if async_options is not None:
+                    await async_options['http_client'].aclose()
             except Exception:  # noqa: BLE001 - client cleanup must not discard valid candidates
                 logger.warning("Course model async client cleanup unavailable")
         finally:
             try:
-                model.client.close()
+                sync_options['http_client'].close()
             except Exception:  # noqa: BLE001 - preserve the original result or failure
                 logger.warning("Course model client cleanup unavailable")
 
@@ -131,7 +140,7 @@ async def draft_candidates(
 
     Raises:
         PartialDraftError: Some days remain unfinished; carries successful days.
-        APIError: A nonrecoverable model provider failure propagates.
+        APIStatusError: A nonrecoverable Gateway/provider failure propagates.
     """
     days = dict(existing_days or {})
     pending = (
@@ -186,7 +195,7 @@ async def draft_candidates(
                         index + 1,
                         attempt + 1,
                         type(error).__name__,
-                        provider_error.code if provider_error is not None else None,
+                        provider_error.status_code if provider_error is not None else None,
                         asyncio.get_running_loop().time() - started,
                     )
                     if not _recoverable_draft(error):
@@ -218,7 +227,7 @@ async def draft_candidates(
     )
 
 
-def _draft_api_error(error: BaseException) -> APIError | None:
+def _draft_api_error(error: BaseException) -> APIStatusError | None:
     """Find a typed provider failure through wrappers without revisiting cycles."""
     pending = [error]
     seen: set[int] = set()
@@ -227,7 +236,7 @@ def _draft_api_error(error: BaseException) -> APIError | None:
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, APIError):
+        if isinstance(current, APIStatusError):
             return current
         if current.__context__ is not None:
             pending.append(current.__context__)
@@ -242,11 +251,12 @@ def _recoverable_draft(error: BaseException) -> bool:
         return False
     provider_error = _draft_api_error(error)
     if provider_error is not None:
-        return provider_error.code == 429 or 500 <= provider_error.code < 600
+        return provider_error.status_code == 429 or 500 <= provider_error.status_code < 600
     return isinstance(
         error,
         (
             TimeoutError,
+            APIConnectionError,
             httpx.TimeoutException,
             httpx.NetworkError,
             OutputParserException,

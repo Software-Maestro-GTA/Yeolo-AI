@@ -6,6 +6,7 @@ import logging
 import math
 from collections.abc import AsyncGenerator
 from typing import Any
+from uuid import UUID
 
 from fastapi import HTTPException
 from langsmith import traceable
@@ -26,22 +27,23 @@ ANALYSIS_TIMEOUT_MESSAGE = '취향 분석 시간이 초과되었습니다. 잠�
 def validate_behavior_configuration() -> None:
     """Reject missing credentials or invalid deadlines before starting an SSE response."""
     timeout = settings.TASTE_ANALYSIS_TIMEOUT_SECONDS
-    if not settings.GEMINI_API_KEY.strip() or not math.isfinite(timeout) or timeout <= 0:
+    if not settings.GEMINI_API_KEY.strip() or not settings.ABTO_CALLING_KEY.strip() or not math.isfinite(timeout) or timeout <= 0:
         raise HTTPException(status_code=500, detail='AI 취향 분석 설정을 확인할 수 없습니다.')
 
 
 @traceable(name="taste_profile_analysis", run_type="chain")
-async def _analyze_profile(statistics: dict[str, Any]) -> TasteProfileSchema:
+async def _analyze_profile(statistics: dict[str, Any], user_id: UUID) -> TasteProfileSchema:
     """Infer one profile and retain evidence only in the active internal trace.
 
     Args:
         statistics: Sanitized visit counts and distributions.
+        user_id: Existing validated server identity for ABTO request attribution.
     Returns:
         Guarded profile with at least one seasonal/environment choice.
     Raises:
         Exception: Provider or structured output errors propagate to the SSE handler.
     """
-    output = await generate_taste_profile(json.dumps(statistics, ensure_ascii=False, sort_keys=True))
+    output = await generate_taste_profile(json.dumps(statistics, ensure_ascii=False, sort_keys=True), user_id=user_id)
     profile, metadata = guard_taste_profile(output, statistics)
     run = get_current_run_tree()
     if run is not None:
@@ -80,7 +82,7 @@ async def analyze_behavior_stream(
     }
     try:
         async with asyncio.timeout(settings.TASTE_ANALYSIS_TIMEOUT_SECONDS):
-            taste_profile = await _analyze_profile(statistics)
+            taste_profile = await _analyze_profile(statistics, request.userId)
     except TimeoutError as exc:
         logger.warning('Taste profile analysis exceeded its deadline', exc_info=True)
         raise HTTPException(status_code=500, detail=ANALYSIS_TIMEOUT_MESSAGE) from exc

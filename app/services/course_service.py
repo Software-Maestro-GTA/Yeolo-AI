@@ -41,7 +41,7 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
         raise HTTPException(status_code=400, detail='코스 생성 조건이 올바르지 않습니다.') from None
     if not request.tripCondition.destinationCity.strip() or not request.tripCondition.destinationCountry.strip():
         raise HTTPException(status_code=400, detail='코스 생성 조건이 올바르지 않습니다.')
-    if not settings.GEMINI_API_KEY or not settings.GOOGLE_MAPS_API_KEY:
+    if not settings.GEMINI_API_KEY.strip() or not settings.ABTO_CALLING_KEY.strip() or not settings.GOOGLE_MAPS_API_KEY.strip():
         raise HTTPException(status_code=500, detail='AI 코스 생성 설정을 확인할 수 없습니다.')
     try:
         async with asyncio.timeout(min(1., max(.001, deadline - asyncio.get_running_loop().time()))):

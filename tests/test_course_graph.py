@@ -1160,13 +1160,14 @@ async def test_history_read_failure_keeps_valid_course_with_limited_protection_n
 
 @pytest.mark.asyncio
 async def test_model_authentication_failure_is_not_retried(request_data, graph_dependencies):
-    from google.genai.errors import APIError
+    import httpx
+    from openai import APIStatusError
 
     from app.agent.course_graph import build_course_graph
 
     provider, history, llm, _, _ = graph_dependencies
-    llm.side_effect = APIError(403, {'error': {'message': 'permission denied', 'status': 'PERMISSION_DENIED'}})
-    with pytest.raises(APIError):
+    llm.side_effect = APIStatusError('permission denied', response=httpx.Response(403, request=httpx.Request('POST', 'https://gateway.abto.app/v1/chat/completions')), body=None)
+    with pytest.raises(APIStatusError):
         await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
     llm.assert_awaited_once()
     provider.search.assert_not_awaited()

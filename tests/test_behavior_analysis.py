@@ -147,8 +147,9 @@ async def test_behavior_analysis_unauthorized(valid_request_payload):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('key', ['', '   '])
 @pytest.mark.parametrize('endpoint', ['analysis', 'behavior'])
-async def test_missing_gemini_key_rejected_before_streaming(mocker, mock_env, valid_request_payload, key, endpoint):
-    mocker.patch('app.core.config.settings.GEMINI_API_KEY', key)
+@pytest.mark.parametrize('setting', ['GEMINI_API_KEY', 'ABTO_CALLING_KEY'])
+async def test_missing_calling_key_rejected_before_streaming(mocker, mock_env, valid_request_payload, key, endpoint, setting):
+    mocker.patch(f'app.core.config.settings.{setting}', key)
     generate = mocker.patch('app.services.behavior_service.generate_taste_profile', new_callable=AsyncMock)
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post(f'/internal/ai/taste-profile/{endpoint}', json=valid_request_payload,
@@ -165,7 +166,7 @@ async def test_analysis_deadline_cancels_inference_and_emits_only_error(mocker, 
 
     cancelled = asyncio.Event()
 
-    async def blocked_analysis(_):
+    async def blocked_analysis(_, **_kwargs):
         try:
             await asyncio.Event().wait()
         finally:
@@ -210,7 +211,7 @@ async def test_analysis_cancellation_is_not_converted_to_error(mocker, mock_env,
     entered = asyncio.Event()
     cleaned_up = asyncio.Event()
 
-    async def blocked_analysis(_):
+    async def blocked_analysis(_, **_kwargs):
         entered.set()
         try:
             await asyncio.Event().wait()

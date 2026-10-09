@@ -6,10 +6,10 @@ from collections import Counter
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
-from google.genai.errors import APIError
 from langchain_core.runnables import RunnableLambda
-from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
+from openai import APIStatusError
 
 from app.agent import course_drafting, course_graph, course_state
 from app.agent.course_state import Candidate, CourseDraft, DraftDay
@@ -34,8 +34,8 @@ async def respond_with_draft(prompt, **_kwargs):
 
 
 def wrapped_api_error(code):
-    error = ChatGoogleGenerativeAIError('Provider failed')
-    error.__cause__ = APIError(code, {'error': {'message': 'Provider failed'}})
+    error = RuntimeError('Provider failed')
+    error.__cause__ = APIStatusError('Provider failed', response=httpx.Response(code, request=httpx.Request('POST', 'https://gateway.abto.app/v1/chat/completions')), body=None)
     return error
 
 
@@ -54,8 +54,7 @@ def test_default_generation_budget_is_five_minutes(mocker):
 async def test_sdk_deadline_is_fixed_and_local_budget_is_independent(mocker, request_data, remaining, expected_local):
     """The valid ten-second boundary must not become an invalid SDK deadline."""
     mocker.patch('app.agent.course_drafting.asyncio.get_running_loop', return_value=SimpleNamespace(time=lambda: 100.))
-    model = mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI')
-    model.return_value.client.aio.aclose = AsyncMock()
+    model = mocker.patch('app.agent.course_drafting.ChatOpenAI')
     model.return_value.with_structured_output.return_value = RunnableLambda(respond_with_draft)
     timeout = mocker.spy(asyncio, 'timeout')
     result = await course_drafting._draft_day_candidates(request_data, [], day_index=0, seed='test', deadline=None if remaining is None else 100 + remaining)
@@ -68,8 +67,7 @@ async def test_sdk_deadline_is_fixed_and_local_budget_is_independent(mocker, req
 @pytest.mark.parametrize('remaining', [7, 9.999, 0])
 async def test_insufficient_daily_budget_starts_no_model_request(mocker, request_data, remaining):
     mocker.patch('app.agent.course_drafting.asyncio.get_running_loop', return_value=SimpleNamespace(time=lambda: 100.))
-    model = mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI')
-    model.return_value.client.aio.aclose = AsyncMock()
+    model = mocker.patch('app.agent.course_drafting.ChatOpenAI')
     model.return_value.with_structured_output.return_value = RunnableLambda(respond_with_draft)
     with pytest.raises(TimeoutError):
         await course_drafting._draft_day_candidates(request_data, [], day_index=0, seed='test', deadline=100 + remaining)
@@ -86,8 +84,7 @@ async def test_local_timeout_cancels_inflight_call_without_short_sdk_deadline(mo
         finally:
             closed.set()
 
-    model = mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI')
-    model.return_value.client.aio.aclose = AsyncMock()
+    model = mocker.patch('app.agent.course_drafting.ChatOpenAI')
     model.return_value.with_structured_output.return_value = RunnableLambda(blocked)
     real_timeout = asyncio.timeout
     # Accelerate the local timer, leaving the requested budget observable.
@@ -121,7 +118,7 @@ async def test_wrapped_invalid_argument_is_not_retried(mocker, request_data):
     request_data.tripCondition.totalDays = 1
     error = wrapped_api_error(400)
     generate = mocker.patch('app.agent.course_drafting._draft_day_candidates', new_callable=AsyncMock, side_effect=error)
-    with pytest.raises(ChatGoogleGenerativeAIError) as raised:
+    with pytest.raises(RuntimeError) as raised:
         await course_drafting.draft_candidates(request_data, [])
     assert raised.value is error
     generate.assert_awaited_once()
@@ -129,7 +126,7 @@ async def test_wrapped_invalid_argument_is_not_retried(mocker, request_data):
 
 def test_wrapped_error_context_and_cycles_are_classified_without_text_guessing():
     context_error = RuntimeError('opaque wrapper')
-    context_error.__context__ = APIError(504, {'error': {'message': 'Deadline exceeded'}})
+    context_error.__context__ = APIStatusError('Deadline exceeded', response=httpx.Response(504, request=httpx.Request('POST', 'https://gateway.abto.app/v1/chat/completions')), body=None)
     assert course_drafting._recoverable_draft(context_error)
     cycle = RuntimeError('504 DEADLINE_EXCEEDED is only text')
     cycle.__cause__ = cycle
@@ -158,8 +155,7 @@ async def test_queued_day_does_not_start_after_semaphore_wait_consumes_budget(mo
     request_data.tripCondition.totalDays = 6
     clock = [100.]
     mocker.patch('app.agent.course_drafting.asyncio.get_running_loop', return_value=SimpleNamespace(time=lambda: clock[0]))
-    model = mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI')
-    model.return_value.client.aio.aclose = AsyncMock()
+    model = mocker.patch('app.agent.course_drafting.ChatOpenAI')
     entered = 0
     ready = asyncio.Event()
 
@@ -223,11 +219,17 @@ async def test_service_propagates_configured_budget_before_preflight(mocker, req
 
 @pytest.mark.asyncio
 async def test_client_cleanup_error_cannot_discard_valid_daily_candidates(mocker, request_data):
-    model = mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI')
+    from app.core.llm import get_abto
+
+    model = mocker.patch('app.agent.course_drafting.ChatOpenAI')
     model.return_value.with_structured_output.return_value = RunnableLambda(respond_with_draft)
-    model.return_value.client.aio.aclose = AsyncMock(side_effect=RuntimeError('private cleanup detail'))
-    model.return_value.client.close.side_effect = RuntimeError('private cleanup detail')
+    sync_client = mocker.Mock()
+    async_client = mocker.Mock()
+    async_client.aclose = AsyncMock(side_effect=RuntimeError('private cleanup detail'))
+    sync_client.close.side_effect = RuntimeError('private cleanup detail')
+    mocker.patch.object(get_abto(), 'openai_options', return_value={'http_client': sync_client})
+    mocker.patch.object(get_abto(), 'async_openai_options', return_value={'http_client': async_client})
     result = await course_drafting._draft_day_candidates(request_data, [], day_index=0, seed='offline')
     assert result == day_draft()
-    model.return_value.client.aio.aclose.assert_awaited_once()
-    model.return_value.client.close.assert_called_once()
+    async_client.aclose.assert_awaited_once()
+    sync_client.close.assert_called_once()
