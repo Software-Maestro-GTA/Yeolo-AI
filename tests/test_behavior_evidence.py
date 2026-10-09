@@ -29,8 +29,9 @@ def full_profile(seasonal=None):
 @pytest.fixture
 def chain(mocker):
     result = AsyncMock()
-    result.ainvoke.return_value = full_profile(['dry_weather', 'off_season'])
-    mocker.patch('app.services.behavior_service.taste_profile_chain', result)
+    result.return_value = full_profile(['dry_weather', 'off_season'])
+    mocker.patch('app.services.behavior_service.generate_taste_profile', result)
+    mocker.patch('app.core.config.settings.GEMINI_API_KEY', 'offline-test-key')
     return result
 
 
@@ -53,13 +54,12 @@ async def complete(items):
 @pytest.mark.asyncio
 async def test_single_call_receives_visit_statistics_and_returns_exact_api(chain):
     profile = await complete([photo('a')])
-    chain.ainvoke.assert_awaited_once()
-    payload = chain.ainvoke.call_args.args[0]
-    assert set(payload) == {'statistics_report'}
-    stats = json.loads(payload['statistics_report'])
+    chain.assert_awaited_once()
+    payload = chain.call_args.args[0]
+    stats = json.loads(payload)
     assert stats['visitCount'] == stats['distinctPlaceCount'] == 1
-    assert str(request([]).userId) not in payload['statistics_report']
-    assert 'Cafe A' not in payload['statistics_report']
+    assert str(request([]).userId) not in payload
+    assert 'Cafe A' not in payload
     assert profile['seasonalEnvironmentPreference'] == ['warm_region']
     TasteProfileSchema.model_validate(profile)
 
@@ -224,7 +224,7 @@ def sse_events(response):
 @pytest.mark.asyncio
 async def test_scoring_failure_returns_sse_error_without_complete_or_retry(chain, mocker):
     mocker.patch('app.core.config.settings.INTERNAL_API_KEY', 'test-key')
-    chain.ainvoke.side_effect = RuntimeError('scoring unavailable')
+    chain.side_effect = RuntimeError('scoring unavailable')
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post('/internal/ai/taste-profile/analysis',
                                      json=request([photo('a')]).model_dump(mode='json'),
@@ -233,8 +233,9 @@ async def test_scoring_failure_returns_sse_error_without_complete_or_retry(chain
     events = sse_events(response)
     assert events[-1][0] == 'error'
     assert events[-1][1]['status'] == 500
+    assert 'scoring unavailable' not in response.text
     assert all(kind != 'complete' for kind, _ in events)
-    chain.ainvoke.assert_awaited_once()
+    chain.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -247,7 +248,7 @@ async def test_invalid_records_rejected_before_llm(chain, mocker, items):
                                      headers={'X-Internal-Api-Key': 'test-key'})
     assert response.status_code == 400
     assert response.json()['message'] == '분석 가능한 전처리 메타데이터가 부족합니다.'
-    chain.ainvoke.assert_not_awaited()
+    chain.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -262,7 +263,7 @@ async def test_internal_trace_records_evidence_without_exposing_metadata(chain, 
     assert saved['fieldEvidence']['seasonalEnvironmentPreference.warm_region']['evidence']['fallbackReason']
     assert 'seasonalEnvironmentPreference.warm_region' in saved['requiresUserConfirmation']
     assert 'analysisMetadata' not in result
-    chain.ainvoke.assert_awaited_once()
+    chain.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -272,5 +273,5 @@ async def test_trace_metadata_recording_failure_does_not_break_successful_infere
     mocker.patch('app.services.behavior_service.get_current_run_tree', return_value=active_run)
     profile = await complete([photo('a')])
     assert profile['seasonalEnvironmentPreference'] == ['warm_region']
-    chain.ainvoke.assert_awaited_once()
+    chain.assert_awaited_once()
     active_run.add_metadata.assert_called_once()

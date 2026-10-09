@@ -24,5 +24,6 @@ class Settings:
     COURSE_HISTORY_PATH: str = os.getenv("COURSE_HISTORY_PATH", ".data/course_history.sqlite3")
     COURSE_TIMEOUT_SECONDS: float = float(os.getenv("COURSE_TIMEOUT_SECONDS", "300"))
     COURSE_MAPS_CONCURRENCY: int = int(os.getenv("COURSE_MAPS_CONCURRENCY", "6"))
+    TASTE_ANALYSIS_TIMEOUT_SECONDS: float = float(os.getenv("TASTE_ANALYSIS_TIMEOUT_SECONDS", "60"))
 
 settings = Settings()

@@ -1,12 +1,13 @@
 """Check Gemini generation parameters on serialized, offline HTTP requests."""
 
+import asyncio
 import json
 import warnings
 
 import httpx
 import pytest
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from app.agent import course_graph, taste_profile_chains
 from app.schemas.course import CourseRequestSchema
@@ -52,15 +53,13 @@ async def test_gemini_requests_omit_deprecated_generation_parameters(
             http_options=types.HttpOptions(httpx_async_client=http_client),
         )
         mocker.patch('langchain_google_genai.chat_models.Client', return_value=provider)
-        mocker.patch.object(taste_profile_chains.llm, 'client', provider)
         mocker.patch.object(course_graph.settings, 'GEMINI_MODEL_NAME', 'gemini-3.8-flash')
         mocker.patch.object(course_graph.settings, 'GEMINI_API_KEY', 'offline-gemini-key')
-        mocker.patch.object(taste_profile_chains.llm, 'model', 'gemini-3.8-flash')
         try:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter('always')
                 if operation == 'taste':
-                    result = await taste_profile_chains.taste_profile_chain.ainvoke({'statistics_report': '{}'})
+                    result = await taste_profile_chains.generate_taste_profile('{}')
                     assert result.seasonalEnvironmentPreference == ['warm_region']
                 elif operation == 'candidates':
                     request = CourseRequestSchema.model_validate({
@@ -93,3 +92,56 @@ async def test_gemini_requests_omit_deprecated_generation_parameters(
     else:
         assert thinking['thinkinglevel'] == 'LOW'
         assert config['maxOutputTokens'] == (5000 if operation == 'candidates' else 12000)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['failure', 'cancellation'])
+async def test_taste_client_has_one_attempt_and_closes_on_failure_or_cancellation(mocker, outcome):
+    entered = asyncio.Event()
+    requests = []
+
+    async def respond(request):
+        requests.append(request)
+        entered.set()
+        if outcome == 'cancellation':
+            await asyncio.Event().wait()
+        return httpx.Response(503, json={'error': {'code': 503, 'message': 'offline provider failure'}})
+
+    transport = httpx.MockTransport(respond)
+    close_transport = mocker.spy(transport, 'aclose')
+    provider = genai.Client(
+        api_key='offline-key', vertexai=False,
+        http_options=types.HttpOptions(async_client_args={'transport': transport}),
+    )
+    close_provider = mocker.spy(provider, 'close')
+    close_async_provider = mocker.spy(provider.aio, 'aclose')
+    try:
+        mocker.patch('langchain_google_genai.chat_models.Client', return_value=provider)
+        mocker.patch.object(course_graph.settings, 'GEMINI_API_KEY', 'offline-key')
+        mocker.patch.object(course_graph.settings, 'TASTE_ANALYSIS_TIMEOUT_SECONDS', 60.)
+        task = asyncio.create_task(taste_profile_chains.generate_taste_profile('{}'))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        if outcome == 'cancellation':
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(errors.ServerError):
+                await asyncio.wait_for(task, timeout=2)
+        assert len(requests) == 1
+        assert requests[0].extensions['timeout']['read'] == 60.
+        close_async_provider.assert_awaited_once()
+        close_transport.assert_awaited()
+        close_provider.assert_called_once()
+    finally:
+        await provider.aio.aclose()
+        provider.close()
+
+
+@pytest.mark.asyncio
+async def test_taste_model_is_not_created_without_credentials(mocker):
+    mocker.patch.object(course_graph.settings, 'GEMINI_API_KEY', '')
+    constructor = mocker.patch.object(taste_profile_chains, 'ChatGoogleGenerativeAI')
+    with pytest.raises(ValueError, match='credentials'):
+        await taste_profile_chains.generate_taste_profile('{}')
+    constructor.assert_not_called()

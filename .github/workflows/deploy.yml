@@ -95,6 +95,7 @@ jobs:
       # ── ConfigMap (ai-env) ──────────────────────────────────────────
       LOG_LEVEL: ${{ vars.LOG_LEVEL }}
       GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME }}
+      TASTE_ANALYSIS_TIMEOUT_SECONDS: ${{ vars.TASTE_ANALYSIS_TIMEOUT_SECONDS }}
       LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS }}
       PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS }}
       COURSE_HISTORY_PATH: ${{ vars.COURSE_HISTORY_PATH }}
@@ -126,7 +127,7 @@ jobs:
         run: |
           umask 077
           : > ai.env
-          for k in LOG_LEVEL GEMINI_MODEL_NAME LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
+          for k in LOG_LEVEL GEMINI_MODEL_NAME TASTE_ANALYSIS_TIMEOUT_SECONDS LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai.env
           done
           kubectl -n "$K8S_NAMESPACE" create configmap ai-env \
@@ -189,6 +190,7 @@ jobs:
       # ── ConfigMap (ai-env) ──────────────────────────────────────────
       LOG_LEVEL: ${{ vars.LOG_LEVEL }}
       GEMINI_MODEL_NAME: ${{ vars.GEMINI_MODEL_NAME }}
+      TASTE_ANALYSIS_TIMEOUT_SECONDS: ${{ vars.TASTE_ANALYSIS_TIMEOUT_SECONDS }}
       LLM_TIMEOUT_SECONDS: ${{ vars.LLM_TIMEOUT_SECONDS }}
       PIPELINE_TIMEOUT_SECONDS: ${{ vars.PIPELINE_TIMEOUT_SECONDS }}
       COURSE_HISTORY_PATH: ${{ vars.COURSE_HISTORY_PATH }}
@@ -220,7 +222,7 @@ jobs:
         run: |
           umask 077
           : > ai.env
-          for k in LOG_LEVEL GEMINI_MODEL_NAME LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
+          for k in LOG_LEVEL GEMINI_MODEL_NAME TASTE_ANALYSIS_TIMEOUT_SECONDS LLM_TIMEOUT_SECONDS PIPELINE_TIMEOUT_SECONDS COURSE_HISTORY_PATH LANGSMITH_TRACING LANGSMITH_ENDPOINT LANGSMITH_PROJECT; do
             v="${!k}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> ai.env
           done
           kubectl -n "$K8S_NAMESPACE" create configmap ai-env \

@@ -1,7 +1,9 @@
 """One-call taste inference with deterministic guards and private trace evidence."""
 
+import asyncio
 import json
 import logging
+import math
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -9,13 +11,23 @@ from fastapi import HTTPException
 from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree
 
-from app.agent.taste_profile_chains import taste_profile_chain
+from app.agent.taste_profile_chains import generate_taste_profile
+from app.core.config import settings
 from app.schemas.behavior import BehaviorAnalysisRequest
 from app.schemas.taste_profile import TasteProfileSchema
 from app.services.behavior_evidence import guard_taste_profile
 from app.services.behavior_statistics import build_behavior_statistics
 
 logger = logging.getLogger(__name__)
+ANALYSIS_ERROR_MESSAGE = '취향 분석을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요.'
+ANALYSIS_TIMEOUT_MESSAGE = '취향 분석 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.'
+
+
+def validate_behavior_configuration() -> None:
+    """Reject missing credentials or invalid deadlines before starting an SSE response."""
+    timeout = settings.TASTE_ANALYSIS_TIMEOUT_SECONDS
+    if not settings.GEMINI_API_KEY.strip() or not math.isfinite(timeout) or timeout <= 0:
+        raise HTTPException(status_code=500, detail='AI 취향 분석 설정을 확인할 수 없습니다.')
 
 
 @traceable(name="taste_profile_analysis", run_type="chain")
@@ -29,9 +41,7 @@ async def _analyze_profile(statistics: dict[str, Any]) -> TasteProfileSchema:
     Raises:
         Exception: Provider or structured output errors propagate to the SSE handler.
     """
-    output = await taste_profile_chain.ainvoke({
-        "statistics_report": json.dumps(statistics, ensure_ascii=False, sort_keys=True),
-    })
+    output = await generate_taste_profile(json.dumps(statistics, ensure_ascii=False, sort_keys=True))
     profile, metadata = guard_taste_profile(output, statistics)
     run = get_current_run_tree()
     if run is not None:
@@ -59,6 +69,7 @@ async def analyze_behavior_stream(
         raise HTTPException(
             status_code=400, detail="분석 가능한 위치·촬영 시각 메타데이터가 없습니다.",
         )
+    validate_behavior_configuration()
 
     yield {
         "event": "progress",
@@ -68,11 +79,15 @@ async def analyze_behavior_stream(
         },
     }
     try:
-        taste_profile = await _analyze_profile(statistics)
+        async with asyncio.timeout(settings.TASTE_ANALYSIS_TIMEOUT_SECONDS):
+            taste_profile = await _analyze_profile(statistics)
+    except TimeoutError as exc:
+        logger.warning('Taste profile analysis exceeded its deadline', exc_info=True)
+        raise HTTPException(status_code=500, detail=ANALYSIS_TIMEOUT_MESSAGE) from exc
     except Exception as exc:
         logger.exception("Single-call taste profile analysis failed")
         raise HTTPException(
-            status_code=500, detail=f"취향 분석 중 AI 엔진 오류 발생: {exc!s}",
+            status_code=500, detail=ANALYSIS_ERROR_MESSAGE,
         ) from exc
 
     yield {

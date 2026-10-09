@@ -6,7 +6,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import settings
 from app.schemas.behavior import BehaviorAnalysisRequest
-from app.services.behavior_service import analyze_behavior_stream
+from app.services.behavior_service import (
+    ANALYSIS_ERROR_MESSAGE,
+    ANALYSIS_TIMEOUT_MESSAGE,
+    analyze_behavior_stream,
+    validate_behavior_configuration,
+)
 from app.services.behavior_statistics import build_behavior_statistics
 
 logger = logging.getLogger(__name__)
@@ -48,6 +53,14 @@ async def analyze_behavior_api(
             },
         )
 
+    try:
+        validate_behavior_configuration()
+    except HTTPException as error:
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"status": error.status_code, "message": error.detail, "data": None},
+        )
+
     logger.info(
         f"Behavior analysis request received for userId={request.userId} with {len(request.items)} items"
     )
@@ -62,13 +75,16 @@ async def analyze_behavior_api(
             logger.warning(
                 f"HTTPException in behavior stream for userId={request.userId} -> Code {e.status_code}: {e.detail}"
             )
-            error_data = {"status": e.status_code, "message": e.detail}
+            message = e.detail
+            if e.status_code >= 500:
+                message = ANALYSIS_TIMEOUT_MESSAGE if e.detail == ANALYSIS_TIMEOUT_MESSAGE else ANALYSIS_ERROR_MESSAGE
+            error_data = {"status": e.status_code, "message": message}
             yield f"event: error\ndata: {json.dumps(error_data, ensure_ascii=False)}\n\n"
-        except Exception as e:
+        except Exception:
             logger.exception(f"Error in behavior stream for userId={request.userId}")
             error_data = {
                 "status": 500,
-                "message": f"AI 분석 스트림 중 에러 발생: {e!s}",
+                "message": ANALYSIS_ERROR_MESSAGE,
             }
             yield f"event: error\ndata: {json.dumps(error_data, ensure_ascii=False)}\n\n"
 
