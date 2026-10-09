@@ -24,7 +24,7 @@ def request_data():
 
 @pytest.fixture
 def graph_dependencies(mocker, tmp_path):
-    from app.agent.course_graph import Candidate, CourseDraft, DraftDay
+    from app.agent.course_state import Candidate, CourseDraft, DraftDay
     from app.agent.tools.verified_maps import Destination, VerifiedPlace
     from app.services.course_history import CourseHistory
 
@@ -36,7 +36,7 @@ def graph_dependencies(mocker, tmp_path):
         Candidate(name='역사관', english_name='History Museum', stay_minutes=60, reason='역사 관람'),
     ]
     draft = CourseDraft(title='서울 문화 미식', reason='문화 체험과 미식 여행', days=[DraftDay(candidates=candidates)])
-    llm = mocker.patch('app.agent.course_graph.draft_candidates', new_callable=AsyncMock, return_value=draft)
+    llm = mocker.patch('app.agent.course_nodes.draft_candidates', new_callable=AsyncMock, return_value=draft)
     provider = mocker.Mock()
     provider.resolve_destination = AsyncMock(return_value=Destination(country_code='KR', south=37.3, west=126.7, north=37.8, east=127.3))
     places = {
@@ -182,7 +182,7 @@ async def test_concurrent_history_claim_accepts_only_one_duplicate(tmp_path):
 ])
 def test_opening_hours_fit_whole_visit(periods, day, earliest, duration, latest, expected):
     """Weekly boundaries, closing time and malformed hours constrain the full visit."""
-    from app.agent.course_graph import _opening_start
+    from app.services.course_planning import _opening_start
 
     assert _opening_start(periods, day, earliest, duration, latest) == expected
 
@@ -218,7 +218,8 @@ async def test_generation_stream_closes_graph_iterator(request_data, graph_depen
 
 @pytest.mark.asyncio
 async def test_breakfast_is_scheduled_when_verified(request_data, graph_dependencies):
-    from app.agent.course_graph import Candidate, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
 
     provider, history, _, draft, places = graph_dependencies
@@ -235,7 +236,8 @@ async def test_breakfast_is_scheduled_when_verified(request_data, graph_dependen
 
 @pytest.mark.asyncio
 async def test_two_days_use_correct_weekday_and_separate_routes(request_data, graph_dependencies):
-    from app.agent.course_graph import DraftDay, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import DraftDay
     from app.agent.tools.verified_maps import VerifiedPlace
 
     provider, history, _, draft, places = graph_dependencies
@@ -372,7 +374,8 @@ async def test_explanations_describe_experience_without_repeating_verified_sched
 
 @pytest.mark.asyncio
 async def test_course_summary_only_uses_selected_verified_places(request_data, graph_dependencies):
-    from app.agent.course_graph import Candidate, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
 
     provider, history, _, draft, places = graph_dependencies
     request_data.tasteProfile = preference_profile(travelPurpose__culturalExperience=5, activityPreference__nightlife=5)
@@ -444,7 +447,7 @@ async def test_unverifiable_high_preferences_do_not_invent_venue_properties(requ
 
 def three_day_dinner_conflict(request_data, graph_dependencies, alternate_closes=21):
     """Reproduce a second-draft dinner conflict after first-draft lunch failure."""
-    from app.agent.course_graph import Candidate, DraftDay
+    from app.agent.course_state import Candidate, DraftDay
     from app.agent.tools.verified_maps import VerifiedPlace
 
     _, _, llm, draft, places = graph_dependencies
@@ -504,7 +507,8 @@ async def test_three_day_dinner_conflict_uses_verified_alternative_after_draft_r
 @pytest.mark.asyncio
 async def test_three_day_impossible_dinner_still_fails_without_history_or_unbounded_llm(request_data, graph_dependencies):
     """Alternatives must never bypass full visit opening or meal windows."""
-    from app.agent.course_graph import CourseGenerationError, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import CourseGenerationError
     from app.agent.tools.verified_maps import VerifiedPlace
     from app.services.course_history import history_key
 
@@ -540,7 +544,8 @@ async def test_verified_dinner_alternative_recovers_without_another_llm_call(req
 
 @pytest.mark.asyncio
 async def test_unreachable_first_dinner_tries_verified_meal_alternative(request_data, graph_dependencies):
-    from app.agent.course_graph import Candidate, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
 
     provider, history, llm, draft, places = graph_dependencies
@@ -591,11 +596,8 @@ async def test_three_day_lunch_shortage_gets_bounded_third_draft(request_data, g
 @pytest.mark.asyncio
 async def test_breakfast_only_venue_cannot_fill_missing_lunch_slot(request_data, graph_dependencies):
     """Unknown lunch service cannot be inferred from breakfast venue hours alone."""
-    from app.agent.course_graph import (
-        Candidate,
-        CourseGenerationError,
-        build_course_graph,
-    )
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate, CourseGenerationError
     from app.agent.tools.verified_maps import VerifiedPlace
 
     provider, history, llm, draft, places = graph_dependencies
@@ -612,11 +614,8 @@ async def test_breakfast_only_venue_cannot_fill_missing_lunch_slot(request_data,
 @pytest.mark.parametrize('original_meal', ['none', 'lunch'])
 async def test_market_cannot_supply_required_lunch_by_label_or_remapping(request_data, graph_dependencies, original_meal):
     """A market is a valid visit type, but does not establish a served meal venue."""
-    from app.agent.course_graph import (
-        Candidate,
-        CourseGenerationError,
-        build_course_graph,
-    )
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate, CourseGenerationError
     from app.agent.tools.verified_maps import VerifiedPlace
 
     provider, history, llm, draft, places = graph_dependencies
@@ -784,7 +783,7 @@ async def test_actual_graph_root_callback_finishes_before_complete(request_data,
 
 def candidate_pool_repair_fixture(request_data, graph_dependencies, include_second_attraction=True):
     """Build three days where only the failed day's candidate types complement on retry."""
-    from app.agent.course_graph import DraftDay
+    from app.agent.course_state import DraftDay
     from app.agent.tools.verified_maps import VerifiedPlace
 
     _, _, llm, draft, places = graph_dependencies
@@ -850,7 +849,8 @@ async def test_candidate_pool_reduces_optional_visits_without_inventing_missing_
 
 @pytest.mark.asyncio
 async def test_accumulated_pool_respects_saved_day_ids_and_duplicate_meal_roles(request_data, graph_dependencies):
-    from app.agent.course_graph import Candidate, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
 
     provider, history, llm, _, places = graph_dependencies
@@ -875,7 +875,8 @@ async def test_accumulated_pool_respects_saved_day_ids_and_duplicate_meal_roles(
 
 @pytest.mark.asyncio
 async def test_verified_pool_combines_complementary_candidates_across_three_drafts(request_data, graph_dependencies):
-    from app.agent.course_graph import Candidate, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
 
     provider, history, llm, _, _ = graph_dependencies
     first, repaired = candidate_pool_repair_fixture(request_data, graph_dependencies)
@@ -910,7 +911,7 @@ async def test_latest_stay_proposal_replaces_same_verified_place_and_role_in_poo
 
 def test_failed_plan_exclusion_happens_before_four_plan_shortlist(graph_dependencies):
     """Previously failed choices must not hide still-untried feasible permutations."""
-    from app.agent.course_graph import _day_plans
+    from app.services.course_planning import _day_plans
 
     _, _, _, draft, places = graph_dependencies
     available = [(candidate, places[candidate.name]) for candidate in draft.days[0].candidates]
@@ -929,7 +930,7 @@ def test_failed_plan_exclusion_happens_before_four_plan_shortlist(graph_dependen
 
 def test_repaired_stay_duration_is_not_blocked_by_old_failed_plan(graph_dependencies):
     """A genuinely changed visit duration can make a previously failed order feasible."""
-    from app.agent.course_graph import _day_plans
+    from app.services.course_planning import _day_plans
 
     _, _, _, draft, places = graph_dependencies
     available = [(candidate, places[candidate.name]) for candidate in draft.days[0].candidates]
@@ -967,7 +968,8 @@ async def test_korean_routes_use_transit_and_trip_departure_time(request_data, g
 
 @pytest.mark.asyncio
 async def test_missing_route_with_nearby_verified_places_never_invents_success(request_data, graph_dependencies):
-    from app.agent.course_graph import CourseGenerationError, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import CourseGenerationError
     from app.agent.tools.verified_maps import NoRouteError
     from app.services.course_history import history_key
 
@@ -1172,7 +1174,8 @@ async def test_model_authentication_failure_is_not_retried(request_data, graph_d
 
 @pytest.mark.asyncio
 async def test_nearby_route_transient_exhaustion_never_becomes_formula_success(request_data, graph_dependencies):
-    from app.agent.course_graph import CourseGenerationError, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import CourseGenerationError
     from app.agent.tools.verified_maps import MapsProviderError
     from app.services.course_history import history_key
 
@@ -1319,7 +1322,8 @@ async def test_optional_navigation_failure_still_completes_actual_graph_and_sse(
 async def test_same_temporary_route_failure_is_deduplicated_per_stage_and_retried_next_draft(request_data, graph_dependencies):
     from collections import Counter
 
-    from app.agent.course_graph import Candidate, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import MapsProviderError, VerifiedPlace
 
     provider, history, llm, draft, places = graph_dependencies
@@ -1450,7 +1454,8 @@ async def test_tokyo_real_destination_resolution_preserves_requested_name_in_com
 
     import httpx
 
-    from app.agent.course_graph import DraftDay, stream_course_generation
+    from app.agent.course_graph import stream_course_generation
+    from app.agent.course_state import DraftDay
     from app.agent.tools.verified_maps import VerifiedMapsProvider, VerifiedPlace
 
     provider, history, llm, draft, places = graph_dependencies
@@ -1507,11 +1512,8 @@ async def test_tokyo_real_destination_resolution_preserves_requested_name_in_com
 
 @pytest.mark.asyncio
 async def test_final_selected_places_only_receive_images_after_validation_and_one_complete(request_data, graph_dependencies, mocker):
-    from app.agent.course_graph import (
-        Candidate,
-        build_course_graph,
-        stream_course_generation,
-    )
+    from app.agent.course_graph import build_course_graph, stream_course_generation
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPhoto
     from app.schemas.course import PhotoAttributionSchema
 
@@ -1612,7 +1614,7 @@ async def test_day_summary_uses_final_verified_places_and_completes_sse_without_
             candidate.reason = '야경과 노을을 즐기는 느긋한 골목 산책'
             places[candidate.name].place.category = 'museum'
             places[candidate.name].place.placeName = f'검증된 전시공간 {candidate.name}'
-    summary = mocker.patch('app.agent.course_graph.compose_day_summary', wraps=compose_day_summary)
+    summary = mocker.patch('app.services.course_planning.compose_day_summary', wraps=compose_day_summary)
     graph = build_course_graph(provider, history)
     provider.__aenter__ = AsyncMock(return_value=provider)
     provider.__aexit__ = AsyncMock(return_value=False)
@@ -1641,14 +1643,11 @@ async def test_day_summary_uses_final_verified_places_and_completes_sse_without_
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['exception', 'invalid_value'])
 async def test_optional_day_summary_failure_keeps_complete_and_compact_actual_count(request_data, graph_dependencies, mocker, failure):
-    from app.agent.course_graph import (
-        _schedule_day,
-        build_course_graph,
-        stream_course_generation,
-    )
+    from app.agent.course_graph import build_course_graph, stream_course_generation
+    from app.services.course_planning import _schedule_day
 
     provider, history, llm, draft, places = graph_dependencies
-    formatter = mocker.patch('app.agent.course_graph.compose_day_summary')
+    formatter = mocker.patch('app.services.course_planning.compose_day_summary')
     if failure == 'exception':
         formatter.side_effect = RuntimeError('private optional summary failure')
     else:
@@ -1680,10 +1679,11 @@ async def test_optional_day_summary_failure_keeps_complete_and_compact_actual_co
 async def test_day_summary_cancelled_error_is_not_swallowed(request_data, graph_dependencies, mocker):
     from langgraph.errors import NodeCancelledError
 
-    from app.agent.course_graph import _schedule_day, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.services.course_planning import _schedule_day
 
     provider, history, _, draft, places = graph_dependencies
-    mocker.patch('app.agent.course_graph.compose_day_summary', side_effect=asyncio.CancelledError)
+    mocker.patch('app.services.course_planning.compose_day_summary', side_effect=asyncio.CancelledError)
     selected = [(candidate, places[candidate.name]) for candidate in draft.days[0].candidates[:2] + [draft.days[0].candidates[3]]]
     with pytest.raises(asyncio.CancelledError):
         _schedule_day(selected, [provider.route.return_value] * 2, date(2026, 10, 5), 1)
@@ -1742,7 +1742,7 @@ async def test_history_concurrency_retry_preserves_final_place_prose(request_dat
 
     provider, history, llm, _, _ = graph_dependencies
     claim = mocker.patch.object(history, 'record_if_novel', new_callable=AsyncMock, side_effect=[False, True])
-    reasons = mocker.patch('app.agent.course_graph.apply_personalized_reasons', wraps=apply_personalized_reasons)
+    reasons = mocker.patch('app.agent.course_nodes.apply_personalized_reasons', wraps=apply_personalized_reasons)
     result = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
     assert claim.await_count == 2 and llm.await_count == 2
     assert reasons.call_count == 2
@@ -1792,7 +1792,7 @@ async def test_optional_image_phase_or_cost_logging_error_cannot_discard_complet
 
     provider, history, llm, _, _ = graph_dependencies
     if optional_failure == 'images':
-        mocker.patch('app.agent.course_graph.enrich_course_images', new_callable=AsyncMock, side_effect=RuntimeError('private formatting detail'))
+        mocker.patch('app.agent.course_nodes.enrich_course_images', new_callable=AsyncMock, side_effect=RuntimeError('private formatting detail'))
     else:
         provider.metrics = MapsCostMetrics()
         mocker.patch.object(provider.metrics, 'snapshot', side_effect=RuntimeError('private metrics detail'))

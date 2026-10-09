@@ -9,7 +9,7 @@ import pytest
 from google import genai
 from google.genai import errors, types
 
-from app.agent import course_graph, taste_profile_chains
+from app.agent import course_drafting, course_graph, taste_profile_chains
 from app.schemas.course import CourseRequestSchema
 from app.schemas.taste_profile import TasteProfileAnalysisOutput
 
@@ -70,7 +70,7 @@ async def test_gemini_requests_omit_deprecated_generation_parameters(
                         'startDate': '2026-10-17', 'totalDays': 1, 'budgetType': 'moderate',
                     },
                 })
-                result = await course_graph._draft_day_candidates(request, [], day_index=0, seed='offline')
+                result = await course_drafting._draft_day_candidates(request, [], day_index=0, seed='offline')
                 assert len(result.days) == 1
             close_async.assert_awaited_once()
             # LangChain's destructor also closes the sync client. The
@@ -181,7 +181,7 @@ async def test_daily_course_client_closes_on_failure_and_cancellation(mocker, ou
     try:
         mocker.patch('langchain_google_genai.chat_models.Client', return_value=provider)
         mocker.patch.object(course_graph.settings, 'GEMINI_API_KEY', 'offline-key')
-        task = asyncio.create_task(course_graph._draft_day_candidates(request, [], day_index=0, seed='offline'))
+        task = asyncio.create_task(course_drafting._draft_day_candidates(request, [], day_index=0, seed='offline'))
         await asyncio.wait_for(entered.wait(), 2)
         if outcome == 'cancellation':
             task.cancel()

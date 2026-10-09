@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.agent import course_graph
-from app.agent.course_graph import Candidate, CourseDraft, DraftDay
+from app.agent import course_drafting
+from app.agent.course_state import Candidate, CourseDraft, DraftDay
 from app.schemas.course import CourseRequestSchema, PlaceSchema, TransportToNextSchema
 
 
@@ -32,7 +32,7 @@ def daily_draft(index):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('total_days', [4, 5, 7])
 async def test_long_draft_splits_days_with_bounded_parallelism_and_preserves_order(mocker, trip_request, total_days):
-    from app.agent.course_graph import draft_candidates
+    from app.agent.course_drafting import draft_candidates
 
     trip_request.tripCondition.totalDays = total_days
     active = peak = 0
@@ -52,8 +52,8 @@ async def test_long_draft_splits_days_with_bounded_parallelism_and_preserves_ord
         finally:
             active -= 1
 
-    boundary = mocker.patch('app.agent.course_graph._draft_day_candidates', side_effect=generate)
-    mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
+    boundary = mocker.patch('app.agent.course_drafting._draft_day_candidates', side_effect=generate)
+    mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
     result = await draft_candidates(trip_request, ['places/recent'])
     assert boundary.call_count == total_days
     assert 2 <= peak <= 6
@@ -66,7 +66,7 @@ async def test_long_draft_splits_days_with_bounded_parallelism_and_preserves_ord
 async def test_one_day_504_retries_only_that_day_and_keeps_successful_results(mocker, trip_request):
     from google.genai.errors import APIError
 
-    from app.agent.course_graph import draft_candidates
+    from app.agent.course_drafting import draft_candidates
 
     calls = Counter()
     async def generate(request, recent_ids, feedback='', *, day_index, **kwargs):
@@ -75,8 +75,8 @@ async def test_one_day_504_retries_only_that_day_and_keeps_successful_results(mo
             raise APIError(504, {'error': {'message': 'Deadline exceeded', 'status': 'DEADLINE_EXCEEDED'}})
         await asyncio.sleep(.001)
         return daily_draft(day_index)
-    mocker.patch('app.agent.course_graph._draft_day_candidates', side_effect=generate)
-    mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
+    mocker.patch('app.agent.course_drafting._draft_day_candidates', side_effect=generate)
+    mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
     result = await draft_candidates(trip_request, [])
     assert calls == Counter({0: 1, 1: 1, 2: 2, 3: 1, 4: 1})
     assert len(result.days) == 5
@@ -84,10 +84,10 @@ async def test_one_day_504_retries_only_that_day_and_keeps_successful_results(mo
 
 @pytest.mark.asyncio
 async def test_partial_repair_does_not_request_already_verified_days(mocker, trip_request):
-    from app.agent.course_graph import draft_candidates
+    from app.agent.course_drafting import draft_candidates
 
     existing = {index: daily_draft(index).days[0] for index in (0, 1, 3, 4)}
-    boundary = mocker.patch('app.agent.course_graph._draft_day_candidates', new_callable=AsyncMock, return_value=daily_draft(2))
+    boundary = mocker.patch('app.agent.course_drafting._draft_day_candidates', new_callable=AsyncMock, return_value=daily_draft(2))
     result = await draft_candidates(trip_request, [], pending_days=[2], existing_days=existing)
     boundary.assert_awaited_once()
     assert boundary.call_args.kwargs['day_index'] == 2
@@ -96,7 +96,7 @@ async def test_partial_repair_does_not_request_already_verified_days(mocker, tri
 
 @pytest.mark.asyncio
 async def test_draft_cancellation_joins_all_started_daily_calls(mocker, trip_request):
-    from app.agent.course_graph import draft_candidates
+    from app.agent.course_drafting import draft_candidates
 
     entered, closed = set(), set()
     started = asyncio.Event()
@@ -107,8 +107,8 @@ async def test_draft_cancellation_joins_all_started_daily_calls(mocker, trip_req
             await asyncio.Event().wait()
         finally:
             closed.add(day_index)
-    mocker.patch('app.agent.course_graph._draft_day_candidates', side_effect=generate)
-    mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
+    mocker.patch('app.agent.course_drafting._draft_day_candidates', side_effect=generate)
+    mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
     task = asyncio.create_task(draft_candidates(trip_request, []))
     try:
         await asyncio.wait_for(started.wait(), .5)
@@ -131,10 +131,10 @@ async def test_daily_model_prompt_has_exact_assignment_and_whole_trip_context(mo
     def respond(prompt, **_kwargs):
         captured.append(prompt.to_string())
         return daily_draft(3)
-    model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
+    model = mocker.patch('app.agent.course_drafting.ChatGoogleGenerativeAI')
     model.return_value.client.aio.aclose = AsyncMock()
     model.return_value.with_structured_output.return_value = RunnableLambda(respond)
-    result = await course_graph._draft_day_candidates(trip_request, ['places/avoid'], '다른 날과 장소를 겹치지 마세요', day_index=3, seed='shared-trip-seed')
+    result = await course_drafting._draft_day_candidates(trip_request, ['places/avoid'], '다른 날과 장소를 겹치지 마세요', day_index=3, seed='shared-trip-seed')
     assert len(result.days) == 1 and len(captured) == 1
     prompt = captured[0]
     assert '2026-10-20' in prompt and '2026-10-17' in prompt
@@ -182,7 +182,7 @@ def graph_with_days(mocker, tmp_path, trip_request, *, aliases=False, alternativ
             places[candidate.name] = VerifiedPlace(PlaceSchema(placeId=identifier, placeName=candidate.name, category='restaurant' if candidate.meal != 'none' else 'museum', address='東京都千代田区', latitude=35.68 + slot * .001, longitude=139.76))
     if alternatives:
         first = DraftDay(candidates=first.candidates + extra.candidates)
-    mocker.patch('app.agent.course_graph.draft_candidates', new_callable=AsyncMock, return_value=CourseDraft(title='도쿄', reason='문화 여행', days=[first, second]))
+    mocker.patch('app.agent.course_nodes.draft_candidates', new_callable=AsyncMock, return_value=CourseDraft(title='도쿄', reason='문화 여행', days=[first, second]))
     provider = mocker.Mock()
     provider.resolve_destination = AsyncMock(return_value=Destination(country_code='JP', south=35, north=36, west=139, east=140))
     provider.search = AsyncMock(side_effect=lambda candidate, destination: places[candidate.name])
@@ -195,7 +195,8 @@ def graph_with_days(mocker, tmp_path, trip_request, *, aliases=False, alternativ
 
 @pytest.mark.asyncio
 async def test_same_verified_id_with_resource_prefix_cannot_appear_on_two_days(mocker, tmp_path, trip_request):
-    from app.agent.course_graph import CourseGenerationError, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import CourseGenerationError
     from app.services.course_history import history_key
 
     provider, history, *_ = graph_with_days(mocker, tmp_path, trip_request, aliases=True)
@@ -216,7 +217,7 @@ async def test_overlapping_day_pools_choose_disjoint_alternative_before_redrafti
     def plans(available, day_date, *args, **kwargs):
         choices = [first.candidates[:5], extra.candidates] if day_date == date(2026, 10, 17) else [second.candidates]
         return [[(candidate, places[candidate.name]) for candidate in choice] for choice in choices]
-    mocker.patch('app.agent.course_graph._day_plans', side_effect=plans)
+    mocker.patch('app.agent.course_nodes._day_plans', side_effect=plans)
     result = await build_course_graph(provider, history).ainvoke({'request': trip_request, 'attempt': 0})
     days = result['course'].itinerary.days
     ids = [stop.place.placeId.removeprefix('places/') for day in days for stop in day.stops]
@@ -233,7 +234,7 @@ async def test_distinct_days_verify_routes_concurrently_and_keep_calendar_order(
 
     trip_request.tripCondition.totalDays = 5
     draft = CourseDraft(title='도쿄 문화 여행', reason='문화와 휴식', days=[daily_draft(index).days[0] for index in range(5)])
-    mocker.patch('app.agent.course_graph.draft_candidates', new_callable=AsyncMock, return_value=draft)
+    mocker.patch('app.agent.course_nodes.draft_candidates', new_callable=AsyncMock, return_value=draft)
     provider = mocker.Mock()
     provider.resolve_destination = AsyncMock(return_value=Destination(country_code='JP', south=35, north=36, west=139, east=140))
     places = {candidate.name: VerifiedPlace(PlaceSchema(placeId=f'places/{candidate.name}', placeName=candidate.name, category='restaurant' if candidate.meal != 'none' else 'museum', address='東京都千代田区', latitude=35.68 + slot * .001, longitude=139.76)) for day in draft.days for slot, candidate in enumerate(day.candidates)}
@@ -268,7 +269,7 @@ async def test_distinct_days_verify_routes_concurrently_and_keep_calendar_order(
 
 @pytest.mark.asyncio
 async def test_daily_metadata_cannot_replace_whole_trip_title_after_repair(mocker, trip_request):
-    from app.agent.course_graph import draft_candidates
+    from app.agent.course_drafting import draft_candidates
 
     async def generate(request, recent_ids, feedback='', *, day_index, **kwargs):
         draft = daily_draft(day_index)
@@ -277,7 +278,7 @@ async def test_daily_metadata_cannot_replace_whole_trip_title_after_repair(mocke
         draft.tags = [f'미확인-{day_index}']
         return draft
 
-    mocker.patch('app.agent.course_graph._draft_day_candidates', side_effect=generate)
+    mocker.patch('app.agent.course_drafting._draft_day_candidates', side_effect=generate)
     original = await draft_candidates(trip_request, [])
     existing = {index: day for index, day in enumerate(original.days) if index != 3}
     repaired = await draft_candidates(trip_request, [], pending_days=[3], existing_days=existing)
