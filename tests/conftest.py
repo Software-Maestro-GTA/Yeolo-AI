@@ -24,13 +24,7 @@ def forbid_live_http(mocker):
 @pytest.fixture(autouse=True)
 def offline_place_copy(mocker):
     """Keep optional finalized-place prose independent of credentials and tokens."""
-    try:
-        service = import_module('app.services.course_copy')
-    except ModuleNotFoundError as error:
-        if error.name != 'app.services.course_copy':
-            raise
-        yield None  # The new service is intentionally absent during TDD Red.
-        return
+    service = import_module('app.services.course_copy')
     original = service.generate_place_copy
     boundary = mocker.patch.object(service, 'generate_place_copy', new_callable=AsyncMock, return_value={'stops': []})
     boundary.original = original

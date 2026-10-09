@@ -208,120 +208,28 @@ def sample_course_schema():
 
 
 @pytest.mark.asyncio
-async def test_generate_course_success(mock_env, valid_course_request_payload, sample_course_schema, mocker):
-    """
-    정상적인 성향 프로필, MBTI 및 여행 조건 요청 시 API-AI-2 SSE 스트리밍 (progress, complete) 응답 검증
-    """
+@pytest.mark.parametrize('preference', ['mbti_only', 'taste_only', 'both'])
+async def test_generate_course_success(mock_env, valid_course_request_payload, sample_course_schema, mocker, preference):
+    """Each supported preference combination returns the complete SSE contract."""
+    if preference == 'mbti_only':
+        valid_course_request_payload['tasteProfile'] = None
+    elif preference == 'taste_only':
+        valid_course_request_payload['mbti'] = None
     mocker.patch(
-        "app.services.course_service.stream_course_generation",
+        'app.services.course_service.stream_course_generation',
         side_effect=lambda request: successful_stream(sample_course_schema),
     )
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post(
+            '/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY},
             json=valid_course_request_payload,
         )
-
     assert response.status_code == 200
-    assert "text/event-stream" in response.headers.get("content-type", "")
-    content = response.text
-    assert "event: progress" in content
-    assert "event: complete" in content
-    assert "GENERATING_ROUTE" in content
-    assert "제주 가성비 힐링 & 미식 여행 2일" in content
-
-
-@pytest.mark.asyncio
-async def test_generate_course_with_mbti_only(mock_env, valid_trip_condition, sample_course_schema, mocker):
-    """
-    mbti만 전달되고 tasteProfile은 null/누락된 요청 시 200 OK 정상 처리 검증 (API-AI-2 준수)
-    """
-    mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: successful_stream(sample_course_schema),
-    )
-
-    payload = {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
-        "mbti": "INTJ",
-        "tasteProfile": None,
-        "tripCondition": valid_trip_condition,
-    }
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
-            json=payload,
-        )
-
-    assert response.status_code == 200
-    assert "event: complete" in response.text
-
-
-@pytest.mark.asyncio
-async def test_generate_course_with_taste_profile_only(mock_env, valid_taste_profile, valid_trip_condition, sample_course_schema, mocker):
-    """
-    tasteProfile만 전달되고 mbti는 null/누락된 요청 시 200 OK 정상 처리 검증 (API-AI-2 준수)
-    """
-    mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: successful_stream(sample_course_schema),
-    )
-
-    payload = {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
-        "mbti": None,
-        "tasteProfile": valid_taste_profile,
-        "tripCondition": valid_trip_condition,
-    }
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
-            json=payload,
-        )
-
-    assert response.status_code == 200
-    assert "event: complete" in response.text
-
-
-@pytest.mark.asyncio
-async def test_generate_course_with_both_mbti_and_taste_profile(mock_env, valid_taste_profile, valid_trip_condition, sample_course_schema, mocker):
-    """
-    mbti와 tasteProfile이 둘 다 전달되는 요청 시 200 OK 정상 처리 검증
-    """
-    mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: successful_stream(sample_course_schema),
-    )
-
-    payload = {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
-        "mbti": "INFJ",
-        "tasteProfile": valid_taste_profile,
-        "tripCondition": valid_trip_condition,
-    }
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
-            json=payload,
-        )
-
-    assert response.status_code == 200
+    assert 'text/event-stream' in response.headers.get('content-type', '')
+    assert 'event: progress' in response.text
+    assert response.text.count('event: complete') == 1
+    assert 'GENERATING_ROUTE' in response.text
+    assert sample_course_schema.title in response.text
 
 
 @pytest.mark.asyncio
@@ -351,21 +259,6 @@ async def test_generate_course_missing_both_mbti_and_taste_profile(mock_env, val
 
 
 @pytest.mark.asyncio
-async def test_generate_course_unauthorized(mock_env, valid_course_request_payload):
-    """
-    내부 인증 API Key 헤더 누락 또는 잘못된 키 입력 시 401 에러 반환 검증
-    """
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses", json=valid_course_request_payload
-        )
-        assert response.status_code == 401
-        assert response.json()["message"] == "내부 인증 실패"
-
-
-@pytest.mark.asyncio
 async def test_generate_course_bad_request(mock_env):
     """
     필수 데이터 누락 또는 스키마 미충족 시 400 Bad Request 반환 검증
@@ -389,51 +282,24 @@ async def test_generate_course_bad_request(mock_env):
 
 
 @pytest.mark.asyncio
-async def test_generate_course_not_found(mock_env, valid_course_request_payload, mocker):
-    """
-    실시간 스트림 시작 후 장소 부족은 progress 안내 후 complete 없이 종료한다.
-    """
+@pytest.mark.parametrize('error', [
+    pytest.param(ValueError('조건에 맞는 장소가 없습니다.'), id='no_places'),
+    pytest.param(RuntimeError('provider unavailable'), id='provider_error'),
+])
+async def test_generation_error_after_stream_start_never_completes(mock_env, valid_course_request_payload, mocker, error):
+    """Both place and model failures close an HTTP 200 stream without completion."""
     mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: failed_stream(ValueError("조건에 맞는 장소가 없습니다.")),
+        'app.services.course_service.stream_course_generation',
+        side_effect=lambda request: failed_stream(error),
     )
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post(
+            '/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY},
             json=valid_course_request_payload,
         )
-
     assert response.status_code == 200
-    assert "event: progress" in response.text
-    assert "event: complete" not in response.text
-
-
-@pytest.mark.asyncio
-async def test_generate_course_ai_error(mock_env, valid_course_request_payload, mocker):
-    """
-    스트림 시작 이후 모델 오류는 HTTP 200 스트림에서 complete 없이 종료한다.
-    """
-    mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: failed_stream(RuntimeError("provider unavailable")),
-    )
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
-            json=valid_course_request_payload,
-        )
-
-    assert response.status_code == 200
-    assert "event: progress" in response.text
-    assert "event: complete" not in response.text
+    assert 'event: progress' in response.text
+    assert 'event: complete' not in response.text
 
 
 def test_stop_schema_cost_field_validation():
@@ -552,15 +418,6 @@ async def test_service_cancellation_closes_pending_generation(mock_env, valid_co
 
 
 @pytest.mark.asyncio
-async def test_invalid_calendar_date_fails_before_stream(mock_env, valid_course_request_payload):
-    valid_course_request_payload['tripCondition']['startDate'] = '2026-02-30'
-    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
-        response = await client.post('/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY}, json=valid_course_request_payload)
-    assert response.status_code == 400
-    assert response.json()['status'] == 400
-
-
-@pytest.mark.asyncio
 async def test_service_preserves_source_timeout_across_progress_events(mock_env, valid_course_request_payload, mocker):
     """A timeout opened before progress must still cancel later generation work."""
     from app.schemas.course import CourseRequestSchema
@@ -638,7 +495,7 @@ async def test_unavailable_history_keeps_verified_sse_generation_available(
 
     probe = mocker.patch.object(
         CourseHistory, 'ensure_available', new_callable=AsyncMock,
-        create=True, side_effect=storage_error,
+        side_effect=storage_error,
     )
     generation = mocker.patch(
         'app.services.course_service.stream_course_generation',
@@ -682,7 +539,7 @@ async def test_history_preflight_finishes_before_stream_factory(
 
     probe = mocker.patch.object(
         CourseHistory, 'ensure_available', new_callable=AsyncMock,
-        create=True, side_effect=blocked_probe,
+        side_effect=blocked_probe,
     )
     generation = mocker.patch(
         'app.services.course_service.stream_course_generation',
@@ -717,7 +574,7 @@ async def test_invalid_request_does_not_touch_history(
     from app.services.course_history import CourseHistory
 
     probe = mocker.patch.object(
-        CourseHistory, 'ensure_available', new_callable=AsyncMock, create=True,
+        CourseHistory, 'ensure_available', new_callable=AsyncMock,
         side_effect=AssertionError('Rejected request must not touch storage'),
     )
     headers = {'X-Internal-Api-Key': TEST_API_KEY}
@@ -732,4 +589,8 @@ async def test_invalid_request_does_not_touch_history(
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post('/internal/ai/courses', headers=headers, json=valid_course_request_payload)
     assert response.status_code == expected_status
+    assert response.json()['status'] == expected_status
+    assert response.json()['message'] == (
+        '내부 인증 실패' if expected_status == 401 else '코스 생성 조건이 올바르지 않습니다.'
+    )
     probe.assert_not_awaited()

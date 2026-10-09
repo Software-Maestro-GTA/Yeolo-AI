@@ -51,7 +51,7 @@ async def test_long_draft_splits_days_with_bounded_parallelism_and_preserves_ord
         finally:
             active -= 1
 
-    boundary = mocker.patch('app.agent.course_graph._draft_day_candidates', create=True, side_effect=generate)
+    boundary = mocker.patch('app.agent.course_graph._draft_day_candidates', side_effect=generate)
     mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
     result = await draft_candidates(trip_request, ['places/recent'])
     assert boundary.call_count == total_days
@@ -74,7 +74,7 @@ async def test_one_day_504_retries_only_that_day_and_keeps_successful_results(mo
             raise APIError(504, {'error': {'message': 'Deadline exceeded', 'status': 'DEADLINE_EXCEEDED'}})
         await asyncio.sleep(.001)
         return daily_draft(day_index)
-    mocker.patch('app.agent.course_graph._draft_day_candidates', create=True, side_effect=generate)
+    mocker.patch('app.agent.course_graph._draft_day_candidates', side_effect=generate)
     mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
     result = await draft_candidates(trip_request, [])
     assert calls == Counter({0: 1, 1: 1, 2: 2, 3: 1, 4: 1})
@@ -86,7 +86,7 @@ async def test_partial_repair_does_not_request_already_verified_days(mocker, tri
     from app.agent.course_graph import draft_candidates
 
     existing = {index: daily_draft(index).days[0] for index in (0, 1, 3, 4)}
-    boundary = mocker.patch('app.agent.course_graph._draft_day_candidates', create=True, new_callable=AsyncMock, return_value=daily_draft(2))
+    boundary = mocker.patch('app.agent.course_graph._draft_day_candidates', new_callable=AsyncMock, return_value=daily_draft(2))
     result = await draft_candidates(trip_request, [], pending_days=[2], existing_days=existing)
     boundary.assert_awaited_once()
     assert boundary.call_args.kwargs['day_index'] == 2
@@ -106,7 +106,7 @@ async def test_draft_cancellation_joins_all_started_daily_calls(mocker, trip_req
             await asyncio.Event().wait()
         finally:
             closed.add(day_index)
-    mocker.patch('app.agent.course_graph._draft_day_candidates', create=True, side_effect=generate)
+    mocker.patch('app.agent.course_graph._draft_day_candidates', side_effect=generate)
     mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI', side_effect=AssertionError('Only the daily boundary may call the model'))
     task = asyncio.create_task(draft_candidates(trip_request, []))
     try:
@@ -133,7 +133,6 @@ async def test_daily_model_prompt_has_exact_assignment_and_whole_trip_context(mo
         return daily_draft(3)
     model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
     model.return_value.with_structured_output.return_value = RunnableLambda(respond)
-    assert hasattr(course_graph, '_draft_day_candidates'), 'A single-day model boundary is required'
     result = await course_graph._draft_day_candidates(trip_request, ['places/avoid'], '다른 날과 장소를 겹치지 마세요', day_index=3, seed='shared-trip-seed')
     assert len(result.days) == 1 and len(captured) == 1
     prompt = captured[0]
@@ -277,7 +276,7 @@ async def test_daily_metadata_cannot_replace_whole_trip_title_after_repair(mocke
         draft.tags = [f'미확인-{day_index}']
         return draft
 
-    mocker.patch('app.agent.course_graph._draft_day_candidates', create=True, side_effect=generate)
+    mocker.patch('app.agent.course_graph._draft_day_candidates', side_effect=generate)
     original = await draft_candidates(trip_request, [])
     existing = {index: day for index, day in enumerate(original.days) if index != 3}
     repaired = await draft_candidates(trip_request, [], pending_days=[3], existing_days=existing)

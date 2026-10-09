@@ -246,6 +246,7 @@ async def test_invalid_records_rejected_before_llm(chain, mocker, items):
                                      json=request(items).model_dump(mode='json'),
                                      headers={'X-Internal-Api-Key': 'test-key'})
     assert response.status_code == 400
+    assert response.json()['message'] == '분석 가능한 전처리 메타데이터가 부족합니다.'
     chain.ainvoke.assert_not_awaited()
 
 

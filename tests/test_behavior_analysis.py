@@ -127,25 +127,6 @@ async def test_behavior_analysis_invalid_format(mock_env):
         assert response.status_code == 400
 
 @pytest.mark.asyncio
-async def test_behavior_analysis_insufficient_data(mock_env):
-    # 아이템 데이터 부족 테스트 (비어 있음)
-    insufficient_payload = {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
-        "items": []
-    }
-    
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        headers = {"X-Internal-Api-Key": TEST_API_KEY}
-        response = await client.post(
-            "/internal/ai/taste-profile/analysis",
-            json=insufficient_payload,
-            headers=headers
-        )
-        assert response.status_code == 400
-        assert response.json()["message"] == "분석 가능한 전처리 메타데이터가 부족합니다."
-
-@pytest.mark.asyncio
 async def test_behavior_analysis_unauthorized(valid_request_payload):
     # 잘못된 API Key로 인한 인증 실패 테스트
     transport = ASGITransport(app=app)
