@@ -128,7 +128,7 @@ async def test_daily_model_prompt_has_exact_assignment_and_whole_trip_context(mo
     from app.agent import course_graph
 
     captured = []
-    def respond(prompt):
+    def respond(prompt, **_kwargs):
         captured.append(prompt.to_string())
         return daily_draft(3)
     model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')

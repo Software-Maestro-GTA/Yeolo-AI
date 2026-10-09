@@ -81,7 +81,9 @@ async def generate_place_copy(payload: dict) -> dict:
         thinking_level='low', max_retries=0,
         timeout=MAX_COPY_TIMEOUT, max_output_tokens=12000,
     )
-    result = await (PLACE_COPY_PROMPT | model.with_structured_output(PlaceCopyBatch)).ainvoke({
+    # Suppress LangChain's candidate_count=1 default; GenAI omits None on the wire.
+    chain = PLACE_COPY_PROMPT | model.with_structured_output(PlaceCopyBatch).bind(generation_config={'candidate_count': None})
+    result = await chain.ainvoke({
         'payload': json.dumps(payload, ensure_ascii=False),
     })
     return result.model_dump() if isinstance(result, BaseModel) else result

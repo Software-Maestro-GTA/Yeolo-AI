@@ -256,7 +256,7 @@ async def test_real_model_boundary_is_one_bounded_structured_call_and_prompt_sep
     from langchain_core.runnables import RunnableLambda
 
     captured = []
-    def receive(prompt):
+    def receive(prompt, **_kwargs):
         captured.append(prompt.to_string())
         return {'stops': []}
     model = mocker.patch('app.services.course_copy.ChatGoogleGenerativeAI')
@@ -289,7 +289,7 @@ async def test_structured_parse_accepts_one_oversized_row_without_losing_other_v
     rows[0]['memo'] = '전시의 흐름을 따라 내용을 살펴보세요. ' * 100
     model = mocker.patch('app.services.course_copy.ChatGoogleGenerativeAI')
     parsed = []
-    def receive(prompt):
+    def receive(prompt, **_kwargs):
         # Reproduce the schema selected for the actual provider boundary. A
         # local text-length failure must not erase other correctly identified rows.
         schema = model.return_value.with_structured_output.call_args.args[0]
@@ -323,7 +323,7 @@ async def test_actual_generated_schema_rejects_coercible_identity_and_retains_ba
     rows[0][field] = value
     model = mocker.patch('app.services.course_copy.ChatGoogleGenerativeAI')
     schemas = []
-    def receive(prompt):
+    def receive(prompt, **_kwargs):
         schema = model.return_value.with_structured_output.call_args.args[0]
         schemas.append(schema)
         return schema.model_validate({'stops': rows})

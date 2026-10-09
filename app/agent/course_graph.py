@@ -158,8 +158,9 @@ async def _draft_day_candidates(request: CourseRequestSchema, recent_ids: list[s
     assigned = date.fromisoformat(request.tripCondition.startDate) + timedelta(days=day_index)
     context = f'이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. reason은 25자 이내 한 문장만 작성하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{feedback}'
     # The provider deadline stays valid even when the local request expires sooner.
-    model = ChatGoogleGenerativeAI(model=settings.GEMINI_MODEL_NAME, google_api_key=settings.GEMINI_API_KEY, temperature=0.7, thinking_level='low', max_retries=0, timeout=DAILY_DRAFT_TIMEOUT_SECONDS, max_output_tokens=5000)
-    chain = COURSE_CANDIDATE_PROMPT | model.with_structured_output(CourseDraft)
+    model = ChatGoogleGenerativeAI(model=settings.GEMINI_MODEL_NAME, google_api_key=settings.GEMINI_API_KEY, thinking_level='low', max_retries=0, timeout=DAILY_DRAFT_TIMEOUT_SECONDS, max_output_tokens=5000)
+    # Suppress LangChain's candidate_count=1 default; GenAI omits None on the wire.
+    chain = COURSE_CANDIDATE_PROMPT | model.with_structured_output(CourseDraft).bind(generation_config={'candidate_count': None})
     async with asyncio.timeout(remaining):
         result = await chain.ainvoke({
             'mbti': request.mbti or '미제공',
