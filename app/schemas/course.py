@@ -90,6 +90,20 @@ class PlaceSchema(BaseModel):
     latitude: float = Field(..., description="위도")
     longitude: float = Field(..., description="경도")
 
+    @field_serializer("placeId")
+    def serialize_place_id(self, value: str, info: FieldSerializationInfo) -> str:
+        """Return the standalone public ID while preserving internal resource names.
+
+        Args:
+            value: Verified ID or internally normalized ``places/ID`` value.
+            info: Serialization context identifying the public course response.
+        Returns:
+            Standalone ID for public responses, or the unchanged internal value.
+        """
+        if isinstance(info.context, dict) and info.context.get("public_response"):
+            return value.removeprefix("places/")
+        return value
+
     @field_serializer("category")
     def serialize_category(self, value: str, info: FieldSerializationInfo) -> str:
         """Map only explicit public output; keep raw types in internal dumps."""

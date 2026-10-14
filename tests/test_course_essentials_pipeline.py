@@ -109,6 +109,10 @@ async def test_two_day_course_uses_only_ids_details_essentials_and_actual_routes
     assert course.totalCost == 60000
     wire = course.model_dump(context={'public_response': True})
     public = CourseSchema.model_validate(wire)
+    assert {stop.place.placeId for day in public.itinerary.days for stop in day.stops} == {
+        f'venue-{day_index}-{index}' for day_index in range(2) for index in range(5)
+    }
+    assert all(stop.place.placeId.startswith('places/') for stop in stops)
     assert {stop.place.category for day in public.itinerary.days for stop in day.stops} == {'CULTURE', 'FOOD', 'NATURE'}
     assert {stop.place.category for stop in stops} == {'museum', 'restaurant', 'park', 'art_gallery'}
     assert Counter(sku for sku, _ in calls) == {'text_search_ids': 12, 'place_details_essentials': 12, 'routes_essentials': 8}

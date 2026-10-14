@@ -50,7 +50,7 @@ def test_public_contract_rejects_raw_provider_types_and_unknown_codes(raw_type):
 @pytest.mark.parametrize('category', ['museum', 'market', 'brunch_restaurant', 'dessert_restaurant', 'hospital'])
 def test_public_serialization_preserves_internal_meal_and_tourism_evidence(category):
     """Public FOOD/SPOT groups must never replace raw safety or copy inputs."""
-    raw = InternalPlaceSchema(placeId='id', placeName='장소', category=category,
+    raw = InternalPlaceSchema(placeId='places/id', placeName='장소', category=category,
                               address='서울', latitude=37.5, longitude=127.)
     venue = VerifiedPlace(raw)
     proposal = Candidate(name='장소', meal='none')
@@ -60,9 +60,11 @@ def test_public_serialization_preserves_internal_meal_and_tourism_evidence(categ
     stop = StopSchema(sequence=1, stayMinutes=60, memo='방문 팁', reason='추천 이유',
                       place=raw, transportToNext={'type': 'none'})
     wire = stop.model_dump(context={'public_response': True})
+    assert wire['place']['placeId'] == 'id'
     assert wire['place']['category'] == map_actual_place_category(category)
     assert set(wire['place']) == {'placeId', 'placeName', 'category', 'latitude', 'longitude'}
     assert raw.category == stop.place.category == category
+    assert raw.placeId == stop.place.placeId == 'places/id'
     assert raw.model_dump() == before
     assert InternalPlaceSchema.model_validate(before).category == category
     assert meal_category_supported(raw.category, 'dinner') == meal_before

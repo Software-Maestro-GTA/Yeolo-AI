@@ -185,6 +185,9 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
     assert course["totalDays"] == len(course["itinerary"]["days"]) == 1
     stops = course["itinerary"]["days"][0]["stops"]
     assert len(stops) == 5 and len({stop["place"]["placeId"] for stop in stops}) == 5
+    assert {stop["place"]["placeId"] for stop in stops} == {
+        venue.place.placeId.removeprefix("places/") for venue in venues.values()
+    }
     assert [stop["sequence"] for stop in stops] == [1, 2, 3, 4, 5]
     assert {stop["place"]["placeName"] for stop in stops} == {candidate.name for candidate in draft.days[0].candidates}
     assert {stop["place"]["category"] for stop in stops} == {"SPOT", "FOOD"}
