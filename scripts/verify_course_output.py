@@ -2,8 +2,8 @@
 
 Usage: uv run python scripts/verify_course_output.py --request REQUEST --result RESULT
        uv run python scripts/verify_course_output.py --request REQUEST --live --output DIR
-Live mode sends the chosen request to configured Gemini/Maps and LangSmith services.
-Exit 0 means structural/schedule and (in live mode) trace checks passed, not optimal quality.
+Live mode sends the chosen request to configured LLM/Maps and LangSmith services.
+Exit 0 means public contract and (in live mode) trace checks passed, not optimal quality.
 """
 
 import argparse
@@ -11,7 +11,6 @@ import asyncio
 import json
 import math
 import os
-import re
 import sys
 import tempfile
 import time
@@ -32,14 +31,13 @@ def validate_output(request: dict, result: dict) -> dict:
         result: Collected SSE result containing events, completed and course.
     Returns:
         Report with passed, errors, warnings, days and stops. Provider authenticity,
-        future opening hours and subjective recommendation quality are not proven.
+        opening hours, internal visit timing and subjective quality are not proven.
+        App category groups cannot establish lunch/dinner service or official names.
+        Visit timing and raw provider types are checked inside the graph before
+        public serialization and are not reconstructed from display groups.
     """
     from pydantic import ValidationError
 
-    from app.agent.tools.verified_maps import (
-        individual_place_category_supported,
-        meal_category_supported,
-    )
     from app.schemas.course import CourseRequestSchema, CourseSchema
     from app.services.course_routing import valid_route
 
@@ -61,6 +59,21 @@ def validate_output(request: dict, result: dict) -> dict:
         req = CourseRequestSchema.model_validate(request)
         course = CourseSchema.model_validate(result.get('course'))
         start = date.fromisoformat(req.tripCondition.startDate)
+        raw_course = result['course']
+        if set(raw_course) != {'title', 'destinationCountry', 'destinationCity', 'startDate', 'totalDays', 'totalCost', 'tags', 'itinerary'}:
+            errors.append('Unexpected or missing course response fields')
+        if set(raw_course['itinerary']) != {'days'}:
+            errors.append('Unexpected itinerary response fields')
+        for raw_day in raw_course['itinerary']['days']:
+            if set(raw_day) != {'day', 'date', 'stops'}:
+                errors.append('Unexpected or missing day response fields')
+            for raw_stop in raw_day['stops']:
+                if set(raw_stop) != {'sequence', 'stayMinutes', 'memo', 'reason', 'cost', 'place', 'transportToNext'}:
+                    errors.append('Unexpected or missing stop response fields')
+                if set(raw_stop['place']) != {'placeId', 'placeName', 'category', 'latitude', 'longitude'}:
+                    errors.append('Unexpected or missing place response fields')
+                if set(raw_stop['transportToNext']) != {'type', 'distance', 'minutes', 'memo'}:
+                    errors.append('Unexpected or missing transport response fields')
     except (ValidationError, ValueError) as exc:
         errors.append('Schema/calendar validation failed: ' + type(exc).__name__)
         return report
@@ -68,21 +81,23 @@ def validate_output(request: dict, result: dict) -> dict:
     for field in ['destinationCountry', 'destinationCity', 'startDate', 'totalDays']:
         if getattr(course, field) != getattr(trip, field):
             errors.append(f'Request mismatch: {field}')
-    if not course.title.strip() or not course.recommendationReason.strip():
-        errors.append('Empty title or recommendationReason')
+    if not course.title.strip():
+        errors.append('Empty title')
+    if not math.isfinite(course.totalCost) or course.totalCost < 0:
+        errors.append('Invalid totalCost')
     days = course.itinerary.days
+    warnings.append('Public display groups do not establish actual lunch/dinner service; official place names, opening hours and business status are not proven by this output')
     report['days'] = len(days)
     if len(days) != trip.totalDays:
         errors.append('Wrong number of days')
     seen: set[str] = set()
-    malls = 0
     for index, day in enumerate(days, 1):
         prefix = f'Day {index}'
         if day.day != index or day.date != (start + timedelta(days=index-1)).isoformat():
             errors.append(f'{prefix}: day/date mismatch')
         if not day.stops:
             errors.append(f'{prefix}: no stops')
-        meal_windows = {'lunch': False, 'dinner': False}
+        food_stops = 0
         for seq, stop in enumerate(day.stops, 1):
             report['stops'] += 1
             label = f'{prefix} stop {seq}'
@@ -92,31 +107,15 @@ def validate_output(request: dict, result: dict) -> dict:
             if not place.placeId.strip() or place.placeId in seen:
                 errors.append(f'{label}: missing/duplicate place ID')
             seen.add(place.placeId)
-            if not place.placeName.strip() or not place.address.strip():
-                errors.append(f'{label}: missing place name/address')
+            if not place.placeName.strip():
+                errors.append(f'{label}: missing place name')
             if not math.isfinite(place.latitude) or not -90 <= place.latitude <= 90 or not math.isfinite(place.longitude) or not -180 <= place.longitude <= 180:
                 errors.append(f'{label}: invalid coordinates')
-            category = place.category.lower()
-            if not individual_place_category_supported(category):
-                errors.append(f'{label}: invalid visit category {category}')
-            malls += category == 'shopping_mall'
+            food_stops += int(place.category == 'FOOD')
             if not stop.reason.strip():
                 errors.append(f'{label}: empty reason')
             if '관심이 많은' in stop.reason:
                 errors.append(f'{label}: disallowed reason phrase')
-            mentioned_times = re.findall(r'(?<!\d)\d{2}:\d{2}(?!\d)', stop.reason)
-            if any(value != stop.arrivalTime for value in mentioned_times):
-                errors.append(f'{label}: reason arrival time disagrees with itinerary')
-            hour, minute = map(int, stop.arrivalTime.split(':'))
-            if hour > 23 or minute > 59:
-                errors.append(f'{label}: invalid clock time')
-                continue
-            arrival = hour * 60 + minute
-            departure = arrival + stop.stayMinutes
-            if arrival < 540 or departure > 1260:
-                errors.append(f'{label}: outside 09:00–21:00')
-            meal_windows['lunch'] |= meal_category_supported(category, 'lunch') and 690 <= arrival and departure <= 840
-            meal_windows['dinner'] |= meal_category_supported(category, 'dinner') and 1050 <= arrival and departure <= 1200
             route = stop.transportToNext
             if seq == len(day.stops):
                 if route.type != 'none' or route.minutes not in {None, 0} or route.distance not in {None, 0}:
@@ -124,18 +123,8 @@ def validate_output(request: dict, result: dict) -> dict:
             else:
                 if not valid_route(route):
                     errors.append(f'{label}: invalid route')
-                else:
-                    nxt_hour, nxt_minute = map(int, day.stops[seq].arrivalTime.split(':'))
-                    gap = nxt_hour * 60 + nxt_minute - departure - route.minutes - 10
-                    if gap < 0:
-                        errors.append(f'{label}: schedule overlap including travel/buffer')
-                    elif gap > 120:
-                        warnings.append(f'{label}: {gap} unallocated minutes before next stop')
-        for meal, present in meal_windows.items():
-            if not present:
-                errors.append(f'{prefix}: no verified meal category fitting {meal} window')
-    if malls > 1:
-        warnings.append(f'{malls} shopping malls; review against user preferences')
+        if food_stops < 2:
+            warnings.append(f'{prefix}: {food_stops} FOOD stops; review meal coverage using internal provider categories')
     for trace in result.get('local_traces', []):
         if trace.get('error') or not trace.get('ended'):
             errors.append('Local graph trace did not end successfully')
@@ -163,7 +152,7 @@ async def run_live(request: dict, output: Path) -> dict:
         # Callback context is inherited by the producer task without patching production code.
         with collect_runs() as collector, tracing_v2_enabled(project_name=os.getenv('LANGSMITH_PROJECT'), client=client, tags=['course-output-verification']):
             try:
-                async with asyncio.timeout(150):
+                async with asyncio.timeout(settings.COURSE_TIMEOUT_SECONDS + 5):
                     async with aclosing(await generate_course_service(CourseRequestSchema.model_validate(request))) as stream:
                         async for raw in stream:
                             if raw.startswith(':'):

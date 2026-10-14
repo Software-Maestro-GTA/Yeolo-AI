@@ -21,17 +21,31 @@ def city_record(code='JP', identifier='verified-city', name='공급자 도시명
             'viewport': {'low': {'latitude': 34.5, 'longitude': 138.2}, 'high': {'latitude': 36.5, 'longitude': 141.3}}}
 
 
+def essential_response(request, records):
+    """Expose search IDs and masked geographic details as separate responses."""
+    assert request.url.host == 'places.googleapis.com'
+    if request.method == 'POST':
+        assert request.url.path == '/v1/places:searchText'
+        assert request.headers['X-Goog-FieldMask'] == 'places.id'
+        return httpx.Response(200, json={'places': [{'id': item.get('id')} for item in records]})
+    assert request.method == 'GET' and request.url.path.startswith('/v1/places/')
+    fields = set(request.headers['X-Goog-FieldMask'].split(','))
+    assert fields == {'id', 'addressComponents', 'types', 'viewport'}
+    identifier = request.url.path.rsplit('/', 1)[-1]
+    record = next(item for item in records if item.get('id') == identifier)
+    return httpx.Response(200, json={key: value for key, value in record.items() if key in fields})
+
+
 def responder(countries, cities, queries=None):
     def respond(request):
-        assert request.url.host == 'places.googleapis.com'
-        assert request.url.path == '/v1/places:searchText'
-        body = json.loads(request.content)
-        assert body['pageSize'] == 5
-        assert set(request.headers['X-Goog-FieldMask'].split(',')) == {'places.id', 'places.displayName', 'places.addressComponents', 'places.types', 'places.viewport'}
-        query = body['textQuery']
-        if queries is not None:
-            queries.append(query)
-        return httpx.Response(200, json={'places': cities if ', ' in query else countries})
+        if request.method == 'POST':
+            body = json.loads(request.content)
+            assert body['pageSize'] == 5
+            query = body['textQuery']
+            if queries is not None:
+                queries.append(query)
+            return essential_response(request, cities if ', ' in query else countries)
+        return essential_response(request, [*countries, *cities])
     return httpx.MockTransport(respond)
 
 
@@ -58,7 +72,8 @@ async def test_different_official_names_use_same_verified_geographic_contract(co
     assert result.country_code == code
     assert result.place_id == 'verified-city'
     assert queries == [country, f'{city}, {country}']
-    assert metrics['skus']['text_search_pro']['requests'] == 2
+    assert metrics['skus']['text_search_ids']['requests'] == 2
+    assert metrics['skus']['place_details_essentials']['requests'] == 2
     assert metrics['estimate_complete']
 
 
@@ -85,12 +100,16 @@ async def test_country_requires_own_type_id_and_one_uppercase_iso_code(invalid):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('same_id', [True, False])
-async def test_multiple_valid_country_records_are_ambiguous_even_when_code_or_id_matches(same_id):
+async def test_country_entity_is_ambiguous_only_for_distinct_valid_ids(same_id):
     first = country_record(name='Japan')
     second = country_record(identifier=first['id'] if same_id else 'another-country', name='다른 국가명')
     async with httpx.AsyncClient(transport=responder([first, second], [city_record(name='Tokyo')])) as client:
-        with pytest.raises(ValueError):
-            await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination('Japan', 'Tokyo')
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        if same_id:
+            assert (await provider.resolve_destination('Japan', 'Tokyo')).country_code == 'JP'
+        else:
+            with pytest.raises(ValueError):
+                await provider.resolve_destination('Japan', 'Tokyo')
 
 
 @pytest.mark.asyncio
@@ -116,14 +135,18 @@ async def test_city_requires_own_geographic_type_identity_and_consistent_country
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(('same_id', 'same_bounds'), [(True, True), (False, True), (True, False), (False, False)])
-async def test_all_valid_geographic_candidates_remain_ambiguous_without_name_filter(same_id, same_bounds):
+async def test_distinct_geographic_ids_remain_ambiguous_without_name_filter(same_id, same_bounds):
     first = city_record(name='Tokyo')
     second = city_record(identifier=first['id'] if same_id else 'another-region', name='完全に異なる地名')
     if not same_bounds:
         second['viewport']['low']['latitude'] = 35.0
     async with httpx.AsyncClient(transport=responder([country_record(name='Japan')], [first, second])) as client:
-        with pytest.raises(ValueError):
-            await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination('Japan', 'Tokyo')
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        if same_id:
+            assert (await provider.resolve_destination('Japan', 'Tokyo')).place_id == first['id']
+        else:
+            with pytest.raises(ValueError):
+                await provider.resolve_destination('Japan', 'Tokyo')
 
 
 @pytest.mark.asyncio
@@ -134,9 +157,14 @@ async def test_destination_latitude_must_be_finite_real_numeric_coordinate(value
     # JSON itself disallows NaN/Infinity; use a response JSON override to model an
     # invalid provider decoder value without inventing a successful coordinate.
     def respond(request):
-        body = json.loads(request.content)
+        records = [country_record(name='Japan'), city]
+        if request.method == 'POST':
+            body = json.loads(request.content)
+            return essential_response(request, [city] if ', ' in body['textQuery'] else [records[0]])
+        identifier = request.url.path.rsplit('/', 1)[-1]
+        record = next(item for item in records if item['id'] == identifier)
         response = httpx.Response(200, json={})
-        response.json = lambda: {'places': [city] if ', ' in body['textQuery'] else [country_record(name='Japan')]}
+        response.json = lambda: {key: value for key, value in record.items() if key in {'id', 'addressComponents', 'types', 'viewport'}}
         return response
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(ValueError):
@@ -223,12 +251,15 @@ async def test_destination_queries_remain_parallel_and_cross_dateline_bounds_are
     city = city_record(name='Official Pacific city')
     city['viewport'] = {'low': {'latitude': -20.0, 'longitude': 170.0}, 'high': {'latitude': 20.0, 'longitude': -170.0}}
     async def respond(request):
-        query = json.loads(request.content)['textQuery']
-        calls.append(query)
-        if len(calls) == 2:
-            both_started.set()
-        await asyncio.wait_for(both_started.wait(), 1)
-        return httpx.Response(200, json={'places': [city] if ', ' in query else [country_record()]})
+        records = [country_record(), city]
+        if request.method == 'POST':
+            query = json.loads(request.content)['textQuery']
+            calls.append(query)
+            if len(calls) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), 1)
+            return essential_response(request, [city] if ', ' in query else [records[0]])
+        return essential_response(request, records)
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         result = await VerifiedMapsProvider(client=client, api_key='offline').resolve_destination('Japan', 'Pacific destination')
     assert len(calls) == 2
@@ -286,3 +317,23 @@ async def test_destination_permission_failure_is_sanitized_and_not_retried():
     assert error.value.kind == 'unauthorized' and error.value.status_code == 403
     assert 'private-test-key' not in str(error.value)
     assert 'private provider detail' not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['en', 'ja', 'zh-TW'])
+async def test_country_and_city_queries_use_requested_locale_without_name_exception_rules(language):
+    requests = []
+
+    def respond(request):
+        records = [country_record(), city_record()]
+        if request.method == 'POST':
+            body = json.loads(request.content)
+            requests.append(body)
+            assert body['languageCode'] == language
+            return essential_response(request, [records[1]] if ', ' in body['textQuery'] else [records[0]])
+        assert request.url.params['languageCode'] == language
+        return essential_response(request, records)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await VerifiedMapsProvider(client=client, api_key='offline', language=language).resolve_destination('Japan', 'Tokyo')
+    assert result.country_code == 'JP' and result.place_id == 'verified-city'
+    assert len(requests) == 2

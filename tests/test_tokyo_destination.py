@@ -5,6 +5,8 @@ import json
 import httpx
 import pytest
 
+from tests.test_destination_resolution import essential_response
+
 TOKYO_NAME_FORMS = ['도쿄', '도쿄도', '東京', '東京都', 'Tokyo', 'Tokyo Metropolis']
 
 
@@ -28,15 +30,16 @@ def tokyo_payload():
 
 
 def destination_transport(cities, country='일본', country_code='JP'):
-    """Return geocoding facts via HTTP without live Maps calls."""
+    """Serve ID-only geographic search and strict Essentials detail responses."""
+    countries = [{'id': 'verified-country', 'types': ['country'], 'addressComponents': [
+        {'longText': country, 'shortText': country_code, 'types': ['country']},
+    ]}]
+
     def respond(request):
-        assert request.url.host == 'places.googleapis.com'
-        query = json.loads(request.content)['textQuery']
-        if query == country:
-            payload = [{'id': 'verified-country', 'types': ['country'], 'addressComponents': [{'longText': country, 'shortText': country_code, 'types': ['country']}]}]
-        else:
-            payload = cities
-        return httpx.Response(200, json={'places': payload})
+        if request.method == 'POST':
+            query = json.loads(request.content)['textQuery']
+            return essential_response(request, countries if query == country else cities)
+        return essential_response(request, [*countries, *cities])
 
     return httpx.MockTransport(respond)
 

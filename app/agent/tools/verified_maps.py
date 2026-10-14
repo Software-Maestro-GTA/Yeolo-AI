@@ -8,14 +8,12 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Self
-from urllib.parse import parse_qsl, unquote, urlsplit
 
 import httpx
+from pydantic import Field
 
 from app.core.config import settings
 from app.schemas.course import (
-    PhotoAttributionSchema,
-    PhotoAuthorSchema,
     PlaceSchema,
     TransportToNextSchema,
 )
@@ -27,7 +25,12 @@ from app.services.route_guidance import (
     format_route_guidance,
 )
 
-PLACE_DETAIL_FIELDS = 'id,displayName,formattedAddress,addressComponents,location,businessStatus,primaryType,types,rating,regularOpeningHours'
+# Text Search retrieves free provider IDs. These two detail masks request only
+# Essentials facts; names, primary types and operating status require Pro.
+PLACE_SEARCH_MASK = 'places.id'
+PLACE_DETAIL_FIELDS = 'id,formattedAddress,addressComponents,location,types'
+DESTINATION_DETAIL_FIELDS = 'id,addressComponents,types,viewport'
+MAX_SEARCH_IDS = 5
 
 
 class MapsProviderError(ValueError):
@@ -79,7 +82,7 @@ def _route_metrics(data: dict) -> tuple[float, float]:
         raise MapsProviderError('route_data') from None
 
 
-def _cacheable_response(data: dict, url: str, options: dict[str, Any]) -> bool:
+def _cacheable_response(data: dict, url: str) -> bool:
     """Admit nonempty, structurally usable responses to the request cache."""
     if url.endswith(':computeRoutes'):
         try:
@@ -89,16 +92,12 @@ def _cacheable_response(data: dict, url: str, options: dict[str, Any]) -> bool:
         return True
     if 'places' in data:
         places = data['places']
-        if not isinstance(places, list) or any(not isinstance(place, dict) for place in places):
+        if not isinstance(places, list):
             raise MapsProviderError('invalid')
-        mask = options.get('headers', {}).get('X-Goog-FieldMask', '')
-        for place in places:
-            if ('id' in place or mask == 'places.id') and (not isinstance(place.get('id'), str) or not re.fullmatch(r'[A-Za-z0-9_-]+', place['id'])):
-                if mask == 'places.id':
-                    raise MapsProviderError('invalid')
-                # Full venue records can be individually filtered, but the
-                # malformed response must not become a reusable success.
-                return False
+        if any(not isinstance(place, dict) or _destination_id(place) is None for place in places):
+            # Individual malformed IDs are filtered before details requests, but
+            # a partially invalid response must not become a cached success.
+            return False
         return bool(places)
     if url.startswith('https://places.googleapis.com/v1/places/') and data.get('id') != url.rsplit('/', 1)[-1]:
         raise MapsProviderError('invalid')
@@ -122,75 +121,34 @@ class Destination:
         return self.south <= latitude <= self.north and longitude_ok
 
 
+class InternalPlaceSchema(PlaceSchema):
+    """Minimal public venue plus provider facts used only during planning.
+
+    ``category`` retains the provider type for meal/visit/copy verification; its
+    inherited serializer exposes the app group with explicit public context only.
+    ``address`` is an Essentials provider fact. ``placeEngName`` retains the
+    model's optional search name; neither name is officially verified here.
+    These internal fields are not part of the public API response.
+    """
+
+    category: str = Field(..., description='Actual provider type for internal validation; serialized as an app category')
+    providerTypes: list[str] = Field(default_factory=list, exclude=True, description='Actual Essentials types for display grouping only')
+    address: str = Field(default='', description='Provider address for internal area matching')
+    placeEngName: str = Field(default='', description='Optional proposed English search name; not officially verified')
+
+
+class InternalTransportSchema(TransportToNextSchema):
+    """Actual route with optional internal fare used by cost calculation."""
+
+    cost: int | None = Field(default=None, ge=0, description='Known route fare in KRW; None is unknown')
+
+
 @dataclass(frozen=True)
 class VerifiedPlace:
-    """Provider facts and machine-readable regular opening periods (None unknown)."""
+    """Essentials venue facts; operating status and opening periods are unknown."""
 
     place: PlaceSchema
     periods: list[dict] | None = None
-
-
-@dataclass(frozen=True)
-class VerifiedPhoto:
-    """Actual provider media URI and structured source/author attribution."""
-
-    url: str
-    attribution: PhotoAttributionSchema
-
-
-def _photo_uri(value: Any, api_key: str, image: bool = False) -> str | None:
-    """Accept credential-free HTTPS Google image/source links only."""
-    if not isinstance(value, str) or not value or any(ord(char) < 32 or char.isspace() for char in value):
-        return None
-    value = 'https:' + value if value.startswith('//') else value
-    decoded = unquote(value)
-    if any(ord(char) < 32 for char in decoded) or (api_key and api_key in decoded):
-        return None
-    try:
-        parsed = urlsplit(value)
-        host = parsed.hostname or ''
-        domains = ('googleusercontent.com',) if image else ('google.com', 'googleusercontent.com')
-        if parsed.scheme != 'https' or parsed.username or parsed.password or parsed.port not in {None, 443} or not any(host == domain or host.endswith('.' + domain) for domain in domains):
-            return None
-        secrets = {'key', 'apikey', 'api_key', 'access_token', 'token', 'credential', 'credentials'}
-        if any(key.casefold() in secrets for key, _ in parse_qsl(parsed.query)):
-            return None
-        return value
-    except ValueError:
-        return None
-
-
-def _photo_attribution(raw: dict, api_key: str) -> PhotoAttributionSchema | None:
-    """Validate supplied source/author fields and retain them in dedicated DTOs."""
-    source = _photo_uri(raw.get('googleMapsUri'), api_key)
-    if source is None:
-        return None
-    authors = raw.get('authorAttributions', [])
-    if not isinstance(authors, list):
-        return None
-    validated_authors = []
-    for author in authors:
-        if not isinstance(author, dict) or not isinstance(author.get('displayName'), str):
-            return None
-        name = ' '.join(re.sub(r'<[^>]*>', '', author['displayName']).split())
-        if not name or (api_key and api_key in name):
-            return None
-        fields = {'displayName': name}
-        for key in ('uri', 'photoUri'):
-            if key in author:
-                uri = _photo_uri(author[key], api_key, image=key == 'photoUri')
-                if uri is None:
-                    return None
-                fields[key] = uri
-        validated_authors.append(PhotoAuthorSchema(**fields))
-    return PhotoAttributionSchema(googleMapsUri=source, authorAttributions=validated_authors)
-
-
-def _country(components: list[dict]) -> str:
-    for item in components:
-        if 'country' in item.get('types', []):
-            return item.get('shortText') or item.get('short_name', '')
-    return ''
 
 
 def _normalized(value: str) -> str:
@@ -250,13 +208,6 @@ def _destination_bounds(raw: dict) -> tuple[float, float, float, float] | None:
         return None
 
 
-def _same_name(candidate: Any, name: str) -> bool:
-    # Parenthetical official aliases are safe only when the remaining title matches
-    # exactly. Substrings would confuse e.g. a museum with its nearby gift shop.
-    actual_names = {_normalized(name), _normalized(re.sub(r'\([^)]*\)', '', name))}
-    return any(_normalized(proposed) in actual_names for proposed in (candidate.name, candidate.english_name) if proposed.strip())
-
-
 def _geographic_area(types: list[str]) -> bool:
     """Reject area centroids and address/road records as individual visit venues."""
     excluded = {'neighborhood', 'locality', 'postal_town', 'colloquial_area', 'country', 'continent', 'political', 'route', 'intersection', 'geocode', 'street_address', 'plus_code'}
@@ -267,7 +218,7 @@ def meal_category_supported(category: str, meal: str) -> bool:
     """Require a concrete meal-serving business, consistently across all stages.
 
     A market, generic food tag, or dessert venue does not establish lunch/dinner
-    service. Primary business types take precedence over broad secondary tags.
+    service. Restricted meal categories cannot be promoted by generic food tags.
     """
     if meal == 'none':
         return True
@@ -301,52 +252,96 @@ TOURISM_CATEGORIES = frozenset({
     'planetarium', 'observation_deck', 'tourist_attraction', 'amusement_park', 'theme_park', 'water_park',
     'shopping_mall', 'department_store', 'shopping_center', 'clothing_store', 'book_store',
     'gift_shop', 'souvenir_store', 'market', 'spa', 'wellness_center', 'massage', 'sauna', 'yoga_studio',
+    'night_club', 'bar', 'pub', 'wine_bar', 'dance_club', 'convention_center',
+    'sports_complex', 'stadium', 'bowling_alley', 'golf_course', 'ski_resort',
+    'performing_arts_theater', 'movie_theater',
 })
 
 
 def tourism_category_supported(category: str) -> bool:
-    """Admit concrete non-food tourism venues for nearby slot supplementation."""
+    """Admit concrete provider categories that can serve as sightseeing visits."""
     return category in TOURISM_CATEGORIES
 
 
+def individual_travel_category_supported(category: str) -> bool:
+    """Require an actual sightseeing, meal or refreshment venue category.
+
+    Args:
+        category: Concrete type selected from an Essentials provider response.
+
+    Returns:
+        Whether the supplied category supports a course visit. Generic tags and
+        unrelated businesses cannot consume a named candidate's first search hit.
+    """
+    refreshment_categories = {
+        'cafe', 'coffee_shop', 'tea_house', 'bakery', 'dessert_shop',
+        'dessert_restaurant', 'ice_cream_shop', 'chocolate_shop', 'pastry_shop',
+    }
+    return (
+        tourism_category_supported(category)
+        or meal_category_supported(category, 'breakfast')
+        or meal_category_supported(category, 'lunch')
+        or category in refreshment_categories
+    )
+
+
 def _place_category(raw: dict) -> str:
-    """Prefer the primary business; otherwise retain a specific provider type."""
-    if raw.get('primaryType'):
-        return raw['primaryType']
+    """Select a supplied type without guessing a missing primary business type.
+
+    A secondary generic restaurant tag cannot establish meal service for a
+    market, dessert shop, breakfast-only shop or shopping complex. Mixed food
+    types also keep an actual restaurant from being counted as a core attraction.
+    """
     types = raw.get('types', [])
-    return next((kind for kind in types if kind not in {'point_of_interest', 'establishment', 'food', 'store'}), next(iter(types), 'place'))
+    restrictive = {
+        'market', 'shopping_mall', 'shopping_center', 'supermarket',
+        'breakfast_restaurant', 'dessert_restaurant', 'brunch_restaurant',
+        'cafe', 'coffee_shop', 'bakery',
+    }
+    restricted = next((kind for kind in types if kind in restrictive), None)
+    if restricted is not None:
+        return restricted
+    food_type = next((kind for kind in types if meal_category_supported(kind, 'lunch')), None)
+    if food_type is not None:
+        return food_type
+    return next((kind for kind in types if kind and kind not in {'point_of_interest', 'establishment', 'food', 'store'}), '')
 
 
-def _verified_place(raw: dict, destination: Destination, meal: str, candidate: Any | None = None) -> VerifiedPlace | None:
-    """Validate provider venue facts, optionally requiring a proposed exact name.
+def _verified_place(raw: dict, destination: Destination, meal: str, candidate: Any) -> VerifiedPlace | None:
+    """Validate Essentials facts and preserve the model's proposed display names.
 
-    Discovery uses official provider names directly; candidate verification keeps
-    its strict identity check. Invalid facts return no venue and invent nothing.
+    Args:
+        raw: Details returned for an actual ID from the free text search.
+        destination: Verified country and finite destination viewport.
+        meal: Proposed visit role checked against the supplied provider types.
+        candidate: Named model proposal; its category is never used as evidence.
+    Returns:
+        Actual ID, category, coordinates and address with the proposed name, or
+        None when venue facts fail. Official name/status/hours are not verified.
     """
     try:
-        types = raw.get('types', []) + [raw.get('primaryType', '')]
+        types = raw.get('types', [])
+        if not isinstance(types, list) or any(not isinstance(kind, str) for kind in types):
+            return None
         if _geographic_area(types) or _transit_node(types):
             return None
         category = _place_category(raw)
-        if not meal_category_supported(category, meal):
+        if not category or not individual_travel_category_supported(category) or not meal_category_supported(category, meal):
             return None
-        name = raw['displayName']['text']
+        name = candidate.name
         identifier, address = raw.get('id'), raw.get('formattedAddress')
         if not isinstance(name, str) or not name.strip() or not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', identifier) or not isinstance(address, str) or not address.strip():
             return None
-        latitude, longitude = float(raw['location']['latitude']), float(raw['location']['longitude'])
+        coordinates = (raw['location']['latitude'], raw['location']['longitude'])
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in coordinates):
+            return None
+        latitude, longitude = map(float, coordinates)
         if not all(math.isfinite(value) for value in (latitude, longitude)) or not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
             return None
-        if not destination.contains(latitude, longitude) or _country(raw.get('addressComponents', [])) != destination.country_code:
+        if not destination.contains(latitude, longitude) or _destination_country_code(raw) != destination.country_code:
             return None
-        if raw.get('businessStatus', '').startswith('CLOSED') or (candidate is not None and not _same_name(candidate, name)):
-            return None
-        hours = raw.get('regularOpeningHours', {})
-        rating = raw.get('rating')
-        if rating is not None and (not isinstance(rating, (int, float)) or not math.isfinite(rating) or not 0 <= rating <= 5):
-            rating = None
-        place = PlaceSchema(placeId=identifier, placeName=name, placeEngName=name if name.isascii() and re.search('[A-Za-z]', name) else '', category=category, address=address, latitude=latitude, longitude=longitude, rating=rating, photoUrl='', openingHours=hours.get('weekdayDescriptions') or [])
-        return VerifiedPlace(place, hours.get('periods'))
+        place = InternalPlaceSchema(placeId=identifier, placeName=name, placeEngName=candidate.english_name, category=category, providerTypes=types, address=address, latitude=latitude, longitude=longitude)
+        return VerifiedPlace(place)
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
         return None
 
@@ -358,12 +353,16 @@ class VerifiedMapsProvider:
         client: Optional injected HTTP client; caller retains ownership.
         api_key: Optional configured Google Maps key.
         concurrency: Maximum active provider requests.
+        language: Preferred Maps display and navigation language (BCP 47).
 
     Raises:
         ValueError: Provider cannot establish a destination, venue, or route.
     """
 
-    def __init__(self, client: httpx.AsyncClient | None = None, api_key: str | None = None, concurrency: int = 6) -> None:
+    def __init__(self, client: httpx.AsyncClient | None = None, api_key: str | None = None, concurrency: int = 6, language: str = 'ko') -> None:
+        if not isinstance(language, str) or not re.fullmatch(r'[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*', language):
+            raise ValueError('Invalid Maps language code')
+        self.language = language
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(6))
         self.owns_client = client is None
         self.api_key = settings.GOOGLE_MAPS_API_KEY if api_key is None else api_key
@@ -414,7 +413,7 @@ class VerifiedMapsProvider:
                         if not isinstance(data, dict):
                             kind = 'route_data' if url.endswith(':computeRoutes') else 'invalid'
                             raise MapsProviderError(kind, status)
-                        cacheable = use_cache and _cacheable_response(data, url, kwargs)
+                        cacheable = use_cache and _cacheable_response(data, url)
                 except asyncio.CancelledError:
                     if sent:
                         self.metrics.record_error(sku)
@@ -439,72 +438,79 @@ class VerifiedMapsProvider:
                 await asyncio.sleep(.2)
         raise MapsProviderError('transient')
 
-    async def photo(self, place_id: str) -> VerifiedPhoto | None:
-        """Fetch one fresh actual place image with complete available attribution.
+    async def _search_ids(self, query: str, *, language: str, location_bias: dict | None = None) -> list[str]:
+        """Retrieve at most five distinct IDs without requesting paid search fields."""
+        body = {'textQuery': query, 'languageCode': language, 'pageSize': MAX_SEARCH_IDS}
+        if location_bias is not None:
+            body['locationBias'] = location_bias
+        data = await self._request('POST', 'https://places.googleapis.com/v1/places:searchText',
+            headers={'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': PLACE_SEARCH_MASK}, json=body)
+        entries = data.get('places', [])
+        if not isinstance(entries, list):
+            raise MapsProviderError('invalid')
+        identifiers = dict.fromkeys(identifier for entry in entries
+            if isinstance(entry, dict) and (identifier := _destination_id(entry)) is not None)
+        return list(identifiers)[:MAX_SEARCH_IDS]
 
-        Args:
-            place_id: A final verified provider ID, optionally prefixed places/.
-        Returns:
-            Actual media URL and source DTO, or None for optional photo failures.
-        Raises:
-            asyncio.CancelledError: External cancellation is always propagated.
-        """
-        identifier = place_id.removeprefix('places/')
-        if not re.fullmatch(r'[A-Za-z0-9_-]+', identifier):
-            return None
+    async def _details(self, identifier: str, *, destination: bool = False, language: str | None = None) -> dict:
+        """Fetch strictly Essentials fields and require the requested response ID."""
+        if not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', identifier):
+            raise MapsProviderError('invalid')
+        data = await self._request('GET', f'https://places.googleapis.com/v1/places/{identifier}',
+            headers={'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': DESTINATION_DETAIL_FIELDS if destination else PLACE_DETAIL_FIELDS},
+            params={'languageCode': language or self.language})
+        if data.get('id') != identifier:
+            raise MapsProviderError('invalid')
+        return data
+
+    async def _destination_records(self, query: str) -> dict:
+        """Join bounded geographic detail requests, including caller cancellation."""
+        identifiers = await self._search_ids(query, language=self.language)
+        tasks = [asyncio.create_task(self._details(identifier, destination=True)) for identifier in identifiers]
         try:
-            metadata = await self._request('GET', f'https://places.googleapis.com/v1/places/{identifier}', use_cache=False, headers={'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': 'id,photos'})
-            if metadata.get('id') != identifier or not isinstance(metadata.get('photos', []), list):
-                return None
-            for raw in metadata.get('photos', []):
-                if not isinstance(raw, dict):
-                    continue
-                name = raw.get('name', '')
-                if not isinstance(name, str) or not re.fullmatch(rf'places/{re.escape(identifier)}/photos/[A-Za-z0-9_-]+', name):
-                    continue
-                attribution = _photo_attribution(raw, self.api_key)
-                if attribution is None:
-                    continue
-                media = await self._request('GET', f'https://places.googleapis.com/v1/{name}/media', use_cache=False, headers={'X-Goog-Api-Key': self.api_key}, params={'maxWidthPx': 1200, 'skipHttpRedirect': 'true'})
-                if 'name' in media and media['name'] != name + '/media':
-                    return None
-                uri = _photo_uri(media.get('photoUri'), self.api_key, image=True)
-                avatars = {_photo_uri(author.get('photoUri'), self.api_key, image=True) for author in raw.get('authorAttributions', [])}
-                if uri in avatars:
-                    return None
-                return VerifiedPhoto(uri, attribution) if uri is not None else None
-            return None
-        except (ValueError, httpx.HTTPError, KeyError, TypeError, AttributeError):
-            return None
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+        failures = [result for result in results if isinstance(result, MapsProviderError)]
+        if failures:
+            raise min(failures, key=lambda failure: failure.transient)
+        if any(isinstance(result, BaseException) for result in results):
+            raise MapsProviderError('invalid')
+        return {'places': results}
 
     async def resolve_destination(self, country: str, city: str) -> Destination:
-        """Resolve a single actual geographic entity without comparing its names.
+        """Resolve one real geographic entity using ID search and Essentials facts.
 
         Args:
-            country: Original country search text, cleaned only for Unicode space.
-            city: Original city search text, cleaned only for Unicode space.
+            country: Original country search text, cleaned for Unicode whitespace.
+            city: Original city search text, cleaned for Unicode whitespace.
         Returns:
-            Verified country code, destination ID and finite viewport bounds.
+            Actual country code, destination ID and finite viewport bounds.
         Raises:
-            ValueError: Blank input, missing geographic facts or ambiguous results.
-            MapsProviderError: Provider request or authorization failure.
+            ValueError: Blank input, missing facts or distinct ambiguous entities.
+            MapsProviderError: Provider request, identity or authorization failure.
 
-        Names returned by Maps may be in a different language. Its interpretation
-        remains subject to own geographic type, identity, country and boundary
-        validation; this does not establish an exact administrative polygon.
+        Official names are unavailable in Essentials. Geographic type, country
+        identity and boundary validation do not establish an administrative polygon.
         """
         country_query, city_query = _destination_query(country), _destination_query(city)
         if not country_query or not city_query:
             raise ValueError('Destination search text is empty')
-        url = 'https://places.googleapis.com/v1/places:searchText'
-        headers = {'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': 'places.id,places.displayName,places.addressComponents,places.types,places.viewport'}
-        async def lookup(query: str, language: str) -> dict:
-            return await self._request('POST', url, headers=headers, json={'textQuery': query, 'languageCode': language, 'pageSize': 5})
-        country_data, city_data = await asyncio.gather(
-            lookup(country_query, 'ko' if re.search('[가-힣]', country_query) else 'en'),
-            lookup(f'{city_query}, {country_query}', 'ko' if re.search('[가-힣]', city_query) else 'en'),
-            return_exceptions=True,
-        )
+        tasks = [asyncio.create_task(self._destination_records(query))
+                 for query in (country_query, f'{city_query}, {country_query}')]
+        try:
+            country_data, city_data = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         results = (country_data, city_data)
         for result in results:
             if isinstance(result, asyncio.CancelledError):
@@ -546,120 +552,42 @@ class VerifiedMapsProvider:
         return matches[0]
 
     async def search(self, candidate: Any, destination: Destination) -> VerifiedPlace:
-        """Resolve a named candidate only when identity, region, and facts match."""
-        headers = {
-            'X-Goog-Api-Key': self.api_key,
-            'X-Goog-FieldMask': 'places.id',
-        }
-        queries = [(candidate.name, 'ko')]
+        """Select the first geographically/type-valid hit with Essentials only.
+
+        Args:
+            candidate: Model-proposed name, optional English name and meal role.
+            destination: Already verified country and city viewport.
+        Returns:
+            Verified provider ID/types/coordinates/address with the proposed name.
+        Raises:
+            ValueError: At most five inspected IDs supplied no suitable venue.
+            MapsProviderError: Request, identity or authorization failure.
+
+        Multiple suitable results retain provider query order. Essentials cannot
+        compare official names or verify operating status, so no Pro lookup or
+        name-ambiguity claim is made. Generic nameless discovery is unsupported.
+        """
+        queries = [(candidate.name, self.language)]
         if candidate.english_name and _normalized(candidate.english_name) != _normalized(candidate.name):
             queries.append((candidate.english_name, 'en'))
+        inspected: set[str] = set()
+        bias = {'rectangle': {'low': {'latitude': destination.south, 'longitude': destination.west},
+                              'high': {'latitude': destination.north, 'longitude': destination.east}}}
         for query, language in queries:
-            body = {
-                'textQuery': query,
-                'languageCode': language,
-                'pageSize': 5,
-                'locationBias': {'rectangle': {'low': {'latitude': destination.south, 'longitude': destination.west}, 'high': {'latitude': destination.north, 'longitude': destination.east}}},
-            }
-            search_url = 'https://places.googleapis.com/v1/places:searchText'
-            data = await self._request('POST', search_url, headers=headers, json=body)
-            entries = data.get('places', [])
-            if not isinstance(entries, list) or any(not isinstance(entry, dict) or not isinstance(entry.get('id'), str) or not re.fullmatch(r'[A-Za-z0-9_-]+', entry['id']) for entry in entries):
-                raise ValueError('Invalid Maps place ID response')
-            ids = {entry['id'] for entry in entries}
-            if not ids:
-                continue
-            if len(ids) == 1:
-                place_id = next(iter(ids))
-                details = await self._request('GET', f'https://places.googleapis.com/v1/places/{place_id}', headers={'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': PLACE_DETAIL_FIELDS}, params={'languageCode': language})
-                if details.get('id') != place_id:
-                    raise ValueError('Maps detail identity does not match the requested place')
-                data = {'places': [details]}
-            else:
-                # Preserve the original multi-result ambiguity checks. A first ID
-                # is never selected just because its detail request would be cheap.
-                full_headers = {**headers, 'X-Goog-FieldMask': ','.join(f'places.{field}' for field in PLACE_DETAIL_FIELDS.split(','))}
-                data = await self._request('POST', search_url, headers=full_headers, json=body)
-            matches: dict[str, VerifiedPlace] = {}
-            for raw in data.get('places', []):
+            identifiers = await self._search_ids(query, language=language, location_bias=bias)
+            for identifier in identifiers:
+                if identifier in inspected:
+                    continue
+                if len(inspected) == MAX_SEARCH_IDS:
+                    break
+                inspected.add(identifier)
+                raw = await self._details(identifier, language=language)
                 verified = _verified_place(raw, destination, candidate.meal, candidate)
                 if verified is not None:
-                    matches[verified.place.placeId] = verified
-            if len(matches) > 1:
-                raise ValueError(f'Ambiguous named venue: {candidate.name}')
-            if matches:
-                return next(iter(matches.values()))
-        raise ValueError(f'No verified named venue: {candidate.name}')
-
-    async def discover_meals(self, destination: Destination, anchor: VerifiedPlace) -> list[VerifiedPlace]:
-        """Discover at most five actual meal venues within 1 km of an attraction.
-
-        Args:
-            destination: Verified country/city boundary.
-            anchor: Verified nearby visit whose coordinates bound the search.
-        Returns:
-            Unique provider restaurants supporting lunch and dinner, nearest first.
-            An empty list means no suitable verified restaurant was supplied.
-        Raises:
-            MapsProviderError: Invalid anchor or provider failure.
-        """
-        from app.services.course_routing import distance_meters
-
-        latitude, longitude = anchor.place.latitude, anchor.place.longitude
-        if not all(math.isfinite(value) for value in (latitude, longitude)) or not -90 <= latitude <= 90 or not -180 <= longitude <= 180 or not destination.contains(latitude, longitude):
-            raise MapsProviderError('invalid')
-        data = await self._request('POST', 'https://places.googleapis.com/v1/places:searchText', headers={
-            'X-Goog-Api-Key': self.api_key,
-            'X-Goog-FieldMask': ','.join(f'places.{field}' for field in PLACE_DETAIL_FIELDS.split(',')),
-        }, json={
-            'textQuery': '음식점' if destination.country_code == 'KR' else 'restaurants',
-            'languageCode': 'ko' if destination.country_code == 'KR' else 'en',
-            'pageSize': 10,
-            'locationBias': {'circle': {'center': {'latitude': latitude, 'longitude': longitude}, 'radius': 1000}},
-        })
-        matches: dict[str, VerifiedPlace] = {}
-        for raw in data.get('places', []):
-            verified = _verified_place(raw, destination, 'lunch')
-            if verified is not None and meal_category_supported(verified.place.category, 'dinner') and distance_meters(anchor, verified) <= 1000:
-                matches[verified.place.placeId] = verified
-        return sorted(matches.values(), key=lambda venue: distance_meters(anchor, venue))[:5]
-
-    async def discover_attractions(self, destination: Destination, anchor: VerifiedPlace) -> list[VerifiedPlace]:
-        """Find at most five real tourism venues near an existing preference anchor.
-
-        Args:
-            destination: Verified country and destination viewport.
-            anchor: Verified tourism venue determining the local category search.
-        Returns:
-            Unique official provider venues within two kilometres, nearest first.
-        Raises:
-            MapsProviderError: Invalid anchor, authentication or provider failure.
-        """
-        from app.services.course_routing import distance_meters
-
-        latitude, longitude = anchor.place.latitude, anchor.place.longitude
-        if not tourism_category_supported(anchor.place.category) or not all(math.isfinite(value) for value in (latitude, longitude)) or not -90 <= latitude <= 90 or not -180 <= longitude <= 180 or not destination.contains(latitude, longitude):
-            raise MapsProviderError('invalid')
-        data = await self._request('POST', 'https://places.googleapis.com/v1/places:searchText', headers={
-            'X-Goog-Api-Key': self.api_key,
-            'X-Goog-FieldMask': ','.join(f'places.{field}' for field in PLACE_DETAIL_FIELDS.split(',')),
-        }, json={
-            'textQuery': anchor.place.category.replace('_', ' '),
-            'languageCode': 'ko' if destination.country_code == 'KR' else 'en',
-            'pageSize': 5,
-            'locationBias': {'circle': {'center': {'latitude': latitude, 'longitude': longitude}, 'radius': 2000}},
-        })
-        entries = data.get('places', [])
-        if not isinstance(entries, list):
-            raise MapsProviderError('invalid')
-        matches: dict[str, VerifiedPlace] = {}
-        for raw in entries:
-            if not isinstance(raw, dict):
-                continue
-            verified = _verified_place(raw, destination, 'none')
-            if verified is not None and tourism_category_supported(verified.place.category) and verified.place.placeId != anchor.place.placeId.removeprefix('places/') and distance_meters(anchor, verified) <= 2000:
-                matches[verified.place.placeId] = verified
-        return sorted(matches.values(), key=lambda venue: distance_meters(anchor, venue))[:5]
+                    return verified
+            if len(inspected) == MAX_SEARCH_IDS:
+                break
+        raise ValueError(f'No verified venue facts for query: {candidate.name}')
 
     async def route(self, origin: VerifiedPlace, destination: VerifiedPlace, mode: str = 'walking', departure_time: datetime | None = None) -> TransportToNextSchema:
         """Return provider route metrics at an explicitly supplied transit departure.
@@ -678,7 +606,7 @@ class VerifiedMapsProvider:
         modes = {'walking': 'WALK', 'transit': 'TRANSIT', 'driving': 'DRIVE', 'taxi': 'DRIVE'}
         if mode not in modes:
             raise MapsProviderError('invalid')
-        body = {'origin': {'placeId': origin.place.placeId.removeprefix('places/')}, 'destination': {'placeId': destination.place.placeId.removeprefix('places/')}, 'travelMode': modes[mode], 'languageCode': 'ko'}
+        body = {'origin': {'placeId': origin.place.placeId.removeprefix('places/')}, 'destination': {'placeId': destination.place.placeId.removeprefix('places/')}, 'travelMode': modes[mode], 'languageCode': self.language}
         if departure_time is not None:
             if departure_time.tzinfo is None or departure_time.utcoffset() is None:
                 raise MapsProviderError('invalid')
@@ -691,9 +619,9 @@ class VerifiedMapsProvider:
         # Guidance is optional: only validated numeric route facts determine
         # feasibility. Cancellation remains observable (it is BaseException).
         try:
-            memo = format_route_guidance(data, mode)
-            if not isinstance(memo, str) or not memo.strip() or len(memo) > MAX_MEMO_LENGTH:
+            memo = format_route_guidance(data, mode, language=self.language)
+            if (memo is None and fallback_route_guidance(mode, language=self.language) is not None) or (memo is not None and (not isinstance(memo, str) or not memo.strip() or len(memo) > MAX_MEMO_LENGTH)):
                 raise ValueError('Unusable optional route guidance')
         except Exception:  # noqa: BLE001 - optional presentation must not invalidate verified metrics
-            memo = fallback_route_guidance(mode)
-        return TransportToNextSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=memo)
+            memo = fallback_route_guidance(mode, language=self.language)
+        return InternalTransportSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=memo)

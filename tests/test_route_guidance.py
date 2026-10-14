@@ -8,12 +8,12 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
+from app.agent.tools.verified_maps import InternalPlaceSchema as PlaceSchema
 from app.agent.tools.verified_maps import (
     MapsProviderError,
     VerifiedMapsProvider,
     VerifiedPlace,
 )
-from app.schemas.course import PlaceSchema
 from app.services.maps_cost import classify_maps_sku
 
 
@@ -340,3 +340,64 @@ async def test_navigation_fields_keep_supported_sku_but_advanced_options_stay_un
     modified = copy.deepcopy(options)
     modified['headers']['X-Goog-FieldMask'] += ',routes.travelAdvisory'
     assert classify_maps_sku('POST', url, modified) == 'unknown'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('language', 'instruction'), [
+    ('en', 'Turn right onto Museum Street.'),
+    ('ja', '博物館通りで右折してください。'),
+    ('zh-TW', '在博物館街右轉。'),
+    ('es', 'Gire a la derecha en la calle del Museo.'),
+])
+async def test_route_locale_is_forwarded_and_supplied_navigation_avoids_korean_templates(endpoints, language, instruction):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json=response([walking(instruction)]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline', language=language)
+        result = await provider.route(*endpoints)
+        metrics = provider.metrics.snapshot()
+    assert len(requests) == 1 and json.loads(requests[0].content)['languageCode'] == language
+    assert result.memo == instruction
+    assert not any('\uac00' <= char <= '\ud7a3' for char in result.memo)
+    assert (result.minutes, result.distance) == (21, 1250)
+    assert metrics['estimate_complete'] and metrics['skus']['routes_essentials']['requests'] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language', ['en', 'ja', 'zh-CN', 'zh-TW', 'es'])
+async def test_missing_foreign_navigation_is_localized_or_null_never_korean(endpoints, language):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response([])))) as client:
+        result = await VerifiedMapsProvider(client=client, api_key='offline', language=language).route(*endpoints, mode='transit')
+    assert (result.minutes, result.distance) == (21, 1250)
+    if language == 'es':
+        assert result.memo is None
+    else:
+        assert isinstance(result.memo, str) and result.memo
+        assert not any('\uac00' <= char <= '\ud7a3' for char in result.memo)
+    if language == 'zh-TW':
+        assert '地圖' in result.memo
+
+
+@pytest.mark.asyncio
+async def test_foreign_transit_uses_whole_provider_instruction_instead_of_korean_boarding_template(endpoints):
+    first = transit('City Hall', 'Central Station', 'Line 1', 'North')
+    first['navigationInstruction'] = {'instructions': 'Take Line 1 from City Hall to Central Station.'}
+    second = transit('Central Station', 'Museum Station', 'Line 3', 'West')
+    second['navigationInstruction'] = {'instructions': 'Transfer to Line 3 and get off at Museum Station.'}
+    payload = response([first, second, walking('Walk along Museum Street.')])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
+        result = await VerifiedMapsProvider(client=client, api_key='offline', language='en').route(*endpoints, mode='transit')
+    assert result.memo == 'Take Line 1 from City Hall to Central Station. Transfer to Line 3 and get off at Museum Station. Walk along Museum Street.'
+    assert (result.minutes, result.distance) == (21, 1250)
+
+
+@pytest.mark.parametrize('language', [None, '', 'english', 'en_US', 'en,ko', 'ko\n'])
+def test_invalid_provider_language_is_rejected_before_client_creation(language, mocker):
+    client = mocker.patch('app.agent.tools.verified_maps.httpx.AsyncClient')
+    with pytest.raises(ValueError, match='Invalid Maps language code'):
+        VerifiedMapsProvider(api_key='offline', language=language)
+    client.assert_not_called()

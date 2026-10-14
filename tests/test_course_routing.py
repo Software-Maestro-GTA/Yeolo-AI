@@ -4,8 +4,11 @@ import math
 
 import pytest
 
+from app.agent.tools.verified_maps import InternalPlaceSchema as PlaceSchema
+from app.agent.tools.verified_maps import (
+    InternalTransportSchema as TransportToNextSchema,
+)
 from app.agent.tools.verified_maps import VerifiedPlace
-from app.schemas.course import PlaceSchema, TransportToNextSchema
 from app.services.course_routing import distance_meters, valid_route
 
 

@@ -6,7 +6,7 @@ in their own modules. Start at build_course_graph to inspect the workflow."""
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import aclosing
+from contextlib import aclosing, nullcontext
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -23,32 +23,37 @@ from app.schemas.course import (
 )
 from app.services.course_history import CourseHistory
 from app.services.maps_cost import MapsCostMetrics
+from app.services.myrealtrip_quotes import MyRealTripQuoteProvider
 
 logger = logging.getLogger(__name__)
 
 
 def build_course_graph(
-    provider: VerifiedMapsProvider, history: CourseHistory
+    provider: VerifiedMapsProvider,
+    history: CourseHistory,
+    quotes: MyRealTripQuoteProvider | None = None,
 ) -> CompiledStateGraph:
     """Compile the normal generation flow and its existing recovery branches.
 
     Normal flow:
         prepare → draft → verify_places → verify_routes → schedule → finalize
-        → enrich_images. Failed or insufficient proposals may draft again,
+        → finalize_course. Travel quotes run alongside daily drafts. Deferred
+        venues are queried before further model calls. Failed proposals can
         refill missing days, repair verified candidates or restore a snapshot.
 
     Args:
-        provider: Injectable place, route and photo provider.
+        provider: Injectable place and route provider.
         history: Injectable recent course history storage.
+        quotes: Optional injectable flight and accommodation quote boundary.
 
     Returns:
-        Compiled graph with the existing node names and recursion limit.
+        Compiled graph with bounded draft and deferred-query recovery paths.
 
     Raises:
         CourseGenerationError: During execution, no feasible verified course
             remains after the existing bounded recovery attempts.
     """
-    nodes = CourseGraphNodes(provider, history)
+    nodes = CourseGraphNodes(provider, history, quotes)
     graph = StateGraph(CourseState)
 
     # Only proposals and verification use the existing fallback time budget.
@@ -58,7 +63,9 @@ def build_course_graph(
     graph.add_node("verify_routes", nodes.bounded(nodes.verify_routes))
     graph.add_node("schedule", nodes.schedule)
     graph.add_node("finalize", nodes.finalize)
-    graph.add_node("enrich_images", nodes.enrich_images)
+    graph.add_node("finalize_course", nodes.finalize_course)
+    graph.add_node("quote_trip", nodes.quote_trip)
+    graph.add_node("expand_places", nodes.bounded(nodes.expand_places))
     graph.add_node("refill", nodes.bounded(nodes.refill))
     graph.add_node("repair", nodes.repair)
     graph.add_node("restore", nodes.restore)
@@ -66,9 +73,12 @@ def build_course_graph(
     # Entry and recovery paths have unconditional successors.
     graph.add_edge(START, "prepare")
     graph.add_edge("prepare", "draft")
+    graph.add_edge("prepare", "quote_trip")
+    graph.add_edge("quote_trip", END)
+    graph.add_edge("expand_places", "verify_places")
     graph.add_edge("repair", "verify_routes")
     graph.add_edge("restore", "schedule")
-    graph.add_edge("enrich_images", END)
+    graph.add_edge("finalize_course", END)
 
     # Every main stage shares the same bounded retry and snapshot decision.
     for source, successor in (
@@ -77,15 +87,15 @@ def build_course_graph(
         ("verify_places", "verify_routes"),
         ("verify_routes", "schedule"),
         ("schedule", "finalize"),
-        ("finalize", "enrich_images"),
+        ("finalize", "finalize_course"),
     ):
         graph.add_conditional_edges(
             source,
             route_after(successor),
-            [successor, "draft", "refill", "repair", "restore"],
+            [successor, "draft", "refill", "repair", "restore", "expand_places"],
         )
 
-    return graph.compile().with_config({"recursion_limit": 50})
+    return graph.compile().with_config({"recursion_limit": 100})
 
 
 async def stream_course_generation(
@@ -97,7 +107,21 @@ async def stream_course_generation(
     Completion is published only after the graph and provider close successfully.
     """
     completed: dict | None = None
-    provider = VerifiedMapsProvider(concurrency=settings.COURSE_MAPS_CONCURRENCY)
+    provider = VerifiedMapsProvider(
+        concurrency=settings.COURSE_MAPS_CONCURRENCY, language=request.language
+    )
+    try:
+        quotes = MyRealTripQuoteProvider(
+            partner_api_key=settings.MYREALTRIP_PARTNER_API_KEY,
+            origin_airport=settings.MYREALTRIP_ORIGIN_AIRPORT,
+            adults=settings.MYREALTRIP_ADULTS,
+            timeout_seconds=settings.MYREALTRIP_QUOTE_TIMEOUT_SECONDS,
+            mcp_url=settings.MYREALTRIP_MCP_URL,
+            partner_base_url=settings.MYREALTRIP_PARTNER_BASE_URL,
+        )
+    except ValueError:
+        logger.warning("Optional travel quote configuration unavailable")
+        quotes = None
     now = asyncio.get_running_loop().time()
     request_deadline = min(
         deadline if deadline is not None else float("inf"),
@@ -108,8 +132,8 @@ async def stream_course_generation(
     processing_deadline = request_deadline - min(1.0, remaining * 0.1)
     try:
         async with asyncio.timeout_at(processing_deadline) as timeout:
-            async with provider:
-                graph = build_course_graph(provider, CourseHistory())
+            async with provider, quotes if quotes is not None else nullcontext():
+                graph = build_course_graph(provider, CourseHistory(), quotes)
                 async with aclosing(
                     graph.astream(
                         {"request": request, "attempt": 0, "deadline": timeout.when()},
@@ -119,11 +143,13 @@ async def stream_course_generation(
                     async for mode, value in events:
                         if mode == "custom":
                             yield "progress", value
-                        elif "enrich_images" in value and value["enrich_images"].get(
-                            "course"
-                        ):
+                        elif "finalize_course" in value and value[
+                            "finalize_course"
+                        ].get("course"):
                             completed = {
-                                "course": value["enrich_images"]["course"].model_dump()
+                                "course": value["finalize_course"][
+                                    "course"
+                                ].model_dump(context={"public_response": True})
                             }
     finally:
         metrics = getattr(provider, "metrics", None)

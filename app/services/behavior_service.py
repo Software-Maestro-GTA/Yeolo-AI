@@ -1,4 +1,4 @@
-"""One-call taste inference with deterministic guards and private trace evidence."""
+"""Sequential taste analysis and summary with guarded evidence and SSE output."""
 
 import asyncio
 import json
@@ -12,12 +12,21 @@ from fastapi import HTTPException
 from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree
 
-from app.agent.taste_profile_chains import generate_taste_profile
+from app.agent.taste_profile_chains import (
+    generate_taste_profile,
+    generate_taste_summary,
+)
 from app.core.config import settings
 from app.schemas.behavior import BehaviorAnalysisRequest
-from app.schemas.taste_profile import TasteProfileSchema
+from app.schemas.taste_profile import AnalysisMetadataSchema, TasteProfileSchema
+from app.schemas.taste_summary import (
+    BehaviorAnalysisResponse,
+    TasteSummary,
+    TasteSummaryDraft,
+)
 from app.services.behavior_evidence import guard_taste_profile
 from app.services.behavior_statistics import build_behavior_statistics
+from app.services.taste_summary import assemble_taste_summary, prepare_summary_context
 
 logger = logging.getLogger(__name__)
 ANALYSIS_ERROR_MESSAGE = '취향 분석을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요.'
@@ -32,14 +41,16 @@ def validate_behavior_configuration() -> None:
 
 
 @traceable(name="taste_profile_analysis", run_type="chain")
-async def _analyze_profile(statistics: dict[str, Any], user_id: UUID) -> TasteProfileSchema:
-    """Infer one profile and retain evidence only in the active internal trace.
+async def _analyze_profile(
+    statistics: dict[str, Any], user_id: UUID,
+) -> tuple[TasteProfileSchema, AnalysisMetadataSchema]:
+    """Infer one profile and retain guarded evidence for summary and tracing.
 
     Args:
         statistics: Sanitized visit counts and distributions.
         user_id: Existing validated server identity for ABTO request attribution.
     Returns:
-        Guarded profile with at least one seasonal/environment choice.
+        Guarded profile and internal evidence needed by the summary stage.
     Raises:
         Exception: Provider or structured output errors propagate to the SSE handler.
     """
@@ -51,18 +62,41 @@ async def _analyze_profile(statistics: dict[str, Any], user_id: UUID) -> TastePr
             run.add_metadata({"analysisMetadata": metadata.model_dump()})
         except Exception:  # noqa: BLE001 -- observability must not fail valid analysis
             logger.warning("Unable to attach taste analysis evidence to active trace")
-    return profile
+    return profile, metadata
+
+
+@traceable(name="taste_profile_summary", run_type="chain")
+async def _summarize_profile(
+    profile: TasteProfileSchema, metadata: AnalysisMetadataSchema, user_id: UUID, language: str,
+) -> TasteSummary:
+    """Turn supported profile facts into display copy without rescoring.
+
+    Args:
+        profile: Guarded analysis result.
+        metadata: Private evidence, including compatibility placeholders.
+        user_id: Validated identity, without the original photo payload.
+        language: Normalized output locale.
+    Returns:
+        Summary with validated references and server-owned numeric values.
+    Raises:
+        Exception: Provider, schema or evidence-reference validation failures.
+    """
+    context = prepare_summary_context(profile, metadata, language)
+    output = await generate_taste_summary(
+        json.dumps(context.model_input(), ensure_ascii=False, sort_keys=True), user_id=user_id,
+    )
+    return assemble_taste_summary(TasteSummaryDraft.model_validate(output), context)
 
 
 async def analyze_behavior_stream(
     request: BehaviorAnalysisRequest,
 ) -> AsyncGenerator[dict[str, Any]]:
-    """Generate progress and complete events using one structured LLM request.
+    """Generate analysis/summary progress and one complete event using two calls.
 
     Args:
         request: User metadata for visit-based taste analysis.
     Yields:
-        Existing API-AI-1 SSE events, with tasteProfile as the sole complete field.
+        API-AI-1 events; complete contains tasteProfile and summary only.
     Raises:
         HTTPException: 400 for no valid records; 500 for inference failures.
     """
@@ -77,22 +111,31 @@ async def analyze_behavior_stream(
         "event": "progress",
         "data": {
             "step": "ANALYZING_PREFERENCE",
-            "message": "위치·시간 패턴으로 여행 성향을 분석 중입니다.",
+            "message": "사용자 여행 성향을 분석 중입니다.",
         },
     }
     try:
-        async with asyncio.timeout(settings.TASTE_ANALYSIS_TIMEOUT_SECONDS):
-            taste_profile = await _analyze_profile(statistics, request.userId)
+        deadline = asyncio.get_running_loop().time() + settings.TASTE_ANALYSIS_TIMEOUT_SECONDS
+        async with asyncio.timeout_at(deadline):
+            taste_profile, metadata = await _analyze_profile(statistics, request.userId)
+        # Never suspend a generator inside a timeout scope: it can cancel the SSE consumer.
+        yield {
+            "event": "progress",
+            "data": {"step": "GENERATING_SUMMARY", "message": "사용자 취향 정보를 요약합니다."},
+        }
+        async with asyncio.timeout_at(deadline):
+            summary = await _summarize_profile(taste_profile, metadata, request.userId, request.language)
+            result = BehaviorAnalysisResponse(tasteProfile=taste_profile, summary=summary)
     except TimeoutError as exc:
         logger.warning('Taste profile analysis exceeded its deadline', exc_info=True)
         raise HTTPException(status_code=500, detail=ANALYSIS_TIMEOUT_MESSAGE) from exc
     except Exception as exc:
-        logger.exception("Single-call taste profile analysis failed")
+        logger.exception("Taste profile analysis or summary failed")
         raise HTTPException(
             status_code=500, detail=ANALYSIS_ERROR_MESSAGE,
         ) from exc
 
     yield {
         "event": "complete",
-        "data": {"tasteProfile": taste_profile.model_dump()},
+        "data": result.model_dump(),
     }

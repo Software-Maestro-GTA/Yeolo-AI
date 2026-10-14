@@ -11,31 +11,28 @@ import pytest
 def archived_output():
     """Build deterministic, synthetic output without depending on live artifacts."""
     request = {
-        'userId': '550e8400-e29b-41d4-a716-446655440000', 'mbti': 'ENFP',
+        'userId': '550e8400-e29b-41d4-a716-446655440000', 'language': 'ko', 'mbti': 'ENFP',
         'tripCondition': {'destinationCountry': '대한민국', 'destinationCity': '서울',
-                          'startDate': '2026-10-05', 'totalDays': 3, 'budgetType': 'moderate'},
+                          'startDate': '2026-10-05', 'totalDays': 3, 'budget': 900000},
     }
     days = []
     for index in range(3):
         stops = []
-        for sequence, (category, arrival) in enumerate([
-            ('museum', '09:00'), ('restaurant', '11:30'),
-            ('shopping_mall', '13:00'), ('restaurant', '17:30'),
-        ], 1):
+        for sequence, category in enumerate(['CULTURE', 'FOOD', 'SPOT', 'FOOD'], 1):
             last = sequence == 4
             stops.append({
-                'sequence': sequence, 'arrivalTime': arrival, 'stayMinutes': 60,
+                'sequence': sequence, 'stayMinutes': 60,
                 'memo': '합성 테스트 장소', 'reason': '테스트 입력과 일정에 맞춘 방문', 'cost': 10000,
                 'place': {'placeId': f'synthetic-{index}-{sequence}', 'placeName': f'테스트 장소 {index}-{sequence}',
-                          'category': category, 'address': '대한민국 서울', 'latitude': 37.55, 'longitude': 126.98},
+                          'category': category, 'latitude': 37.55, 'longitude': 126.98},
                 'transportToNext': {'type': 'none' if last else 'walking',
-                                    'minutes': 0 if last else 10, 'distance': 0 if last else 800, 'cost': 0},
+                                    'minutes': 0 if last else 10, 'distance': 0 if last else 800, 'memo': None},
             })
         days.append({'day': index + 1, 'date': (date(2026, 10, 5) + timedelta(days=index)).isoformat(),
-                     'memo': '합성 테스트 일정', 'stops': stops})
+                     'stops': stops})
     course = {**request['tripCondition'], 'title': '합성 서울 3일 코스',
-              'recommendationReason': '검증기 테스트용으로 고정한 일정', 'itinerary': {'days': days}}
-    course.pop('budgetType')
+              'totalCost': 120000, 'tags': ['문화'], 'itinerary': {'days': days}}
+    course.pop('budget')
     result = {'completed': True, 'events': [
         {'event': 'progress', 'data': {'step': 'GENERATING_ROUTE', 'message': '합성 테스트'}},
         {'event': 'complete', 'data': {}},
@@ -106,18 +103,6 @@ def test_duplicate_place_across_days_fails(archived_output):
     assert report['errors']
 
 
-@pytest.mark.parametrize('buffer_minutes', [0, 9])
-def test_adjacent_visits_require_route_and_full_ten_minute_buffer(archived_output, buffer_minutes):
-    request, result = archived_output
-    first, following = result['course']['itinerary']['days'][0]['stops'][:2]
-    hour, minute = map(int, first['arrivalTime'].split(':'))
-    too_early = hour * 60 + minute + first['stayMinutes'] + first['transportToNext']['minutes'] + buffer_minutes
-    following['arrivalTime'] = f'{too_early // 60:02d}:{too_early % 60:02d}'
-    report = validate(request, result)
-    assert not report['passed']
-    assert report['errors']
-
-
 @pytest.mark.parametrize(('field', 'invalid'), [('type', 'none'), ('minutes', None), ('minutes', -1), ('minutes', 0), ('distance', None), ('distance', -1), ('distance', 0)])
 def test_intermediate_route_requires_confirmed_positive_metrics(archived_output, field, invalid):
     request, result = archived_output
@@ -127,28 +112,26 @@ def test_intermediate_route_requires_confirmed_positive_metrics(archived_output,
     assert report['errors']
 
 
-@pytest.mark.parametrize('reason_field', ['stop', 'course'])
-def test_empty_recommendation_reason_fails(archived_output, reason_field):
+def test_empty_stop_recommendation_reason_fails(archived_output):
     request, result = archived_output
-    if reason_field == 'stop':
-        result['course']['itinerary']['days'][0]['stops'][0]['reason'] = '   '
-    else:
-        result['course']['recommendationReason'] = ''
+    result['course']['itinerary']['days'][0]['stops'][0]['reason'] = '   '
     report = validate(request, result)
     assert not report['passed']
     assert report['errors']
 
 
-def test_shopping_and_long_gaps_are_quality_warnings_not_invalid_output(archived_output):
+def test_spot_group_does_not_infer_shopping_malls_from_names(archived_output):
     request, result = archived_output
-    # Preserve valid synthetic data and meal windows; this fixture includes
-    # shopping malls and a long idle interval before the 17:30 dinner.
+    # Public output does not expose visit clocks; internal graph tests check timing.
     categories = [stop['place']['category'] for day in result['course']['itinerary']['days'] for stop in day['stops']]
-    assert 'shopping_mall' in categories
+    assert 'SPOT' in categories
+    for day in result['course']['itinerary']['days']:
+        day['stops'][2]['place']['placeName'] = '쇼핑몰이라는 이름의 합성 명소'
     report = validate(request, result)
     assert report['passed']
     assert report['errors'] == []
-    assert len(report['warnings']) >= 2
+    assert not any('shopping mall' in warning or 'shopping_mall' in warning for warning in report['warnings'])
+    assert any('display groups' in warning for warning in report['warnings'])
 
 
 @pytest.mark.parametrize(('ended', 'error', 'expected'), [(True, None, True), (False, None, False), (True, 'CancelledError', False)])
@@ -181,13 +164,34 @@ def test_invalid_sse_completion_or_progress_contract_fails(archived_output, inva
     assert report['errors']
 
 
-@pytest.mark.parametrize('category', ['market', 'dessert_restaurant', 'brunch_restaurant'])
-def test_non_dinner_category_cannot_satisfy_dinner_window(archived_output, category):
+@pytest.mark.parametrize('food_count', [0, 1, 2])
+def test_food_group_coverage_is_a_quality_warning_without_claiming_verified_meal_service(archived_output, food_count):
     request, result = archived_output
-    result['course']['itinerary']['days'][1]['stops'][-1]['place']['category'] = category
+    food_stops = [stop for stop in result['course']['itinerary']['days'][1]['stops'] if stop['place']['category'] == 'FOOD']
+    for index, stop in enumerate(food_stops):
+        if index >= food_count:
+            stop['place']['category'] = 'CAFE'
+    report = validate(request, result)
+    assert report['passed'] and report['errors'] == []
+    warnings = [warning for warning in report['warnings'] if warning.startswith('Day 2:')]
+    assert bool(warnings) is (food_count < 2)
+    assert any('actual lunch/dinner service' in warning for warning in report['warnings'])
+
+
+@pytest.mark.parametrize('category', ['FOOD', 'CAFE', 'SPOT', 'CULTURE', 'NATURE', 'ACTIVITY', 'NIGHTLIFE'])
+def test_all_seven_public_display_groups_are_valid_output(archived_output, category):
+    request, result = archived_output
+    result['course']['itinerary']['days'][0]['stops'][0]['place']['category'] = category
+    assert validate(request, result)['passed']
+
+
+@pytest.mark.parametrize('category', ['museum', 'restaurant', 'shopping_mall', 'market', 'dessert_restaurant', 'FOODS', 'food'])
+def test_raw_google_types_and_unknown_display_groups_are_rejected(archived_output, category):
+    request, result = archived_output
+    result['course']['itinerary']['days'][0]['stops'][0]['place']['category'] = category
     report = validate(request, result)
     assert not report['passed']
-    assert report['errors']
+    assert report['errors'] == ['Schema/calendar validation failed: ValidationError']
 
 
 @pytest.mark.parametrize('category', ['neighborhood', 'subway_station'])
@@ -266,7 +270,7 @@ def test_explicit_estimate_fails_without_verified_route(archived_output):
     request, result = archived_output
     first, following = result['course']['itinerary']['days'][0]['stops'][:2]
     following['place']['latitude'] = 37.551
-    first['transportToNext'] = {'type': 'walking', 'distance': None, 'minutes': 10, 'cost': 0, 'memo': '[추정 도보] 직선거리로 예상한 이동 시간'}
+    first['transportToNext'] = {'type': 'walking', 'distance': None, 'minutes': 10, 'memo': '[추정 도보] 직선거리로 예상한 이동 시간'}
     report = validate(request, result)
     assert not report['passed']
     assert report['errors']
@@ -278,7 +282,7 @@ def test_estimate_marker_does_not_accept_arbitrary_unverified_metrics(archived_o
     request, result = archived_output
     first, following = result['course']['itinerary']['days'][0]['stops'][:2]
     following['place']['latitude'] = 37.551
-    route = {'type': 'walking', 'distance': None, 'minutes': 10, 'cost': 0, 'memo': '[추정 도보] 직선거리로 예상한 이동 시간'}
+    route = {'type': 'walking', 'distance': None, 'minutes': 10, 'memo': '[추정 도보] 직선거리로 예상한 이동 시간'}
     if invalid == 'arbitrary_time':
         route['minutes'] = 1
     elif invalid == 'too_far':
@@ -286,4 +290,27 @@ def test_estimate_marker_does_not_accept_arbitrary_unverified_metrics(archived_o
     else:
         route['type'] = 'transit'
     first['transportToNext'] = route
+    assert not validate(request, result)['passed']
+
+
+@pytest.mark.parametrize('scope', ['course', 'day', 'stop', 'place', 'transport'])
+def test_removed_fields_are_not_accepted_in_public_output(archived_output, scope):
+    request, result = archived_output
+    course = result['course']
+    day = course['itinerary']['days'][0]
+    stop = day['stops'][0]
+    targets = {'course': (course, 'coverImageUrl'), 'day': (day, 'memo'),
+               'stop': (stop, 'arrivalTime'), 'place': (stop['place'], 'address'),
+               'transport': (stop['transportToNext'], 'cost')}
+    target, field = targets[scope]
+    target[field] = 'removed field'
+    report = validate(request, result)
+    assert not report['passed']
+    assert report['errors']
+
+
+@pytest.mark.parametrize('value', [-1, float('nan'), float('inf')])
+def test_total_cost_must_be_finite_and_nonnegative(archived_output, value):
+    request, result = archived_output
+    result['course']['totalCost'] = value
     assert not validate(request, result)['passed']

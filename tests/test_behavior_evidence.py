@@ -1,4 +1,4 @@
-"""One-call inference preserves the API and guarantees auditable seasonal output."""
+"""One scoring call preserves evidence guards before the separate summary call."""
 
 import importlib
 import json
@@ -28,6 +28,9 @@ def full_profile(seasonal=None):
 
 @pytest.fixture
 def chain(mocker):
+    from tests.test_taste_summary import mock_summary_model
+
+    mock_summary_model(mocker)
     result = AsyncMock()
     result.return_value = full_profile(['dry_weather', 'off_season'])
     mocker.patch('app.services.behavior_service.generate_taste_profile', result)
@@ -47,12 +50,12 @@ async def complete(items):
     events = [event async for event in analyze_behavior_stream(request(items))]
     assert events[0]['event'] == 'progress'
     assert events[-1]['event'] == 'complete'
-    assert set(events[-1]['data']) == {'tasteProfile'}
+    assert set(events[-1]['data']) == {'tasteProfile', 'summary'}
     return events[-1]['data']['tasteProfile']
 
 
 @pytest.mark.asyncio
-async def test_single_call_receives_visit_statistics_and_returns_exact_api(chain):
+async def test_single_scoring_call_receives_visit_statistics_and_returns_profile(chain):
     profile = await complete([photo('a')])
     chain.assert_awaited_once()
     payload = chain.call_args.args[0]

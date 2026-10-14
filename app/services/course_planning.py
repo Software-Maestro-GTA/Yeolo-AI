@@ -4,17 +4,22 @@ Geographic distance ranks candidates; only actual provider routes confirm travel
 
 from datetime import date
 
-from app.agent.course_state import CourseGenerationError, Visit
+from app.agent.course_state import (
+    CourseGenerationError,
+    ScheduledDaySchema,
+    ScheduledStopSchema,
+    Visit,
+)
 from app.agent.tools.verified_maps import (
     VerifiedPlace,
     meal_category_supported,
+    tourism_category_supported,
 )
 from app.schemas.course import (
     CourseRequestSchema,
-    DayItinerarySchema,
-    StopSchema,
     TransportToNextSchema,
 )
+from app.services.course_budget import budget_rank
 from app.services.course_diversity import (
     MAX_OVERLAP,
     normalize_area,
@@ -28,7 +33,6 @@ from app.services.course_reasons import (
 from app.services.course_routing import (
     distance_meters,
 )
-from app.services.day_summary import MAX_DAY_SUMMARY_LENGTH, compose_day_summary
 
 
 def _opening_start(
@@ -36,7 +40,8 @@ def _opening_start(
 ) -> int | None:
     """Fit a visit to regular weekly hours, supporting overnight and 24h periods.
 
-    Unknown hours are allowed but disclosed. Malformed supplied periods fail closed.
+    Unknown hours do not establish opening-time verification. Malformed supplied
+    periods fail closed; meal windows and complete stay duration still apply.
     """
     if periods is None:
         return earliest if earliest + duration <= latest else None
@@ -98,9 +103,7 @@ def _schedule_day(
     routes: list[TransportToNextSchema],
     day_date: date,
     day_number: int,
-    *,
-    compact: bool = False,
-) -> DayItinerarySchema:
+) -> ScheduledDaySchema:
     """Build one day using actual routes; reject any full-visit window violation."""
     if len(routes) != len(selected) - 1:
         raise CourseGenerationError(f"{day_number}일차: 이동 경로가 누락되었습니다.")
@@ -116,7 +119,7 @@ def _schedule_day(
         )
         if arrival is None:
             raise CourseGenerationError(
-                f"{day_number}일차 {day_date} {candidate.meal} {candidate.name}: 영업/식사 시간 안에 {candidate.stay_minutes}분 체류할 수 없습니다."
+                f"{day_number}일차 {day_date} {candidate.meal} {candidate.name}: 방문/식사 시간 안에 {candidate.stay_minutes}분 체류할 수 없습니다."
             )
         last = index == len(selected) - 1
         transport = (
@@ -124,17 +127,14 @@ def _schedule_day(
                 type="none",
                 distance=0,
                 minutes=0,
-                cost=0,
-                memo="이 장소에서 오늘의 계획된 일정을 종료합니다. 숙소 이동은 포함되지 않습니다.",
+                memo=None,
             )
             if last
             else routes[index]
         )
         note = visit_tip(venue.place.category)
-        if venue.periods is None:
-            note += " 영업시간 미확인: 방문 전 확인이 필요합니다."
         stops.append(
-            StopSchema(
+            ScheduledStopSchema(
                 sequence=index + 1,
                 arrivalTime=f"{arrival // 60:02d}:{arrival % 60:02d}",
                 stayMinutes=candidate.stay_minutes,
@@ -151,21 +151,7 @@ def _schedule_day(
             + (transport.minutes or 0)
             + (0 if last else 10)
         )
-    try:
-        summary = compose_day_summary(stops, day_number, compact=compact)
-        if (
-            not isinstance(summary, str)
-            or not summary.strip()
-            or len(summary) > MAX_DAY_SUMMARY_LENGTH
-        ):
-            raise ValueError("Invalid optional day summary")
-    except Exception:  # noqa: BLE001 - optional prose cannot invalidate a verified schedule; cancellation propagates
-        summary = "새로운 장소를 만나며 나만의 여행 이야기를 만들어보세요."
-        if compact:
-            summary += f" 오늘은 이동과 식사 시간을 고려해 {len(stops)}곳을 둘러보세요."
-    return DayItinerarySchema(
-        day=day_number, date=day_date.isoformat(), memo=summary, stops=stops
-    )
+    return ScheduledDaySchema(day=day_number, date=day_date.isoformat(), stops=stops)
 
 
 def _meal_capable(venue: VerifiedPlace) -> bool:
@@ -180,6 +166,7 @@ def _core_visit(item: Visit) -> bool:
     candidate, venue = item
     return (
         candidate.meal == "none"
+        and tourism_category_supported(venue.place.category)
         and not _meal_capable(venue)
         and venue.place.category not in CAFE
     )
@@ -190,6 +177,47 @@ def _visit_shortage(selected: list[Visit]) -> tuple[int, int]:
     return max(0, 5 - len(selected)), max(
         0, 3 - sum(_core_visit(item) for item in selected)
     )
+
+
+def _proposal_floor(
+    available: list[Visit], day_date: date
+) -> list[Visit]:
+    """Retain one original-order five-visit alternative before new searches.
+
+    Args:
+        available: Retained proposals with already verified venue facts.
+        day_date: Date used for known opening periods and common meal windows.
+    Returns:
+        First three verified core proposals plus distinct proposed lunch/dinner,
+        in the model order, or an empty list when identity/order/windows fail.
+        Transfer time is not invented: this optimistic check uses zero travel
+        and the existing ten-minute buffer only to reject impossible proposals.
+        The caller must verify all four actual routes before accepting the day.
+    """
+    core_indices = [index for index, item in enumerate(available) if _core_visit(item)][:3]
+    if len(core_indices) != 3:
+        return []
+    selected_indices = list(core_indices)
+    for meal in ('lunch', 'dinner'):
+        index = next((index for index, (candidate, venue) in enumerate(available)
+                      if candidate.meal == meal and meal_category_supported(venue.place.category, meal)), None)
+        if index is None:
+            return []
+        selected_indices.append(index)
+    selected = [available[index] for index in sorted(selected_indices)]
+    ids = [_canonical_id(venue.place.placeId) for _, venue in selected]
+    if not all(ids) or len(set(ids)) != 5:
+        return []
+    if [candidate.meal for candidate, _ in selected if candidate.meal != 'none'] != ['lunch', 'dinner']:
+        return []
+    current = 540
+    for candidate, venue in selected:
+        opening, latest = MEAL_WINDOWS[candidate.meal]
+        arrival = _opening_start(venue.periods, day_date, max(current, opening), candidate.stay_minutes, latest)
+        if arrival is None:
+            return []
+        current = arrival + candidate.stay_minutes + 10
+    return selected
 
 
 def _shorter_visits(
@@ -306,11 +334,14 @@ def _day_plans(
     plan_limit: int = MAX_DAY_PLANS,
     compact: bool = False,
     recent_profiles: list[dict] | None = None,
+    daily_budget: float | None = None,
 ) -> list[list[Visit]]:
     """Find up to four optimistic plans; only real routes can confirm feasibility.
 
     The beam is capped at 48 states per depth, with at most 30 retained proposals.
     Zero travel is used only to discard impossible orderings, never as a route.
+    Budget ranks feasible alternatives after the common visit floor; it is never
+    a hard rejection and unknown transport fares are not estimated here.
     """
     options = [
         item
@@ -396,6 +427,7 @@ def _day_plans(
                     completed.append(new_state)
         following.sort(
             key=lambda state: (
+                budget_rank(state[0], daily_budget),
                 (_diversity_rank(state[0], recent_profiles) if recent_profiles else ()),
                 state[1],
                 sum(venue.place.placeId in recent_ids for _, venue in state[0]),
@@ -408,6 +440,7 @@ def _day_plans(
     completed.sort(
         key=lambda state: (
             _visit_shortage(state[0]),
+            budget_rank(state[0], daily_budget),
             (_diversity_rank(state[0], recent_profiles) if recent_profiles else ()),
             len(state[0]) if compact else -len(state[0]),
             not any(candidate.meal == "breakfast" for candidate, _ in state[0]),
@@ -461,6 +494,9 @@ def _day_plans(
         and not compact
         and preferred
         and len(preferred[0]) == len(completed[0][0])
+        and _visit_shortage(preferred[0]) == _visit_shortage(completed[0][0])
+        and budget_rank(preferred[0], daily_budget)
+        == budget_rank(completed[0][0], daily_budget)
         and valid_meals in (["lunch", "dinner"], ["breakfast", "lunch", "dinner"])
     ):
         completed.remove(preferred)
