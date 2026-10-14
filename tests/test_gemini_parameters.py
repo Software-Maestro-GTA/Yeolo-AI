@@ -250,9 +250,14 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
             return completion(full_profile(['warm_region']).model_dump())
         assert schema_name == 'TasteSummaryDraft'
         assert len(requests) == 2
+        city_schema = body['response_format']['json_schema']['schema']['$defs']['CityRecommendationCopy']['properties']['cityCode']
+        assert city_schema['type'] == 'string'
+        assert 'enum' not in city_schema  # Catalog growth does not enlarge model schemas.
         context = body['messages'][-1]['content'].split('\n', 1)[1]
         summary_contexts.append(json.loads(context))
-        return completion(draft_for(context).model_dump())
+        draft = draft_for(context)
+        draft.recommendCity.cityCode = 'MELBOURNE'
+        return completion(draft.model_dump())
 
     clients = offline_wire(respond)
     payload = request([photo(str(day), f'2026-07-{day:02d}T10:00:00+09:00') for day in (1, 2, 3)]).model_dump(mode='json')
@@ -268,9 +273,12 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
     assert result['summary']['types'] == [{
         'typeCode': 'CAFE_DESSERT', 'typeName': '나만의 CAFE_DESSERT', 'lowName': '약함', 'highName': '강함', 'score': 100,
     }]
-    assert result['summary']['recommendCity']['countryName'] == '대한민국'
+    assert result['summary']['recommendCity']['countryName'] == '호주'
+    assert result['summary']['recommendCity']['cityName'] == '멜버른'
     assert 'cityCode' not in result['summary']['recommendCity']
     assert summary_contexts[0]['types'][0]['visitCount'] == 3
+    assert len(summary_contexts[0]['cityCandidates']) <= 8
+    assert 'MELBOURNE' in {city['cityCode'] for city in summary_contexts[0]['cityCandidates']}
     serialized = json.dumps(summary_contexts)
     assert all(key not in serialized for key in ('companionType', 'warm_region', 'sourceImageId', 'capturedAt', 'placeName'))
     assert len(requests) == 2

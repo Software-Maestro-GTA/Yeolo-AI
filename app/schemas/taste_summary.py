@@ -1,7 +1,7 @@
 """Bounded UI copy and the public API-AI-1 summary contract."""
 
 import unicodedata
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -11,7 +11,9 @@ SummaryTypeCode = Literal[
     "CAFE_DESSERT", "CULTURE", "BEACH", "OUTDOOR", "NATURE",
     "FOOD", "SHOPPING", "NIGHTLIFE", "WELLNESS", "EXPERIENCE",
 ]
-CityCode = Literal["SEOUL", "BUSAN", "KYOTO", "TOKYO", "LISBON", "BARCELONA", "VANCOUVER", "SINGAPORE"]
+# The exact allowed cities are validated against each request's shortlist by
+# assemble_taste_summary. Avoid sending the entire catalog in the LLM schema.
+CityCode = Annotated[str, Field(min_length=1, max_length=48, pattern=r"^[A-Z]+(?:_[A-Z]+)*$")]
 
 
 class SummaryModel(BaseModel):

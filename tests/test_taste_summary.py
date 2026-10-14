@@ -7,7 +7,13 @@ from pydantic import ValidationError
 
 from app.schemas.behavior import BehaviorAnalysisRequest, language_from_header
 from app.schemas.taste_summary import TasteSummaryDraft
-from app.services.taste_summary import assemble_taste_summary, prepare_summary_context
+from app.services.taste_city_catalog import CITY_CANDIDATES, EXPLORATORY_CITY_CODES
+from app.services.taste_summary import (
+    MAX_CITY_CANDIDATES,
+    TYPE_DEFINITIONS,
+    assemble_taste_summary,
+    prepare_summary_context,
+)
 from tests.test_behavior_evidence import adjusted
 from tests.test_behavior_statistics import photo
 
@@ -43,7 +49,7 @@ def test_supported_types_exclude_defaults_deduplicate_and_preserve_scores():
     assert result.types[0].typeName == "나만의 CAFE_DESSERT"
     assert (result.types[0].score, result.types[0].lowName, result.types[0].highName) == (100, "약함", "강함")
     assert result.recommendCity.countryName == "대한민국"
-    assert result.recommendCity.cityName == "서울"
+    assert result.recommendCity.cityName == "부산"
     assert profile.model_dump() == before
     profile.foodPreference.cafeDessert = 4
     profile.travelPurpose.gourmet = 4
@@ -59,6 +65,9 @@ def test_sparse_profile_cannot_turn_neutral_placeholders_into_sliders():
     context = prepare_summary_context(profile, metadata, "ko")
     assert context.types == []
     assert context.model_input()["hasSupportedPreferences"] is False
+    assert context.recommendation_interests == []
+    assert [city["cityCode"] for city in context.cities] == list(EXPLORATORY_CITY_CODES)
+    assert all(city["matchedTypeCodes"] == [] for city in context.cities)
     summary = assemble_taste_summary(draft_for(json.dumps(context.model_input())), context)
     assert summary.types == []
     assert len(summary.hashtags) == 3
@@ -74,6 +83,89 @@ def test_summary_selection_is_stable_and_capped_at_three():
     other_profile, other_metadata = adjusted(list(reversed(items)))
     assert context == prepare_summary_context(other_profile, other_metadata, "ko")
     assert [item["typeCode"] for item in context.types] == ["CAFE_DESSERT", "CULTURE", "BEACH"]
+    assert "SHOPPING" in {item["typeCode"] for item in context.recommendation_interests}
+    assert any("SHOPPING" in city["matchedTypeCodes"] for city in context.cities)
+
+
+def test_city_catalog_covers_known_interests_with_unique_canonical_identities():
+    assert len(CITY_CANDIDATES) == 32
+    assert len({city.code for city in CITY_CANDIDATES}) == 32
+    assert len({(city.country_en, city.city_en) for city in CITY_CANDIDATES}) == 32
+    assert {code for code, *_ in TYPE_DEFINITIONS} == {
+        code for city in CITY_CANDIDATES for code in city.interests
+    }
+    for city in CITY_CANDIDATES:
+        assert city.country_ko and city.city_ko and city.country_en and city.city_en
+        assert city.source_url.startswith("https://")
+        assert len(set(city.interests)) == len(city.interests)
+
+
+def repeated_context(*kinds):
+    """Exercise matching using real guarded metadata, not fabricated evidence."""
+    items = [photo(f"{kind}-{day}", f"2026-07-{day:02d}T10:00:00+09:00", place=kind, types=[kind])
+             for kind in kinds for day in (1, 2, 3)]
+    return adjusted(items)
+
+
+@pytest.mark.parametrize("kind,expected_new_cities", [
+    ("cafe", {"MELBOURNE", "HANOI"}),
+    ("hiking_area", {"QUEENSTOWN", "JEJU"}),
+    ("spa", {"BUDAPEST", "PHUKET"}),
+])
+def test_city_candidates_match_taste_and_include_new_destinations(kind, expected_new_cities):
+    profile, metadata = repeated_context(kind)
+    context = prepare_summary_context(profile, metadata, "ko")
+    codes = {city["cityCode"] for city in context.cities}
+    supported = {item["typeCode"] for item in context.recommendation_interests}
+    assert expected_new_cities <= codes
+    assert 0 < len(codes) <= MAX_CITY_CANDIDATES
+    assert all(city["matchedTypeCodes"] and set(city["matchedTypeCodes"]) <= supported for city in context.cities)
+    assert all(set(city["matchedTypeCodes"]) <= set(city["interestCodes"]) for city in context.cities)
+    assert "source_url" not in json.dumps(context.model_input())
+
+
+def test_matching_uses_strength_without_double_counting_related_nature_interests():
+    profile, metadata = repeated_context("beach", "park", "museum")
+    profile.activityPreference.viewing = 4
+    context = prepare_summary_context(profile, metadata, "ko")
+    codes = [city["cityCode"] for city in context.cities]
+    # Culture (1) + nature (2) outranks beach + nature in the same group (2).
+    assert "GYEONGJU" in codes
+    assert "PHUKET" not in codes
+    profile.preferredLocationType.beachResort = 3
+    profile.travelPurpose.natureExploration = 3
+    profile.activityPreference.viewing = 5
+    cultural = prepare_summary_context(profile, metadata, "ko")
+    assert "PHUKET" not in {city["cityCode"] for city in cultural.cities}
+    assert all(city["matchedTypeCodes"] == ["CULTURE"] for city in cultural.cities)
+
+
+def test_unbacked_high_scores_cannot_affect_candidates():
+    profile, metadata, before = cafe_context()
+    profile.travelPurpose.wellness = 5
+    profile.activityPreference.adventure = 5
+    after = prepare_summary_context(profile, metadata, "ko")
+    assert after == before
+
+
+def test_new_city_selection_preserves_canonical_names_and_public_shape():
+    _, _, context = cafe_context("en")
+    draft = draft_for(json.dumps(context.model_input()))
+    draft.recommendCity.cityCode = "MELBOURNE"
+    summary = assemble_taste_summary(draft, context).model_dump()
+    assert summary["recommendCity"] == {
+        "countryName": "Australia", "cityName": "Melbourne", "reason": draft.recommendCity.reason,
+    }
+    assert set(summary) == {"intro", "hashtags", "types", "recommendCity"}
+
+
+@pytest.mark.parametrize("code", ["QUEENSTOWN", "ATLANTIS"])
+def test_registered_but_unmatched_and_unknown_cities_are_rejected(code):
+    _, _, context = cafe_context()
+    draft = draft_for(json.dumps(context.model_input()))
+    draft.recommendCity.cityCode = code
+    with pytest.raises(ValueError, match="matching candidates"):
+        assemble_taste_summary(draft, context)
 
 
 @pytest.mark.parametrize("mutation", ["invent_type", "omit_type", "duplicate_type", "unrelated_city"])

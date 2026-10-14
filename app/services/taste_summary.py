@@ -1,4 +1,4 @@
-"""Select supported summary axes and assemble immutable scores/city identities."""
+"""Prepare grounded UI interests and bounded city candidates without extra calls."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +10,7 @@ from app.schemas.taste_summary import (
     TasteSummary,
     TasteSummaryDraft,
 )
+from app.services.taste_city_catalog import CITY_CANDIDATES, EXPLORATORY_CITY_CODES
 
 # A display registry for the existing profile, not the proposed v2 scoring model.
 # Each group contributes at most one slider to avoid restating the same evidence.
@@ -26,18 +27,7 @@ TYPE_DEFINITIONS = (
     ("EXPERIENCE", "activityPreference.experience", "workshops and activity venues", "activity"),
 )
 
-# Initial editorial recommendation candidates. These are broad interest tags,
-# not live claims about availability, prices, weather or opening hours.
-CITY_CANDIDATES = (
-    ("SEOUL", "대한민국", "서울", "South Korea", "Seoul", ("CAFE_DESSERT", "CULTURE", "FOOD", "SHOPPING", "NIGHTLIFE")),
-    ("BUSAN", "대한민국", "부산", "South Korea", "Busan", ("BEACH", "FOOD", "CAFE_DESSERT")),
-    ("KYOTO", "일본", "교토", "Japan", "Kyoto", ("CULTURE", "NATURE", "FOOD")),
-    ("TOKYO", "일본", "도쿄", "Japan", "Tokyo", ("SHOPPING", "FOOD", "CULTURE", "EXPERIENCE", "NIGHTLIFE")),
-    ("LISBON", "포르투갈", "리스본", "Portugal", "Lisbon", ("CULTURE", "CAFE_DESSERT", "FOOD")),
-    ("BARCELONA", "스페인", "바르셀로나", "Spain", "Barcelona", ("CULTURE", "BEACH", "NIGHTLIFE")),
-    ("VANCOUVER", "캐나다", "밴쿠버", "Canada", "Vancouver", ("NATURE", "OUTDOOR", "BEACH")),
-    ("SINGAPORE", "싱가포르", "싱가포르", "Singapore", "Singapore", ("SHOPPING", "FOOD", "EXPERIENCE", "WELLNESS")),
-)
+MAX_CITY_CANDIDATES = 8
 
 AXIS_LABELS = {
     "ko": ("약함", "강함"), "en": ("Weaker", "Stronger"),
@@ -54,6 +44,7 @@ class SummaryContext:
     language: str
     types: list[dict[str, Any]]
     cities: list[dict[str, Any]]
+    recommendation_interests: list[dict[str, Any]]
 
     def model_input(self) -> dict[str, Any]:
         """Return the minimum facts needed by the summary model."""
@@ -62,7 +53,44 @@ class SummaryContext:
             "hasSupportedPreferences": bool(self.types),
             "types": self.types,
             "cityCandidates": self.cities,
+            "recommendationInterests": self.recommendation_interests,
         }
+
+
+def _select_cities(
+    supported: list[tuple[str, dict[str, Any]]], language: str,
+) -> list[dict[str, Any]]:
+    """Rank cities locally, using each related interest group's strongest match.
+
+    Args:
+        supported: Evidence-backed interests and their shared group identities.
+        language: Normalized locale for existing Korean/English proper names.
+    Returns:
+        At most eight matching cities, or the neutral exploratory set if empty.
+        Ties favor coverage, then city codes rather than catalog insertion order.
+    """
+    ranked = []
+    for city in CITY_CANDIDATES:
+        weights: dict[str, int] = {}
+        matched = []
+        for group, interest in supported:
+            if interest["typeCode"] in city.interests:
+                weights[group] = max(weights.get(group, 0), interest["sourceScore"] - 3)
+                matched.append(interest["typeCode"])
+        if supported and not matched:
+            continue
+        if not supported and city.code not in EXPLORATORY_CITY_CODES:
+            continue
+        korean = language.split("-")[0] == "ko"
+        candidate = {
+            "cityCode": city.code,
+            "countryName": city.country_ko if korean else city.country_en,
+            "cityName": city.city_ko if korean else city.city_en,
+            "interestCodes": list(city.interests), "matchedTypeCodes": sorted(matched),
+        }
+        tie = city.code if supported else f"{EXPLORATORY_CITY_CODES.index(city.code):02d}"
+        ranked.append(((-sum(weights.values()), -len(weights), -len(matched), tie), candidate))
+    return [candidate for _, candidate in sorted(ranked, key=lambda item: item[0])[:MAX_CITY_CANDIDATES]]
 
 
 def prepare_summary_context(
@@ -75,7 +103,8 @@ def prepare_summary_context(
         metadata: Internal evidence used to exclude compatibility placeholders.
         language: Normalized request locale.
     Returns:
-        Allowed axes and matched editorial cities; no unsupported profile fields.
+        Up to three display axes and eight cities matched using all supported
+        interests, including interests not displayed as sliders. No network I/O.
     """
     ranked = []
     for order, (code, path, subject, group) in enumerate(TYPE_DEFINITIONS):
@@ -100,20 +129,13 @@ def prepare_summary_context(
         if len(selected) == 3:
             break
 
-    codes = {item["typeCode"] for item in selected}
-    cities = []
-    for code, country_ko, city_ko, country_en, city_en, interests in CITY_CANDIDATES:
-        matched = codes.intersection(interests)
-        if codes and not matched:
-            continue
-        korean = language.split("-")[0] == "ko"
-        cities.append({
-            "cityCode": code,
-            "countryName": country_ko if korean else country_en,
-            "cityName": city_ko if korean else city_en,
-            "interestCodes": list(interests), "matchedTypeCodes": sorted(matched),
-        })
-    return SummaryContext(language, selected, cities)
+    supported = [(group, item) for _, group, item in ranked]
+    cities = _select_cities(supported, language)
+    recommendation_interests = [
+        {key: item[key] for key in ("typeCode", "subject", "sourceScore")}
+        for _, _, item in sorted(ranked)
+    ]
+    return SummaryContext(language, selected, cities, recommendation_interests)
 
 
 def assemble_taste_summary(draft: TasteSummaryDraft, context: SummaryContext) -> TasteSummary:
