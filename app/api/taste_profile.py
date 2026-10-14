@@ -1,3 +1,5 @@
+"""Internal API-AI-1 route with analysis/summary SSE events and sanitized errors."""
+
 import json
 import logging
 
@@ -5,7 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import settings
-from app.schemas.behavior import BehaviorAnalysisRequest
+from app.schemas.behavior import BehaviorAnalysisRequest, language_from_header
 from app.services.behavior_service import (
     ANALYSIS_ERROR_MESSAGE,
     ANALYSIS_TIMEOUT_MESSAGE,
@@ -24,6 +26,7 @@ router = APIRouter(prefix="/internal/ai/taste-profile", tags=["Taste Profile"])
 async def analyze_behavior_api(
     request: BehaviorAnalysisRequest,
     x_internal_api_key: str = Header(..., alias="X-Internal-Api-Key"),
+    accept_language: str = Header(default="ko", alias="Accept-Language"),
 ) -> JSONResponse | StreamingResponse:
     """전처리된 이미지 메타데이터 리스트를 기반으로 사용자의 여행 성향(Taste Profile)을 추출하여 SSE 스트림으로 반환합니다. (API-AI-1)"""
     # 1. 인증 헤더 검증
@@ -35,6 +38,9 @@ async def analyze_behavior_api(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"status": 401, "message": "내부 인증 실패", "data": None},
         )
+
+    if "language" not in request.model_fields_set:
+        request = request.model_copy(update={"language": language_from_header(accept_language)})
 
     # 2. 데이터 유효성 검사 (데이터 부족 예외 처리)
     if (
