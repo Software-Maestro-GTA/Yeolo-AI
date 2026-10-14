@@ -15,11 +15,13 @@ from app.schemas.course import (
     CourseRequestSchema,
     CourseSchema,
     DayItinerarySchema,
+    StopSchema,
     TransportToNextSchema,
 )
 from app.services.course_diversity import (
     Experience,
 )
+from app.services.myrealtrip_quotes import TripQuotes
 
 
 class CourseGenerationError(ValueError):
@@ -51,6 +53,18 @@ class CourseDraft(BaseModel):
     days: list[DraftDay]
 
 
+class ScheduledStopSchema(StopSchema):
+    """Keep calculated local arrival time for internal feasibility checks only."""
+
+    arrivalTime: str = Field(..., pattern=r"^\d{2}:\d{2}$", exclude=True)
+
+
+class ScheduledDaySchema(DayItinerarySchema):
+    """Retain checked arrival times without adding fields to the public result."""
+
+    stops: list[ScheduledStopSchema]
+
+
 type Visit = tuple[Candidate, VerifiedPlace]
 
 
@@ -59,7 +73,7 @@ class ValidatedDay(TypedDict):
 
     selected: list[Visit]
     routes: list[TransportToNextSchema]
-    day: DayItinerarySchema
+    day: ScheduledDaySchema
 
 
 class CourseState(TypedDict, total=False):
@@ -78,7 +92,11 @@ class CourseState(TypedDict, total=False):
 
     # Verified facts, retained candidates and possible daily combinations.
     place_cache: dict[tuple, Any]
+    queried_place_keys: set[tuple[str, str, str]]
+    pending_place_days: set[int]
+    expanding_places: bool
     route_cache: dict[tuple, Any]
+    route_pass_failures: dict[tuple, Any]
     candidate_pools: dict[int, dict[tuple[str, str], Visit]]
     day_plans: list[list[list[Visit]]]
     validated_days: dict[int, ValidatedDay]
@@ -98,14 +116,13 @@ class CourseState(TypedDict, total=False):
     repairing: bool
     refill_attempt: int
     refilling: bool
-    discovered_days: set[int]
-    attraction_discovered_days: set[int]
     verified_fallback: dict
     restore_fallback: bool
 
     # Final schedules and the public course response.
     days: list[DayItinerarySchema]
     course: CourseSchema
+    trip_quotes: TripQuotes
 
 
 type CourseNode = Callable[[CourseState], Awaitable[dict]]

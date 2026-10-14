@@ -412,11 +412,13 @@
         "properties": {
           "destinationCountry": {
             "description": "목적지 국가",
+            "minLength": 1,
             "title": "Destinationcountry",
             "type": "string"
           },
           "destinationCity": {
             "description": "목적지 도시",
+            "minLength": 1,
             "title": "Destinationcity",
             "type": "string"
           },
@@ -432,15 +434,11 @@
             "title": "Totaldays",
             "type": "integer"
           },
-          "budgetType": {
-            "description": "예산 유형",
-            "enum": [
-              "cost_effective",
-              "moderate",
-              "luxury"
-            ],
-            "title": "Budgettype",
-            "type": "string"
+          "budget": {
+            "description": "전체 여행 예상 예산 금액 (KRW), 초과해도 생성 허용",
+            "minimum": 0,
+            "title": "Budget",
+            "type": "number"
           }
         },
         "required": [
@@ -448,7 +446,7 @@
           "destinationCity",
           "startDate",
           "totalDays",
-          "budgetType"
+          "budget"
         ],
         "title": "TripConditionSchema",
         "type": "object"
@@ -461,6 +459,11 @@
         "title": "Userid",
         "type": "string"
       },
+      "language": {
+        "description": "응답 문구의 BCP 47 언어 코드 (예: ko, en, ja, zh-TW)",
+        "title": "Language",
+        "type": "string"
+      },
       "mbti": {
         "anyOf": [
           {
@@ -471,7 +474,7 @@
           }
         ],
         "default": null,
-        "description": "사용자 MBTI (string|null)",
+        "description": "사용자 MBTI",
         "title": "Mbti"
       },
       "tasteProfile": {
@@ -484,7 +487,7 @@
           }
         ],
         "default": null,
-        "description": "성향 프로필 데이터 (object|null)"
+        "description": "성향 프로필 데이터"
       },
       "tripCondition": {
         "$ref": "#/$defs/TripConditionSchema",
@@ -493,6 +496,7 @@
     },
     "required": [
       "userId",
+      "language",
       "tripCondition"
     ],
     "title": "CourseRequestSchema",
@@ -503,7 +507,7 @@
       "CourseSchema": {
         "properties": {
           "title": {
-            "description": "코스 제목",
+            "description": "요청 언어로 작성된 코스 제목",
             "title": "Title",
             "type": "string"
           },
@@ -517,26 +521,8 @@
             "title": "Destinationcity",
             "type": "string"
           },
-          "coverImageUrl": {
-            "default": "",
-            "description": "코스 커버 이미지 URL",
-            "title": "Coverimageurl",
-            "type": "string"
-          },
-          "coverImageAttribution": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/PhotoAttributionSchema"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "코스 커버 이미지의 원본 및 작성자 출처"
-          },
           "startDate": {
-            "description": "시작일 (YYYY-MM-DD)",
+            "description": "시작일",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
             "title": "Startdate",
             "type": "string"
@@ -547,22 +533,24 @@
             "title": "Totaldays",
             "type": "integer"
           },
+          "totalCost": {
+            "default": 0,
+            "description": "제공된 일정 비용 및 조회 가능한 항공·숙박 견적의 합계 (KRW)",
+            "minimum": 0,
+            "title": "Totalcost",
+            "type": "integer"
+          },
           "tags": {
-            "description": "코스 태그 목록",
+            "description": "요청 언어로 작성된 여행 태그",
             "items": {
               "type": "string"
             },
             "title": "Tags",
             "type": "array"
           },
-          "recommendationReason": {
-            "description": "전체 코스 핵심 추천 이유",
-            "title": "Recommendationreason",
-            "type": "string"
-          },
           "itinerary": {
             "$ref": "#/$defs/ItinerarySchema",
-            "description": "일자별 세부 여정"
+            "description": "확정된 세부 여정"
           }
         },
         "required": [
@@ -571,7 +559,6 @@
           "destinationCity",
           "startDate",
           "totalDays",
-          "recommendationReason",
           "itinerary"
         ],
         "title": "CourseSchema",
@@ -580,23 +567,19 @@
       "DayItinerarySchema": {
         "properties": {
           "day": {
-            "description": "일차 (1부터 시작)",
+            "description": "일차",
+            "minimum": 1,
             "title": "Day",
             "type": "integer"
           },
           "date": {
-            "description": "날짜 (YYYY-MM-DD)",
+            "description": "날짜",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
             "title": "Date",
             "type": "string"
           },
-          "memo": {
-            "description": "해당 일자 요약 메모",
-            "title": "Memo",
-            "type": "string"
-          },
           "stops": {
-            "description": "일자별 스톱 목록",
+            "description": "일자별 방문 장소",
             "items": {
               "$ref": "#/$defs/StopSchema"
             },
@@ -607,7 +590,6 @@
         "required": [
           "day",
           "date",
-          "memo",
           "stops"
         ],
         "title": "DayItinerarySchema",
@@ -616,7 +598,7 @@
       "ItinerarySchema": {
         "properties": {
           "days": {
-            "description": "일자별 여정 목록",
+            "description": "일자별 여정",
             "items": {
               "$ref": "#/$defs/DayItinerarySchema"
             },
@@ -630,104 +612,31 @@
         "title": "ItinerarySchema",
         "type": "object"
       },
-      "PhotoAttributionSchema": {
-        "description": "Source information for the exact selected place photo.",
-        "properties": {
-          "provider": {
-            "const": "Google Maps",
-            "default": "Google Maps",
-            "description": "사진 공급자",
-            "title": "Provider",
-            "type": "string"
-          },
-          "googleMapsUri": {
-            "description": "선택한 개별 사진의 Google Maps 원본 URL",
-            "title": "Googlemapsuri",
-            "type": "string"
-          },
-          "authorAttributions": {
-            "description": "제공된 사진 작성자 정보",
-            "items": {
-              "$ref": "#/$defs/PhotoAuthorSchema"
-            },
-            "title": "Authorattributions",
-            "type": "array"
-          }
-        },
-        "required": [
-          "googleMapsUri"
-        ],
-        "title": "PhotoAttributionSchema",
-        "type": "object"
-      },
-      "PhotoAuthorSchema": {
-        "description": "A supplied photo author's name, profile link and distinct avatar link.",
-        "properties": {
-          "displayName": {
-            "description": "사진 작성자 표시 이름",
-            "title": "Displayname",
-            "type": "string"
-          },
-          "uri": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "작성자 Google Maps 프로필 URL",
-            "title": "Uri"
-          },
-          "photoUri": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "작성자 아바타 URL (장소 사진이 아님)",
-            "title": "Photouri"
-          }
-        },
-        "required": [
-          "displayName"
-        ],
-        "title": "PhotoAuthorSchema",
-        "type": "object"
-      },
       "PlaceSchema": {
+        "description": "Verified identity and map marker only; rich details stay in Google Maps.",
         "properties": {
           "placeId": {
-            "description": "Google Maps Place ID 또는 서비스 장소 식별자",
+            "description": "검증된 Google Maps Place ID",
             "title": "Placeid",
             "type": "string"
           },
           "placeName": {
-            "description": "장소 한글 명칭",
+            "description": "LLM이 제안한 검색 장소명; Google 공식 표시 이름은 조회하지 않음",
             "title": "Placename",
             "type": "string"
           },
-          "placeEngName": {
-            "default": "",
-            "description": "장소 공식 영문/로마자 명칭 (한글 제외)",
-            "title": "Placeengname",
-            "type": "string"
-          },
           "category": {
-            "description": "장소 카테고리",
+            "description": "앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트)",
+            "enum": [
+              "FOOD",
+              "CAFE",
+              "SPOT",
+              "CULTURE",
+              "NATURE",
+              "ACTIVITY",
+              "NIGHTLIFE"
+            ],
             "title": "Category",
-            "type": "string"
-          },
-          "address": {
-            "default": "",
-            "description": "장소 주소",
-            "title": "Address",
             "type": "string"
           },
           "latitude": {
@@ -739,45 +648,6 @@
             "description": "경도",
             "title": "Longitude",
             "type": "number"
-          },
-          "rating": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "장소 평점",
-            "title": "Rating"
-          },
-          "photoUrl": {
-            "default": "",
-            "description": "대표 사진 URL",
-            "title": "Photourl",
-            "type": "string"
-          },
-          "photoAttribution": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/PhotoAttributionSchema"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "대표 사진의 원본 및 작성자 출처"
-          },
-          "openingHours": {
-            "description": "영업시간 정보 목록",
-            "items": {
-              "type": "string"
-            },
-            "title": "Openinghours",
-            "type": "array"
           }
         },
         "required": [
@@ -793,15 +663,10 @@
       "StopSchema": {
         "properties": {
           "sequence": {
-            "description": "방문 순서 (1부터 시작)",
+            "description": "방문 순서",
+            "minimum": 1,
             "title": "Sequence",
             "type": "integer"
-          },
-          "arrivalTime": {
-            "description": "도착 시각 (HH:mm)",
-            "pattern": "^\\d{2}:\\d{2}$",
-            "title": "Arrivaltime",
-            "type": "string"
           },
           "stayMinutes": {
             "description": "체류 시간 (분)",
@@ -810,34 +675,33 @@
             "type": "integer"
           },
           "memo": {
-            "description": "메모 및 안내 사항",
+            "description": "요청 언어로 작성된 방문 팁",
             "title": "Memo",
             "type": "string"
           },
           "reason": {
-            "description": "해당 장소 추천 이유",
+            "description": "취향과 검증된 장소에 근거한 추천 이유",
             "title": "Reason",
             "type": "string"
           },
           "cost": {
             "default": 0,
-            "description": "해당 스톱 예상 활동/식사/입장 비용 (원)",
+            "description": "예상 활동·식사·입장 비용 (KRW)",
             "minimum": 0,
             "title": "Cost",
             "type": "integer"
           },
           "place": {
             "$ref": "#/$defs/PlaceSchema",
-            "description": "장소 상세 정보 (Google Maps API 연동)"
+            "description": "지도 연결용 장소 정보"
           },
           "transportToNext": {
             "$ref": "#/$defs/TransportToNextSchema",
-            "description": "다음 장소까지 이동 정보 (Google Routes API 연동)"
+            "description": "다음 장소까지 실제 이동 정보"
           }
         },
         "required": [
           "sequence",
-          "arrivalTime",
           "stayMinutes",
           "memo",
           "reason",
@@ -871,7 +735,7 @@
               }
             ],
             "default": null,
-            "description": "이동 거리 (미터)",
+            "description": "실제 이동 거리 (미터)",
             "title": "Distance"
           },
           "minutes": {
@@ -884,21 +748,8 @@
               }
             ],
             "default": null,
-            "description": "이동 소요 시간 (분)",
+            "description": "실제 이동 소요 시간 (분)",
             "title": "Minutes"
-          },
-          "cost": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "예상 이동 비용 (원)",
-            "title": "Cost"
           },
           "memo": {
             "anyOf": [
@@ -910,7 +761,7 @@
               }
             ],
             "default": null,
-            "description": "이동 관련 참고 메모",
+            "description": "요청 언어로 작성된 이동 안내",
             "title": "Memo"
           }
         },
@@ -924,7 +775,7 @@
     "properties": {
       "course": {
         "$ref": "#/$defs/CourseSchema",
-        "description": "생성된 여행 코스 정보"
+        "description": "생성된 여행 코스"
       }
     },
     "required": [
@@ -936,18 +787,18 @@
   "ProgressEventData": {
     "properties": {
       "step": {
-        "description": "진행 단계 코드",
+        "const": "GENERATING_ROUTE",
+        "default": "GENERATING_ROUTE",
         "title": "Step",
         "type": "string"
       },
       "message": {
-        "description": "진행 단계 안내 메시지",
+        "description": "요청 언어로 작성된 진행 안내",
         "title": "Message",
         "type": "string"
       }
     },
     "required": [
-      "step",
       "message"
     ],
     "title": "ProgressEventData",

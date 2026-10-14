@@ -235,27 +235,19 @@ def _supported_reason(stop: StopSchema, label: str, variant: int) -> str:
     return templates[variant % len(templates)] + ' ' + _experience_value(stop.place.category)
 
 
-def apply_personalized_reasons(request: CourseRequestSchema, days: list[DayItinerarySchema]) -> str:
+def apply_personalized_reasons(request: CourseRequestSchema, days: list[DayItinerarySchema]) -> None:
     """Explain verified experiences and supplied strong preferences without schedule.
 
     Args:
         request: Original supplied preferences; MBTI traits are never inferred.
         days: Final verified places; each stop reason is updated in place.
-    Returns:
-        A summary of selected experiences and actual supported preferences.
-        No external calls, itinerary values or price estimates are changed.
+    No external calls, itinerary values or price estimates are changed.
     """
     used: Counter[str] = Counter()
-    experiences: Counter[str] = Counter()
-    examples: dict[str, str] = {}
-    example_categories: dict[str, str] = {}
     profile = request.tasteProfile
     for day in days:
         for stop in day.stops:
-            label, action = _experience(stop.place.category)
-            experiences[label] += 1
-            examples.setdefault(label, stop.place.placeName)
-            example_categories.setdefault(label, stop.place.category)
+            _, action = _experience(stop.place.category)
             evidence = _evidence(profile, stop.place.category) if profile else []
             if evidence:
                 evidence.sort(key=lambda item: (-item[0], used[item[1].label]))
@@ -264,17 +256,6 @@ def apply_personalized_reasons(request: CourseRequestSchema, days: list[DayItine
                 used[rule.label] += 1
             else:
                 stop.reason = f'{stop.place.placeName}에서 {action} 경험을 여행에 더할 수 있도록 추천했어요. {_experience_value(stop.place.category)}'
-    if not experiences:
-        return '직접 장소를 둘러보는 경험을 담은 여행이에요. 눈에 들어오는 부분을 스스로 살펴보는 방문을 더했어요.'
-    connections = ', '.join(f'{label}({examples[label]})' for label, _ in experiences.most_common(3))
-    summary = f'이번 여행에는 {connections} 경험을 함께 담았어요.'
-    if used:
-        travel_experiences = ', '.join(_travel_experience(label) for label, _ in used.most_common(3))
-        summary += f' 취향에 맞춰 {travel_experiences}이 이어지도록 구성했어요.'
-    else:
-        main_experience = experiences.most_common(1)[0][0]
-        summary += ' ' + _experience_value(example_categories[main_experience])
-    return summary
 
 
 def verified_course_tags(days: list[DayItinerarySchema]) -> list[str]:

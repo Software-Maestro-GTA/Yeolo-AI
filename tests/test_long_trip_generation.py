@@ -9,15 +9,19 @@ import pytest
 
 from app.agent import course_drafting
 from app.agent.course_state import Candidate, CourseDraft, DraftDay
-from app.schemas.course import CourseRequestSchema, PlaceSchema, TransportToNextSchema
+from app.agent.tools.verified_maps import InternalPlaceSchema as PlaceSchema
+from app.agent.tools.verified_maps import (
+    InternalTransportSchema as TransportToNextSchema,
+)
+from app.schemas.course import CourseRequestSchema
 
 
 @pytest.fixture
 def trip_request():
     return CourseRequestSchema.model_validate({
-        'userId': '550e8400-e29b-41d4-a716-446655440000', 'mbti': 'INTJ',
+        'userId': '550e8400-e29b-41d4-a716-446655440000', 'language': 'ko', 'mbti': 'INTJ',
         'tripCondition': {'destinationCountry': '일본', 'destinationCity': '도쿄',
-                          'startDate': '2026-10-17', 'totalDays': 5, 'budgetType': 'moderate'},
+                          'startDate': '2026-10-17', 'totalDays': 5, 'budget': 900000},
     })
 
 
@@ -186,8 +190,6 @@ def graph_with_days(mocker, tmp_path, trip_request, *, aliases=False, alternativ
     provider = mocker.Mock()
     provider.resolve_destination = AsyncMock(return_value=Destination(country_code='JP', south=35, north=36, west=139, east=140))
     provider.search = AsyncMock(side_effect=lambda candidate, destination: places[candidate.name])
-    provider.discover_meals = AsyncMock(return_value=[])
-    provider.photo = AsyncMock(return_value=None)
     provider.route = AsyncMock(return_value=TransportToNextSchema(type='walking', distance=500, minutes=10, cost=0, memo='검증된 보행 경로'))
     history = CourseHistory(path=tmp_path / 'history.sqlite3')
     return provider, history, first, second, extra, places
@@ -239,8 +241,6 @@ async def test_distinct_days_verify_routes_concurrently_and_keep_calendar_order(
     provider.resolve_destination = AsyncMock(return_value=Destination(country_code='JP', south=35, north=36, west=139, east=140))
     places = {candidate.name: VerifiedPlace(PlaceSchema(placeId=f'places/{candidate.name}', placeName=candidate.name, category='restaurant' if candidate.meal != 'none' else 'museum', address='東京都千代田区', latitude=35.68 + slot * .001, longitude=139.76)) for day in draft.days for slot, candidate in enumerate(day.candidates)}
     provider.search = AsyncMock(side_effect=lambda candidate, destination: places[candidate.name])
-    provider.discover_meals = AsyncMock(return_value=[])
-    provider.photo = AsyncMock(return_value=None)
     active = peak = 0
     active_days = set()
     async def route(left, right, **kwargs):

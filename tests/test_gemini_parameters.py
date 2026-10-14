@@ -56,9 +56,9 @@ async def invoke(operation, user_id=USER_ID):
     if operation == 'summary':
         return await taste_profile_chains.generate_taste_summary('{}', user_id=user_id)
     request = CourseRequestSchema.model_validate({
-        'userId': str(user_id), 'mbti': 'INTJ',
+        'userId': str(user_id), 'language': 'ko', 'mbti': 'INTJ',
         'tripCondition': {'destinationCountry': '대한민국', 'destinationCity': '서울',
-                          'startDate': '2026-10-17', 'totalDays': 1, 'budgetType': 'moderate'},
+                          'startDate': '2026-10-17', 'totalDays': 1, 'budget': 900000},
     })
     return await course_drafting._draft_day_candidates(request, [], day_index=0, seed='offline')
 

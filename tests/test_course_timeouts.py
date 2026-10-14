@@ -19,9 +19,9 @@ from app.schemas.course import CourseRequestSchema
 @pytest.fixture
 def request_data():
     return CourseRequestSchema.model_validate({
-        'userId': '550e8400-e29b-41d4-a716-446655440000', 'mbti': 'INTJ',
+        'userId': '550e8400-e29b-41d4-a716-446655440000', 'language': 'ko', 'mbti': 'INTJ',
         'tripCondition': {'destinationCountry': '일본', 'destinationCity': '도쿄',
-                          'startDate': '2026-10-17', 'totalDays': 2, 'budgetType': 'moderate'},
+                          'startDate': '2026-10-17', 'totalDays': 2, 'budget': 900000},
     })
 
 

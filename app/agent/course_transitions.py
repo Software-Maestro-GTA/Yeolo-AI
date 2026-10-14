@@ -56,6 +56,12 @@ def route_after(success: str) -> CourseRouter:
             return "restore"
         if not state.get("feedback"):
             return success
+        if (
+            success == "schedule"
+            and not state.get("repairing")
+            and state.get("pending_place_days", set()) - state.get("validated_days", {}).keys()
+        ):
+            return "expand_places"
         if state["attempt"] >= _max_drafts(state) or state.get("refilling"):
             if (
                 not state.get("repairing")
