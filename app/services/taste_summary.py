@@ -1,4 +1,4 @@
-"""Prepare grounded UI interests and bounded city candidates without extra calls."""
+"""Prepare grounded UI interests and assemble an LLM-selected city without map calls."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -12,7 +12,6 @@ from app.schemas.taste_summary import (
     TasteSummaryDraft,
 )
 from app.services.behavior_evidence import MIN_EVIDENCE_DAYS, MIN_EVIDENCE_VISITS
-from app.services.taste_city_catalog import CITY_CANDIDATES
 
 
 class InsufficientTasteEvidenceError(ValueError):
@@ -36,8 +35,6 @@ TYPE_DEFINITIONS = (
     ("WELLNESS", "travelPurpose.wellness", "spa and wellness venues", "wellness"),
     ("EXPERIENCE", "activityPreference.experience", "workshops and activity venues", "activity"),
 )
-
-MAX_CITY_CANDIDATES = 8
 
 AXIS_LABELS = {
     "ko": ("약함", "강함"), "en": ("Weaker", "Stronger"),
@@ -71,7 +68,6 @@ class SummaryContext:
 
     language: str
     types: list[dict[str, Any]]
-    cities: list[dict[str, Any]]
     recommendation_interests: list[dict[str, Any]]
 
     def model_input(self) -> dict[str, Any]:
@@ -80,42 +76,8 @@ class SummaryContext:
             "language": self.language,
             "hasSupportedPreferences": bool(self.types),
             "types": self.types,
-            "cityCandidates": self.cities,
             "recommendationInterests": self.recommendation_interests,
         }
-
-
-def _select_cities(
-    supported: list[tuple[str, dict[str, Any]]], language: str,
-) -> list[dict[str, Any]]:
-    """Rank cities locally, using each related interest group's strongest match.
-
-    Args:
-        supported: Evidence-backed interests and their shared group identities.
-        language: Normalized locale for existing Korean/English proper names.
-    Returns:
-        At most eight cities matching the supported interests.
-        Ties favor coverage, then city codes rather than catalog insertion order.
-    """
-    ranked = []
-    for city in CITY_CANDIDATES:
-        weights: dict[str, int] = {}
-        matched = []
-        for group, interest in supported:
-            if interest["typeCode"] in city.interests:
-                weights[group] = max(weights.get(group, 0), interest["sourceScore"] - 3)
-                matched.append(interest["typeCode"])
-        if not matched:
-            continue
-        korean = language.split("-")[0] == "ko"
-        candidate = {
-            "cityCode": city.code,
-            "countryName": city.country_ko if korean else city.country_en,
-            "cityName": city.city_ko if korean else city.city_en,
-            "interestCodes": list(city.interests), "matchedTypeCodes": sorted(matched),
-        }
-        ranked.append(((-sum(weights.values()), -len(weights), -len(matched), city.code), candidate))
-    return [candidate for _, candidate in sorted(ranked, key=lambda item: item[0])[:MAX_CITY_CANDIDATES]]
 
 
 def prepare_summary_context(
@@ -128,8 +90,8 @@ def prepare_summary_context(
         metadata: Internal evidence used to exclude compatibility placeholders.
         language: Normalized request locale.
     Returns:
-        Exactly three display axes and up to eight cities matched using all supported
-        interests, including interests not displayed as sliders. No network I/O.
+        Exactly three display axes and all supported interests for the model to
+        recommend a city, including interests not displayed as sliders. No network I/O.
     Raises:
         InsufficientTasteEvidenceError: Fewer than three groups have supported scores of 4 or 5.
     """
@@ -159,32 +121,27 @@ def prepare_summary_context(
     if len(selected) != SUMMARY_TYPE_COUNT:
         raise InsufficientTasteEvidenceError
 
-    supported = [(group, item) for _, group, item in ranked]
-    cities = _select_cities(supported, language)
     recommendation_interests = [
         {key: item[key] for key in ("typeCode", "subject", "sourceScore")}
         for _, _, item in sorted(ranked)
     ]
-    return SummaryContext(language, selected, cities, recommendation_interests)
+    return SummaryContext(language, selected, recommendation_interests)
 
 
 def assemble_taste_summary(draft: TasteSummaryDraft, context: SummaryContext) -> TasteSummary:
-    """Validate generated references and attach server-owned scores and city names.
+    """Validate generated type references and attach server-owned scores.
 
     Args:
-        draft: Validated model copy, with no permission to set scores or endpoints.
+        draft: Schema-validated copy and city recommendation; no editable scores or endpoints.
         context: Exact inputs used for that invocation.
     Returns:
         API-AI-1 summary in deterministic type order.
     Raises:
-        ValueError: The model invents, duplicates, omits an axis or selects an unrelated city.
+        ValueError: The model invents, duplicates or omits an axis.
     """
     titles = {item.typeCode: item.typeName for item in draft.types}
     if len(titles) != len(draft.types) or set(titles) != {item["typeCode"] for item in context.types}:
         raise ValueError("Summary types must match the supported input types exactly")
-    city = next((item for item in context.cities if item["cityCode"] == draft.recommendCity.cityCode), None)
-    if city is None:
-        raise ValueError("Summary city must be one of the matching candidates")
     locale = context.language.split("-")[0]
     if context.language in {"zh-TW", "zh-HK"} or "Hant" in context.language:
         locale = "zh-Hant"
@@ -196,6 +153,7 @@ def assemble_taste_summary(draft: TasteSummaryDraft, context: SummaryContext) ->
             lowName=low, highName=high, score=item["score"],
         ) for item in context.types],
         recommendCity=CityRecommendation(
-            countryName=city["countryName"], cityName=city["cityName"], reason=draft.recommendCity.reason,
+            countryName=draft.recommendCity.countryName, cityName=draft.recommendCity.cityName,
+            reason=draft.recommendCity.reason,
         ),
     )

@@ -1,7 +1,7 @@
 """Bounded UI copy and the public API-AI-1 summary contract."""
 
 import unicodedata
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -13,9 +13,6 @@ SummaryTypeCode = Literal[
     "CAFE_DESSERT", "CULTURE", "BEACH", "OUTDOOR", "NATURE",
     "FOOD", "SHOPPING", "NIGHTLIFE", "WELLNESS", "EXPERIENCE",
 ]
-# The exact allowed cities are validated against each request's shortlist by
-# assemble_taste_summary. Avoid sending the entire catalog in the LLM schema.
-CityCode = Annotated[str, Field(min_length=1, max_length=48, pattern=r"^[A-Z]+(?:_[A-Z]+)*$")]
 
 
 class SummaryModel(BaseModel):
@@ -39,14 +36,9 @@ class SummaryType(SummaryTypeCopy):
     score: int = Field(..., strict=True, ge=0, le=100, description="보정 점수의 0~100 표시값, 확률 아님")
 
 
-class CityRecommendationCopy(SummaryModel):
-    """Choose a supplied city by stable identity; do not generate country pairs."""
-
-    cityCode: CityCode = Field(..., description="제공된 추천 후보 중 선택한 도시 코드")
-    reason: str = Field(..., min_length=1, max_length=160, description="관측 취향과 도시 특성을 연결한 짧은 이유")
-
-
 class CityRecommendation(SummaryModel):
+    """One model-selected country/city pair; only output shape is validated."""
+
     countryName: str = Field(..., min_length=1, max_length=60, description="추천 국가명")
     cityName: str = Field(..., min_length=1, max_length=60, description="추천 도시명")
     reason: str = Field(..., min_length=1, max_length=160, description="추천 이유")
@@ -90,7 +82,7 @@ class TasteSummaryDraft(SummaryCopy):
     """Internal structured LLM output without editable scores or axis endpoints."""
 
     types: list[SummaryTypeCopy] = Field(..., min_length=SUMMARY_TYPE_COUNT, max_length=SUMMARY_TYPE_COUNT, description="근거가 있는 입력 유형 정확히 3개를 각 1회 사용")
-    recommendCity: CityRecommendationCopy = Field(..., description="후보 도시와 추천 설명")
+    recommendCity: CityRecommendation = Field(..., description="취향에 맞게 직접 추천한 국가·도시·이유")
 
 
 class TasteSummary(SummaryCopy):

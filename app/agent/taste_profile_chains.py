@@ -31,10 +31,10 @@ async def generate_taste_profile(statistics_report: str, *, user_id: UUID) -> Ta
 
 
 async def generate_taste_summary(summary_context: str, *, user_id: UUID) -> TasteSummaryDraft:
-    """Generate UI copy once; scores and canonical city names remain server-owned.
+    """Generate UI copy and one city recommendation; scores remain server-owned.
 
     Args:
-        summary_context: Supported interests and permitted city candidates as JSON.
+        summary_context: Three display axes and all supported recommendation interests as JSON.
         user_id: Same validated identity used by the analysis call.
     Returns:
         Summary draft for reference validation and final assembly.

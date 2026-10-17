@@ -27,7 +27,7 @@ def output_for(operation):
         return {
             'intro': '카페와 디저트를 즐기는 여행자예요.', 'hashtags': ['#카페', '#디저트', '#여행'],
             'types': [{'typeCode': code, 'typeName': code} for code in ('CAFE_DESSERT', 'CULTURE', 'SHOPPING')],
-            'recommendCity': {'cityCode': 'SEOUL', 'reason': '카페에 대한 관심을 바탕으로 제안해요.'},
+            'recommendCity': {'countryName': '대한민국', 'cityName': '서울', 'reason': '카페에 대한 관심을 바탕으로 제안해요.'},
         }
     if operation == 'candidates':
         return {'title': '서울 여행', 'reason': '문화 탐방', 'days': [
@@ -120,7 +120,10 @@ async def test_gemini_gateway_request_preserves_schema_parameters_and_identity(o
         assert summary_schema['properties']['types']['maxItems'] == 3
         assert 'score' not in summary_schema['$defs']['SummaryTypeCopy']['properties']
         assert 'lowName' not in summary_schema['$defs']['SummaryTypeCopy']['properties']
-        assert 'countryName' not in summary_schema['$defs']['CityRecommendationCopy']['properties']
+        city_schema = summary_schema['$defs']['CityRecommendation']
+        assert set(city_schema['required']) == {'countryName', 'cityName', 'reason'}
+        assert set(city_schema['properties']) == {'countryName', 'cityName', 'reason'}
+        assert all('enum' not in field for field in city_schema['properties'].values())
     assert not {'temperature', 'top_p', 'top_k', 'candidate_count', 'generation_config', 'thinking_budget',
                 'parallel_tool_calls', 'tools', 'stream_options', 'metadata', 'store'} & body.keys()
     allowed = {'model', 'messages', 'stream', 'response_format', 'max_completion_tokens', 'reasoning_effort'}
@@ -247,6 +250,7 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
     requests = []
     summary_contexts = []
     mocker.patch.object(settings, 'INTERNAL_API_KEY', 'offline-api-key')
+    mocker.patch.object(settings, 'GOOGLE_MAPS_API_KEY', '')
 
     def respond(http_request):
         requests.append(http_request)
@@ -257,13 +261,12 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
             return completion(full_profile(['warm_region']).model_dump())
         assert schema_name == 'TasteSummaryDraft'
         assert len(requests) == 2
-        city_schema = body['response_format']['json_schema']['schema']['$defs']['CityRecommendationCopy']['properties']['cityCode']
-        assert city_schema['type'] == 'string'
-        assert 'enum' not in city_schema  # Catalog growth does not enlarge model schemas.
+        city_schema = body['response_format']['json_schema']['schema']['$defs']['CityRecommendation']['properties']
+        assert set(city_schema) == {'countryName', 'cityName', 'reason'}
+        assert all('enum' not in field for field in city_schema.values())
         context = body['messages'][-1]['content'].split('\n', 1)[1]
         summary_contexts.append(json.loads(context))
         draft = draft_for(context)
-        draft.recommendCity.cityCode = 'MELBOURNE'
         return completion(draft.model_dump())
 
     clients = offline_wire(respond)
@@ -280,15 +283,18 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
     assert result['summary']['types'] == [{
         'typeCode': code, 'typeName': '나만의 ' + code, 'lowName': '약함', 'highName': '강함', 'score': 100,
     } for code in ('CAFE_DESSERT', 'CULTURE', 'SHOPPING')]
-    assert result['summary']['recommendCity']['countryName'] == '호주'
-    assert result['summary']['recommendCity']['cityName'] == '멜버른'
+    assert result['summary']['recommendCity']['countryName'] == '슬로베니아'
+    assert result['summary']['recommendCity']['cityName'] == '류블랴나'
     assert 'cityCode' not in result['summary']['recommendCity']
     assert summary_contexts[0]['types'][0]['visitCount'] == 3
-    assert len(summary_contexts[0]['cityCandidates']) <= 8
-    assert 'MELBOURNE' in {city['cityCode'] for city in summary_contexts[0]['cityCandidates']}
+    assert 'cityCandidates' not in summary_contexts[0]
+    assert {'CAFE_DESSERT', 'CULTURE', 'SHOPPING'} <= {
+        interest['typeCode'] for interest in summary_contexts[0]['recommendationInterests']
+    }
     serialized = json.dumps(summary_contexts)
     assert all(key not in serialized for key in ('companionType', 'warm_region', 'sourceImageId', 'capturedAt', 'placeName'))
     assert len(requests) == 2
+    assert all(str(req.url) == 'https://gateway.abto.app/v1/chat/completions' for req in requests)
     assert all(req.headers['x-abto-feature-id'] == 'taste.profile.analysis' for req in requests)
     assert all(req.headers['x-abto-device-id'] == str(USER_ID) for req in requests)
     assert len(clients) == 4 and all(client.is_closed for client in clients)
