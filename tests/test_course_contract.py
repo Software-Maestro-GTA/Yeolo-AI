@@ -1,4 +1,4 @@
-"""Freeze requests/SSE and the approved nullable response attribution additions."""
+"""Freeze the approved language, numeric budget and minimal course response contract."""
 
 import json
 from pathlib import Path
@@ -10,8 +10,8 @@ from app.schemas.course import (
 )
 
 
-def test_course_api_schemas_match_approved_attribution_contract():
-    """Only the explicitly approved photo attribution response extension is allowed."""
+def test_course_api_schemas_match_approved_minimal_response_contract():
+    """Capture the approved API-AI-2 schema without restoring removed detail fields."""
     expected = json.loads(
         (Path(__file__).parent / 'fixtures/course_api_schema_baseline.json').read_text()
     )

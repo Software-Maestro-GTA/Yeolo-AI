@@ -82,11 +82,6 @@ class AnalysisMetadataSchema(BaseModel):
     requiresUserConfirmation: list[str] = Field(default_factory=list, description="확정 취향으로 사용하기 전에 확인할 경로")
 
 
-class BehaviorAnalysisResponse(BaseModel):
-    tasteProfile: TasteProfileSchema = Field(..., description="조립된 성향 프로필 결과")
-
-
-
 class TasteProfileAnalysisOutput(TasteProfileSchema):
     """신규 분석 출력은 계절 선호 최소 1개를 요구하며 기존 입력은 호환합니다."""
 

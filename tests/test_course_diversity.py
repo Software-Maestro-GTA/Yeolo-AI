@@ -11,7 +11,11 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.course import CourseRequestSchema, PlaceSchema, TransportToNextSchema
+from app.agent.tools.verified_maps import InternalPlaceSchema as PlaceSchema
+from app.agent.tools.verified_maps import (
+    InternalTransportSchema as TransportToNextSchema,
+)
+from app.schemas.course import CourseRequestSchema
 
 
 def profile(ids, attractions=None, areas=(), experiences=()):
@@ -36,7 +40,7 @@ def test_overlap_detects_restaurant_only_swaps_and_uses_max_individual_history(c
 
 
 def test_area_normalization_and_candidate_metadata_remain_internal():
-    from app.agent.course_graph import Candidate
+    from app.agent.course_state import Candidate
     from app.services.course_diversity import normalize_area
 
     assert normalize_area('  Ｓｅｏｕｌ   Forest ') == 'seoul forest'
@@ -108,11 +112,11 @@ async def test_history_ttl_and_per_user_pruning_remove_metadata_together(tmp_pat
 
 @pytest.fixture
 def diversity_dependencies(tmp_path, mocker):
-    from app.agent.course_graph import Candidate, CourseDraft, DraftDay
+    from app.agent.course_state import Candidate, CourseDraft, DraftDay
     from app.agent.tools.verified_maps import Destination, VerifiedPlace
     from app.services.course_history import CourseHistory
 
-    request = CourseRequestSchema.model_validate({'userId': '550e8400-e29b-41d4-a716-446655440000', 'mbti': 'INTJ', 'tripCondition': {'destinationCountry': '대한민국', 'destinationCity': '서울특별시', 'startDate': '2026-10-05', 'totalDays': 1, 'budgetType': 'moderate'}})
+    request = CourseRequestSchema.model_validate({'userId': '550e8400-e29b-41d4-a716-446655440000', 'language': 'ko', 'mbti': 'INTJ', 'tripCondition': {'destinationCountry': '대한민국', 'destinationCity': '서울특별시', 'startDate': '2026-10-05', 'totalDays': 1, 'budget': 900000}})
     places = {}
 
     def make_draft(area, version='', *, same_attractions=False):
@@ -130,15 +134,13 @@ def diversity_dependencies(tmp_path, mocker):
     provider = mocker.Mock()
     provider.resolve_destination = AsyncMock(return_value=Destination(country_code='KR', south=37.3, west=126.7, north=37.8, east=127.3))
     provider.search = AsyncMock(side_effect=lambda candidate, destination: places[candidate.name])
-    provider.discover_meals = AsyncMock(return_value=[])
-    provider.photo = AsyncMock(return_value=None)
 
     async def route(left, right, **kwargs):
         minutes = 120 if abs(left.place.latitude - right.place.latitude) > .01 else 10
         return TransportToNextSchema(type='transit', distance=500, minutes=minutes, cost=1500)
 
     provider.route = AsyncMock(side_effect=route)
-    llm = mocker.patch('app.agent.course_graph.draft_candidates', new_callable=AsyncMock)
+    llm = mocker.patch('app.agent.course_nodes.draft_candidates', new_callable=AsyncMock)
     history = CourseHistory(tmp_path / 'actual-history.sqlite3')
     return request, provider, history, llm, drafts, places, make_draft
 
@@ -180,14 +182,13 @@ async def test_three_identical_seoul_requests_change_real_selected_neighborhoods
     assert areas[1] in llm.await_args_list[4].args[2]
     # Every search uses a current draft name, never an old ID reverse lookup.
     assert all(call.args[0].name in places for call in provider.search.await_args_list)
-    provider.discover_meals.assert_not_awaited()
     assert all(len(day.stops) == 5 for course in courses for day in course.itinerary.days)
     assert not any(key in json.dumps(course.model_dump()) for course in courses for key in ('planned_area', 'experiences', 'place_overlap'))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('repair_failure', ['timeout', 'unsafe_places'])
-async def test_novelty_repair_failure_returns_captured_verified_course(diversity_dependencies, repair_failure, offline_place_copy):
+async def test_novelty_repair_failure_returns_captured_verified_course(diversity_dependencies, repair_failure):
     from app.agent.course_graph import build_course_graph
     from app.agent.tools.verified_maps import VerifiedPlace
     from app.services.course_history import history_key
@@ -210,10 +211,8 @@ async def test_novelty_repair_failure_returns_captured_verified_course(diversity
     assert course.title == f'{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행'
     assert len(course.itinerary.days[0].stops) == 5
     assert all('광화문 북촌' in stop.place.placeName for stop in course.itinerary.days[0].stops)
-    assert '이전' in course.recommendationReason or '중복' in course.recommendationReason
     assert llm.await_count <= 2
     assert all(stop.transportToNext.minutes <= 90 for stop in course.itinerary.days[0].stops[:-1])
-    offline_place_copy.assert_not_awaited()
     assert all(stop.reason and stop.memo for stop in course.itinerary.days[0].stops)
 
 
@@ -241,7 +240,7 @@ async def test_near_deadline_novelty_retry_does_not_lose_verified_fallback(diver
 
 
 def test_day_shortlist_prefers_new_attractions_over_original_and_meal_variations(diversity_dependencies):
-    from app.agent.course_graph import _day_plans
+    from app.services.course_planning import _day_plans
 
     _, _, _, _, drafts, places, _ = diversity_dependencies
     old = drafts['광화문 북촌'].days[0].candidates
@@ -258,7 +257,8 @@ def test_day_shortlist_prefers_new_attractions_over_original_and_meal_variations
 
 @pytest.mark.asyncio
 async def test_verified_alternate_neighborhood_in_same_pool_needs_no_extra_llm(diversity_dependencies):
-    from app.agent.course_graph import CourseDraft, DraftDay, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import CourseDraft, DraftDay
     from app.services.course_history import history_key
 
     request, provider, history, llm, drafts, places, _ = diversity_dependencies
@@ -274,7 +274,11 @@ async def test_verified_alternate_neighborhood_in_same_pool_needs_no_extra_llm(d
     llm.assert_awaited_once()
     assert provider.search.await_count == 10
     assert len({call.args[0].name for call in provider.search.await_args_list}) == 10
-    assert len({(call.args[0].place.placeId, call.args[1].place.placeId, call.kwargs.get('departure_time')) for call in provider.route.await_args_list}) == provider.route.await_count
+    # Invalid 120-minute cross-area routes may retry in a later expansion pass.
+    # Successful facts must still be reused for the same request, mode and departure.
+    successful = [call for call in provider.route.await_args_list if abs(call.args[0].place.latitude - call.args[1].place.latitude) <= .01]
+    keys = {(call.args[0].place.placeId, call.args[1].place.placeId, call.kwargs.get('mode', 'walking'), call.kwargs.get('departure_time')) for call in successful}
+    assert len(keys) == len(successful)
 
 
 @pytest.mark.asyncio
@@ -301,7 +305,8 @@ async def test_history_core_attractions_exclude_coffee_dessert_and_meal_business
     """Food-only changes cannot dilute the remembered museum/park core."""
     from uuid import UUID
 
-    from app.agent.course_graph import Candidate, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
     from app.services.course_diversity import overlap_scores
     from app.services.course_history import history_key
@@ -345,9 +350,10 @@ async def test_legacy_id_only_history_retries_restaurant_only_changes(diversity_
 
 def test_pool_ranking_prefers_all_novelty_targets_over_zero_core_overlap_alone():
     """A feasible 0/.5 core/place score must not outrank feasible 1/3/.2."""
-    from app.agent.course_graph import Candidate, _diversity_rank, _schedule_day
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
     from app.services.course_diversity import overlap_scores, planning_overlap
+    from app.services.course_planning import _diversity_rank, _schedule_day
 
     old_ids = {'shared-core', 'old-core-2', 'old-core-3', 'old-lunch', 'old-dinner'}
     old_core = {'shared-core', 'old-core-2', 'old-core-3'}

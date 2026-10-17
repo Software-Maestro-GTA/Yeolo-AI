@@ -82,7 +82,7 @@ def get_sample_trip_condition() -> TripConditionSchema:
         destinationCity="방콕",
         startDate="2026-08-01",
         totalDays=5,
-        budgetType="moderate",
+        budget=900000,
     )
 
 
@@ -101,9 +101,6 @@ def export_course_to_markdown(
     md_lines = []
     md_lines.append(f"# {course.title}")
     md_lines.append("")
-    if course.coverImageUrl:
-        md_lines.append(f"![코스 커버 이미지]({course.coverImageUrl})")
-        md_lines.append("")
     md_lines.append(f"> **목적지**: {course.destinationCountry} {course.destinationCity}")
     md_lines.append(f"> **일정**: {course.startDate} 부터 (총 {course.totalDays}일간)")
     if course.tags:
@@ -111,9 +108,7 @@ def export_course_to_markdown(
         md_lines.append(f"> **태그**: {tags_str}")
     md_lines.append("")
 
-    md_lines.append("## 전체 코스 핵심 추천 이유")
-    md_lines.append(f"{course.recommendationReason}")
-    md_lines.append("")
+    md_lines.append(f"> **총 예상 경비**: {course.totalCost:,.0f}원")
 
     md_lines.append("---")
     md_lines.append("## 일자별 상세 여행 일정 (Itinerary)")
@@ -129,11 +124,10 @@ def export_course_to_markdown(
 
     for day_item in course.itinerary.days:
         md_lines.append(f"### Day {day_item.day} ({day_item.date})")
-        md_lines.append(f"> *{day_item.memo}*")
         md_lines.append("")
 
-        md_lines.append("| 순서 | 시간 | 장소명 | 카테고리 | 체류시간 | 장소 예상 비용 | 다음 장소 이동 | 이동 비용 |")
-        md_lines.append("| :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: |")
+        md_lines.append("| 순서 | 장소명 | 카테고리 | 체류시간 | 장소 예상 비용 | 다음 장소 이동 |")
+        md_lines.append("| :---: | :--- | :---: | :---: | :---: | :---: |")
 
         for stop in day_item.stops:
             place_name = stop.place.placeName if stop.place else "알 수 없음"
@@ -141,7 +135,6 @@ def export_course_to_markdown(
 
             t_type = stop.transportToNext.type if stop.transportToNext else "none"
             t_minutes = stop.transportToNext.minutes if stop.transportToNext else None
-            t_cost = stop.transportToNext.cost if stop.transportToNext else None
 
             transport_str = transport_map.get(t_type, t_type)
             if t_minutes and t_minutes > 0:
@@ -151,11 +144,9 @@ def export_course_to_markdown(
 
             place_cost_val = stop.cost or 0
             place_cost_str = f"{place_cost_val:,}원" if place_cost_val > 0 else "무료"
-            trans_cost_val = t_cost or 0
-            trans_cost_str = f"{trans_cost_val:,}원" if trans_cost_val > 0 else "-"
 
             md_lines.append(
-                f"| {stop.sequence} | {stop.arrivalTime} | **{place_name}** | `{category}` | {stop.stayMinutes}분 | {place_cost_str} | {transport_info} | {trans_cost_str} |"
+                f"| {stop.sequence} | **{place_name}** | `{category}` | {stop.stayMinutes}분 | {place_cost_str} | {transport_info} |"
             )
 
         md_lines.append("")
@@ -164,13 +155,9 @@ def export_course_to_markdown(
             p = stop.place
             p_name = p.placeName if p else "장소"
             p_cat = p.category if p else "카테고리"
-            p_addr = p.address if p and p.address else ""
-            p_rating = f" (평점: {p.rating})" if p and p.rating else ""
 
-            md_lines.append(f"##### {stop.sequence}. {p_name} (`{p_cat}`){p_rating}")
-            if p_addr:
-                md_lines.append(f"- **주소**: {p_addr}")
-            md_lines.append(f"- **도착 시각**: {stop.arrivalTime} (체류 {stop.stayMinutes}분)")
+            md_lines.append(f"##### {stop.sequence}. {p_name} (`{p_cat}`)")
+            md_lines.append(f"- **체류 시간**: {stop.stayMinutes}분")
             md_lines.append(f"- **예상 비용**: {stop.cost:,}원" if stop.cost > 0 else "- **예상 비용**: 무료 (0원)")
             md_lines.append(f"- **추천 이유**: {stop.reason}")
             md_lines.append(f"- **메모/주의사항**: {stop.memo}")
@@ -271,6 +258,7 @@ async def run_local_test():
         print(f"\n[CASE] {title} 시작...")
         req_schema = CourseRequestSchema(
             userId="550e8400-e29b-41d4-a716-446655440000",
+            language="ko",
             mbti=mbti_val,
             tasteProfile=taste_profile,
             tripCondition=trip_condition,

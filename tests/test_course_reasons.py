@@ -5,7 +5,9 @@ from datetime import date
 
 import pytest
 
-from app.schemas.course import CourseRequestSchema, DayItinerarySchema, StopSchema
+from app.agent.course_state import ScheduledStopSchema as StopSchema
+from app.agent.tools.verified_maps import InternalPlaceSchema
+from app.schemas.course import CourseRequestSchema, DayItinerarySchema
 from app.schemas.taste_profile import (
     ActivityPreferenceSchema,
     FoodPreferenceSchema,
@@ -19,9 +21,9 @@ from app.services.course_reasons import apply_personalized_reasons
 @pytest.fixture
 def content_request():
     return CourseRequestSchema.model_validate({
-        'userId': '550e8400-e29b-41d4-a716-446655440000', 'mbti': 'ENFP',
+        'userId': '550e8400-e29b-41d4-a716-446655440000', 'language': 'ko', 'mbti': 'ENFP',
         'tripCondition': {'destinationCountry': '일본', 'destinationCity': '도쿄',
-                          'startDate': '2026-10-05', 'totalDays': 1, 'budgetType': 'moderate'},
+                          'startDate': '2026-10-05', 'totalDays': 1, 'budget': 900000},
     })
 
 
@@ -44,15 +46,15 @@ def stop_with_type(category, index=1):
     return StopSchema.model_validate({
         'sequence': index, 'arrivalTime': '10:15', 'stayMinutes': 95, 'cost': 17000,
         'memo': '검증된 방문 메모', 'reason': '유명하고 조용한 숨은 명소이며 예약 없이 무료 입장 가능',
-        'place': {'placeId': f'verified-{index}', 'placeName': f'검증 장소 {index}',
-                  'category': category, 'latitude': 35.67, 'longitude': 139.76},
-        'transportToNext': {'type': 'walking', 'distance': 700, 'minutes': 12, 'cost': 0,
+        'place': InternalPlaceSchema(placeId=f'verified-{index}', placeName=f'검증 장소 {index}',
+                                     category=category, latitude=35.67, longitude=139.76),
+        'transportToNext': {'type': 'walking', 'distance': 700, 'minutes': 12,
                             'memo': '확인된 경로'},
     })
 
 
 def content_day(*categories):
-    return DayItinerarySchema(day=1, date='2026-10-05', memo='기존 일정 안내',
+    return DayItinerarySchema(day=1, date='2026-10-05',
                               stops=[stop_with_type(category, index) for index, category in enumerate(categories, 1)])
 
 
@@ -77,13 +79,11 @@ def assert_experience_only(text):
 def test_mbti_only_explains_verified_type_experience(content_request, category, experience_words):
     day = content_day(category)
     original = day.stops[0].model_dump()
-    summary = apply_personalized_reasons(content_request, [day])
+    apply_personalized_reasons(content_request, [day])
     reason = day.stops[0].reason
     assert any(word in reason for word in experience_words)
-    assert any(word in summary for word in experience_words)
     assert day.stops[0].place.placeName in reason
     assert_experience_only(reason)
-    assert_experience_only(summary)
     assert not any(claim in reason for claim in ['선호', '취향', '좋아하'])
     assert {key: value for key, value in day.stops[0].model_dump().items() if key != 'reason'} == {
         key: value for key, value in original.items() if key != 'reason'
@@ -95,12 +95,10 @@ def test_pace_does_not_replace_place_experience_with_schedule(content_request, p
     content_request.tasteProfile = profile_with_scores()
     content_request.tasteProfile.travelPaceDensity = pace
     day = content_day(*(['museum'] * 6))
-    summary = apply_personalized_reasons(content_request, [day])
+    apply_personalized_reasons(content_request, [day])
     for stop in day.stops:
         assert_experience_only(stop.reason)
         assert any(word in stop.reason for word in ['전시', '작품', '관람'])
-    assert_experience_only(summary)
-    assert not any(absent in summary for absent in ['산책', '미식', '식사', '자연 탐방'])
 
 
 def test_strongest_actual_preference_explains_verified_museum_experience(content_request):
@@ -123,8 +121,8 @@ def test_strongest_actual_preference_explains_verified_museum_experience(content
 def test_unknown_category_and_unmatched_preferences_do_not_invent_experience(content_request):
     content_request.tasteProfile = profile_with_scores(travelPurpose__natureExploration=5, foodPreference__dietaryRestriction=5)
     day = content_day('unknown_provider_type')
-    summary = apply_personalized_reasons(content_request, [day])
-    for text in [summary, day.stops[0].reason]:
+    apply_personalized_reasons(content_request, [day])
+    for text in [day.stops[0].reason]:
         assert_experience_only(text)
         assert not any(claim in text for claim in ['선호', '취향', '산책', '전시', '알레르기', '자연', '식사', '휴식'])
         assert any(action in text for action in ['둘러', '살펴', '방문'])
@@ -133,8 +131,8 @@ def test_unknown_category_and_unmatched_preferences_do_not_invent_experience(con
 def test_general_restaurant_does_not_infer_cuisine_or_other_absent_experiences(content_request):
     content_request.tasteProfile = profile_with_scores(travelPurpose__gourmet=5, foodPreference__localFoodActive=5)
     day = content_day('restaurant', 'restaurant')
-    summary = apply_personalized_reasons(content_request, [day])
-    for text in [summary, *[stop.reason for stop in day.stops]]:
+    apply_personalized_reasons(content_request, [day])
+    for text in [stop.reason for stop in day.stops]:
         assert_experience_only(text)
         assert not any(claim in text for claim in ['현지 음식', '일식', '라멘', '초밥', '시그니처', '산책', '전시', '전망'])
         assert any(word in text for word in ['미식', '식사', '음식'])
@@ -151,10 +149,10 @@ def test_concrete_guidance_connects_visit_purpose_and_multiple_useful_actions(co
 
     content_request.tasteProfile = profile_with_scores(travelPurpose__culturalExperience=5, travelPurpose__natureExploration=5, travelPurpose__gourmet=5)
     day = content_day(category)
-    summary = apply_personalized_reasons(content_request, [day])
+    apply_personalized_reasons(content_request, [day])
     reason = day.stops[0].reason
     tip = visit_tip(category)
-    for text in [reason, summary]:
+    for text in [reason]:
         assert_experience_only(text)
         assert any(word in text for word in experience_words)
         sentences = [sentence.strip() for sentence in re.split(r'[.!?]+', text) if sentence.strip()]
@@ -180,15 +178,16 @@ def test_concrete_guidance_connects_visit_purpose_and_multiple_useful_actions(co
     ('sushi_restaurant', ('메뉴', '재료', '양')), ('restaurant', ('메뉴', '재료', '양')),
 ])
 def test_schedule_memo_has_type_action_and_preserves_numeric_cost(category, action_words):
-    from app.agent.course_graph import Candidate, _schedule_day
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
+    from app.services.course_planning import _schedule_day
 
     venue = VerifiedPlace(stop_with_type(category).place, periods=None)
     day = _schedule_day([(Candidate(name=venue.place.placeName, stay_minutes=60, cost=17000), venue)], [], date(2026, 10, 5), 1)
     stop = day.stops[0]
     assert any(action in stop.memo for action in action_words)
     assert any(action in stop.memo for action in ['확인', '선택', '살펴', '보고', '지켜'])
-    assert '영업시간 미확인' in stop.memo
+    assert not any(claim in stop.memo for claim in ['영업시간 미확인', '영업시간 확인됨', '영업 중', '영업중'])
     assert not any(claim in stop.memo for claim in ['계획용 추정치', '실제 가격', '유명', '조용', '무료', '예약 필수', '촬영 가능', '행사가 열려'])
     assert stop.arrivalTime == '09:00' and stop.stayMinutes == 60 and stop.cost == 17000
     assert stop.transportToNext.type == 'none'
@@ -200,8 +199,9 @@ def test_schedule_memo_has_type_action_and_preserves_numeric_cost(category, acti
     [{'open': {'day': 0, 'hour': 20}, 'close': {'day': 1, 'hour': 12}}],
 ])
 def test_known_hours_do_not_repeat_blanket_reservation_or_false_closing_notice(periods):
-    from app.agent.course_graph import Candidate, _schedule_day
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
+    from app.services.course_planning import _schedule_day
 
     venue = VerifiedPlace(stop_with_type('museum').place, periods=periods)
     day = _schedule_day([(Candidate(name=venue.place.placeName, stay_minutes=60), venue)], [], date(2026, 10, 5), 1)

@@ -87,3 +87,45 @@ def test_runtime_image_prepares_owned_history_directory_before_nonroot_user():
     assert re.search(r'COURSE_HISTORY_PATH=["\']?/app/\.data/course_history\.sqlite3', before_user)
     assert re.search(r'mkdir\s+(?:-p\s+)?/app/\.data', before_user)
     assert re.search(r'chown\s+(?:-R\s+)?(?:appuser:appuser|10001:10001)\s+/app/\.data', before_user)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('ids', 'metadata'), [
+    ('{broken-json', None),
+    ('{"not": "ids"}', None),
+    ('["bad", 17]', None),
+    ('["bad"]', '{broken-json'),
+    ('["bad"]', '["not metadata"]'),
+    ('["bad"]', '{"attraction_ids": null, "areas": null, "experiences": null}'),
+])
+async def test_damaged_history_rows_do_not_block_reads_or_duplicate_claims(tmp_path, ids, metadata):
+    """Keep valid ID history even when an adjacent row or metadata is damaged."""
+    import json
+    import time
+
+    history = CourseHistory(tmp_path / 'history.sqlite3')
+    assert await history.record_if_novel('user', {'good'}, metadata={'attraction_ids': ['good']})
+    with sqlite3.connect(history.path) as db:
+        db.execute('INSERT INTO courses VALUES (?, ?, ?, ?)', ('user', 'damaged', ids, time.time()))
+        if metadata is not None:
+            db.execute('INSERT INTO course_plans VALUES (?, ?, ?)', ('user', 'damaged', metadata))
+    entries = await history.recent_profiles('user')
+    expected = [{'bad'}, {'good'}] if metadata is not None else [{'good'}]
+    assert [set(entry['place_ids']) for entry in entries] == expected
+    assert await history.recent('user') == expected
+    assert not await history.record_if_novel('user', {'good', 'new'}, metadata={'attraction_ids': ['good']}, max_overlap=.4)
+    assert await history.record_if_novel('user', {'fresh'}, metadata={'attraction_ids': ['fresh']}, max_overlap=.4)
+    assert 'fresh' in json.dumps(await history.recent_profiles('user'))
+
+
+@pytest.mark.asyncio
+async def test_history_metadata_cannot_override_verified_place_ids(tmp_path):
+    import json
+    import time
+
+    history = CourseHistory(tmp_path / 'history.sqlite3')
+    await history.ensure_available()
+    with sqlite3.connect(history.path) as db:
+        db.execute('INSERT INTO courses VALUES (?, ?, ?, ?)', ('user', 'record', '["verified"]', time.time()))
+        db.execute('INSERT INTO course_plans VALUES (?, ?, ?)', ('user', 'record', json.dumps({'place_ids': ['spoofed'], 'attraction_ids': ['verified', 'spoofed'], 'areas': ['  Seoul  '], 'experiences': ['culture', 'invented']})))
+    assert await history.recent_profiles('user') == [{'place_ids': ['verified'], 'attraction_ids': ['verified'], 'areas': ['seoul'], 'experiences': ['culture']}]

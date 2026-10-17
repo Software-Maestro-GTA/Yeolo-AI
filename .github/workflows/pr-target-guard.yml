@@ -14,13 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check Source Branch
+        env:
+          TARGET_BRANCH: ${{ github.base_ref }}
+          SOURCE_BRANCH: ${{ github.head_ref }}
         run: |
-          echo "Target Branch: ${{ github.base_ref }}"
-          echo "Source Branch: ${{ github.head_ref }}"
+          printf 'Target Branch: %s\n' "$TARGET_BRANCH"
+          printf 'Source Branch: %s\n' "$SOURCE_BRANCH"
 
-          if [ "${{ github.head_ref }}" != "dev" ]; then
+          if [ "$SOURCE_BRANCH" != "dev" ]; then
             echo "::error::[Merge Policy Violation] Only PRs originating from the 'dev' branch are allowed to be merged into 'main'!"
-            echo "Current source branch '${{ github.head_ref }}' is not permitted."
+            printf "Current source branch '%s' is not permitted.\n" "$SOURCE_BRANCH"
             exit 1
           fi
 

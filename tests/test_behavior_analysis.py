@@ -1,7 +1,12 @@
+"""API-AI-1 authentication, deadlines and two-stage summary response contract."""
+
+import asyncio
 import json
+from copy import deepcopy
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
@@ -13,10 +18,11 @@ TEST_API_KEY = "test_internal_secret_key"
 def mock_env(mocker):
     # 환경 변수 및 설정을 모킹하여 인증 키를 설정
     mocker.patch("app.core.config.settings.INTERNAL_API_KEY", TEST_API_KEY)
+    mocker.patch("app.core.config.settings.GEMINI_API_KEY", "offline-test-key")
 
 @pytest.fixture
 def valid_request_payload():
-    return {
+    payload = {
         "userId": "550e8400-e29b-41d4-a716-446655440000",
         "items": [
             {
@@ -57,14 +63,33 @@ def valid_request_payload():
             }
         ]
     }
+    for day, weekday in [(20, 'mon'), (21, 'tue')]:
+        item = deepcopy(payload['items'][1])
+        item['sourceImageId'] = f'cafe-{day}'
+        item['location']['placeTypes'] = ['cafe', 'food']
+        item['timeContext'].update(capturedAt=f'2026-07-{day}T10:00:00+09:00',
+                                   dayOfWeek=weekday, isWeekend=False)
+        payload['items'].append(item)
+    for kind, template, days in [('park', 0, [(20, 'mon'), (21, 'tue')]),
+                                 ('museum', 0, [(19, 'sun'), (20, 'mon'), (21, 'tue')])]:
+        for day, weekday in days:
+            item = deepcopy(payload['items'][template])
+            item['sourceImageId'] = f'{kind}-{day}'
+            item['location'].update(placeTypes=[kind], placeName=f'Mock {kind}')
+            item['timeContext'].update(capturedAt=f'2026-07-{day}T10:00:00+09:00',
+                                       dayOfWeek=weekday, isWeekend=weekday in {'sat', 'sun'})
+            payload['items'].append(item)
+    return payload
 
 @pytest.mark.asyncio
 async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload):
     from tests.test_behavior_evidence import full_profile
+    from tests.test_taste_summary import mock_summary_model
 
+    summary_call = mock_summary_model(mocker)
     chain = AsyncMock()
-    chain.ainvoke.return_value = full_profile()
-    mocker.patch("app.services.behavior_service.taste_profile_chain", chain)
+    chain.return_value = full_profile()
+    mocker.patch("app.services.behavior_service.generate_taste_profile", chain)
 
     # 2. httpx AsyncClient를 이용해 비동기 API 엔드포인트 호출 (SSE 통신)
     transport = ASGITransport(app=app)
@@ -89,10 +114,10 @@ async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload
                 data_content = json.loads(line.split("data:")[1].strip())
                 events[-1]["data"] = data_content
 
-        # 최소 2개 이벤트 발생 확인 (progress -> complete)
-        assert len(events) >= 2
+        assert [event["event"] for event in events] == ["progress", "progress", "complete"]
         assert events[0]["event"] == "progress"
         assert events[0]["data"]["step"] == "ANALYZING_PREFERENCE"
+        assert events[1]["data"] == {"step": "GENERATING_SUMMARY", "message": "사용자 취향 정보를 요약합니다."}
         
         assert events[-1]["event"] == "complete"
         complete_data = events[-1]["data"]
@@ -104,8 +129,12 @@ async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload
         assert profile["spendingTendency"] == "moderate"
         assert profile["companionType"] == "solo"  # Compatibility default, not observed companion.
         assert "warm_region" not in profile["seasonalEnvironmentPreference"]
-        assert set(complete_data) == {"tasteProfile"}
-        chain.ainvoke.assert_awaited_once()
+        assert set(complete_data) == {"tasteProfile", "summary"}
+        assert set(complete_data["summary"]) == {"intro", "hashtags", "types", "recommendCity"}
+        assert set(complete_data["summary"]["recommendCity"]) == {"countryName", "cityName", "reason"}
+        assert len(complete_data["summary"]["hashtags"]) == 3
+        summary_call.assert_awaited_once()
+        chain.assert_awaited_once()
         assert profile["seasonalEnvironmentPreference"] == ["summer_resort"]
 
 @pytest.mark.asyncio
@@ -127,25 +156,6 @@ async def test_behavior_analysis_invalid_format(mock_env):
         assert response.status_code == 400
 
 @pytest.mark.asyncio
-async def test_behavior_analysis_insufficient_data(mock_env):
-    # 아이템 데이터 부족 테스트 (비어 있음)
-    insufficient_payload = {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
-        "items": []
-    }
-    
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        headers = {"X-Internal-Api-Key": TEST_API_KEY}
-        response = await client.post(
-            "/internal/ai/taste-profile/analysis",
-            json=insufficient_payload,
-            headers=headers
-        )
-        assert response.status_code == 400
-        assert response.json()["message"] == "분석 가능한 전처리 메타데이터가 부족합니다."
-
-@pytest.mark.asyncio
 async def test_behavior_analysis_unauthorized(valid_request_payload):
     # 잘못된 API Key로 인한 인증 실패 테스트
     transport = ASGITransport(app=app)
@@ -158,3 +168,189 @@ async def test_behavior_analysis_unauthorized(valid_request_payload):
         )
         assert response.status_code == 401
         assert response.json()["message"] == "내부 인증 실패"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('key', ['', '   '])
+@pytest.mark.parametrize('endpoint', ['analysis', 'behavior'])
+@pytest.mark.parametrize('setting', ['GEMINI_API_KEY', 'ABTO_CALLING_KEY'])
+async def test_missing_calling_key_rejected_before_streaming(mocker, mock_env, valid_request_payload, key, endpoint, setting):
+    mocker.patch(f'app.core.config.settings.{setting}', key)
+    generate = mocker.patch('app.services.behavior_service.generate_taste_profile', new_callable=AsyncMock)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post(f'/internal/ai/taste-profile/{endpoint}', json=valid_request_payload,
+                                     headers={'X-Internal-Api-Key': TEST_API_KEY})
+    assert response.status_code == 500
+    assert response.headers['content-type'] == 'application/json'
+    assert response.json() == {'status': 500, 'message': 'AI 취향 분석 설정을 확인할 수 없습니다.', 'data': None}
+    generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_language,header_language,expected", [
+    (None, "ja-JP", "ja-JP"), ("en_US", "ko", "en-US"), (None, "*", "ko"),
+])
+async def test_summary_uses_body_language_then_header(mocker, mock_env, valid_request_payload, body_language, header_language, expected):
+    from tests.test_behavior_evidence import full_profile, sse_events
+    from tests.test_taste_summary import mock_summary_model
+
+    mocker.patch("app.services.behavior_service.generate_taste_profile", new_callable=AsyncMock, return_value=full_profile())
+    summary = mock_summary_model(mocker)
+    if body_language is not None:
+        valid_request_payload["language"] = body_language
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/internal/ai/taste-profile/analysis", json=valid_request_payload,
+                                     headers={"X-Internal-Api-Key": TEST_API_KEY, "Accept-Language": header_language})
+    assert sse_events(response)[-1][0] == "complete"
+    assert json.loads(summary.call_args.args[0])["language"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["provider", "schema", "timeout"])
+async def test_summary_failure_never_returns_partial_complete_or_reanalyzes(mocker, mock_env, valid_request_payload, failure):
+    from tests.test_behavior_evidence import full_profile, sse_events
+
+    analysis = mocker.patch("app.services.behavior_service.generate_taste_profile", new_callable=AsyncMock, return_value=full_profile())
+    cleaned_up = asyncio.Event()
+
+    async def fail_summary(*_args, **_kwargs):
+        if failure == "provider":
+            raise RuntimeError("private summary error")
+        if failure == "schema":
+            return {"intro": "missing required fields"}
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned_up.set()
+
+    summary = mocker.patch("app.services.behavior_service.generate_taste_summary", side_effect=fail_summary)
+    if failure == "timeout":
+        mocker.patch("app.core.config.settings.TASTE_ANALYSIS_TIMEOUT_SECONDS", 0.05)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await asyncio.wait_for(client.post("/internal/ai/taste-profile/analysis", json=valid_request_payload,
+                                     headers={"X-Internal-Api-Key": TEST_API_KEY}), timeout=2)
+    events = sse_events(response)
+    assert [kind for kind, _ in events] == ["progress", "progress", "error"]
+    assert events[1][1]["step"] == "GENERATING_SUMMARY"
+    assert events[-1][1]["status"] == 500
+    assert "private summary error" not in response.text
+    assert "missing required fields" not in response.text
+    analysis.assert_awaited_once()
+    summary.assert_awaited_once()
+    if failure == "timeout":
+        assert cleaned_up.is_set()
+
+
+@pytest.mark.asyncio
+async def test_summary_cancellation_propagates_and_releases_inference(mocker, mock_env, valid_request_payload):
+    from app.schemas.behavior import BehaviorAnalysisRequest
+    from app.services.behavior_service import analyze_behavior_stream
+    from tests.test_behavior_evidence import full_profile
+
+    entered, cleaned_up = asyncio.Event(), asyncio.Event()
+    analysis = mocker.patch("app.services.behavior_service.generate_taste_profile", new_callable=AsyncMock, return_value=full_profile())
+
+    async def blocked_summary(*_args, **_kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned_up.set()
+
+    mocker.patch("app.services.behavior_service.generate_taste_summary", side_effect=blocked_summary)
+    stream = analyze_behavior_stream(BehaviorAnalysisRequest.model_validate(valid_request_payload))
+    assert (await anext(stream))["data"]["step"] == "ANALYZING_PREFERENCE"
+    assert (await anext(stream))["data"]["step"] == "GENERATING_SUMMARY"
+    task = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned_up.is_set()
+    analysis.assert_awaited_once()
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_analysis_deadline_cancels_inference_and_emits_only_error(mocker, mock_env, valid_request_payload):
+    from tests.test_behavior_evidence import sse_events
+
+    cancelled = asyncio.Event()
+
+    async def blocked_analysis(_, **_kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    generate = mocker.patch('app.services.behavior_service.generate_taste_profile', side_effect=blocked_analysis)
+    mocker.patch('app.core.config.settings.TASTE_ANALYSIS_TIMEOUT_SECONDS', 0.02)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await asyncio.wait_for(client.post('/internal/ai/taste-profile/analysis',
+            json=valid_request_payload, headers={'X-Internal-Api-Key': TEST_API_KEY}), timeout=2)
+    events = sse_events(response)
+    assert response.status_code == 200
+    assert [kind for kind, _ in events] == ['progress', 'error']
+    assert events[-1][1] == {'status': 500, 'message': '취향 분석 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.'}
+    assert cancelled.is_set()
+    generate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('error', [RuntimeError('private-provider-detail'),
+                                  HTTPException(status_code=500, detail='private-provider-detail')])
+async def test_stream_boundary_hides_unexpected_error_details(mocker, mock_env, valid_request_payload, error):
+    from tests.test_behavior_evidence import sse_events
+
+    async def broken_stream(_):
+        yield {'event': 'progress', 'data': {'step': 'ANALYZING_PREFERENCE'}}
+        raise error
+
+    mocker.patch('app.api.taste_profile.analyze_behavior_stream', broken_stream)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/internal/ai/taste-profile/analysis', json=valid_request_payload,
+                                     headers={'X-Internal-Api-Key': TEST_API_KEY})
+    assert [kind for kind, _ in sse_events(response)] == ['progress', 'error']
+    assert 'private-provider-detail' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_analysis_cancellation_is_not_converted_to_error(mocker, mock_env, valid_request_payload):
+    from app.schemas.behavior import BehaviorAnalysisRequest
+    from app.services.behavior_service import analyze_behavior_stream
+
+    entered = asyncio.Event()
+    cleaned_up = asyncio.Event()
+
+    async def blocked_analysis(_, **_kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned_up.set()
+
+    mocker.patch('app.services.behavior_service.generate_taste_profile', side_effect=blocked_analysis)
+    stream = analyze_behavior_stream(BehaviorAnalysisRequest.model_validate(valid_request_payload))
+    assert (await anext(stream))['event'] == 'progress'
+    task = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned_up.is_set()
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('timeout', [0., -1., float('nan'), float('inf')])
+async def test_invalid_deadline_rejected_before_streaming(mocker, mock_env, valid_request_payload, timeout):
+    mocker.patch('app.core.config.settings.TASTE_ANALYSIS_TIMEOUT_SECONDS', timeout)
+    generate = mocker.patch('app.services.behavior_service.generate_taste_profile', new_callable=AsyncMock)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/internal/ai/taste-profile/analysis', json=valid_request_payload,
+                                     headers={'X-Internal-Api-Key': TEST_API_KEY})
+    assert response.status_code == 500
+    assert response.headers['content-type'] == 'application/json'
+    generate.assert_not_awaited()

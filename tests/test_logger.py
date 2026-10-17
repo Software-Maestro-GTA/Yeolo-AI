@@ -1,10 +1,12 @@
+import json
 import logging
 
 import pytest
+from fastapi import HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 
 from app.core.logger import setup_logging
-from app.main import app
+from app.main import app, http_exception_handler, unhandled_exception_handler
 
 
 def test_setup_logging_initialization(mocker):
@@ -37,9 +39,10 @@ async def test_logging_middleware_and_healthcheck(caplog):
 
 
 @pytest.mark.asyncio
-async def test_unhandled_exception_logging(caplog):
+async def test_unhandled_exception_logging(caplog, monkeypatch):
     """처리되지 않은 예외 발생 시 unhandled_exception_handler가 스택 트레이스를 포함하여 로깅하는지 검증"""
     caplog.set_level(logging.ERROR)
+    monkeypatch.setattr(app.router, 'routes', list(app.router.routes))
     
     # 임시 핸들러 등록으로 unhandled exception 유발
     @app.get("/test-error-endpoint")
@@ -51,7 +54,8 @@ async def test_unhandled_exception_logging(caplog):
         response = await client.get("/test-error-endpoint")
         assert response.status_code == 500
         assert response.json()["status"] == 500
-        assert "Test Fatal Error" in response.json()["message"]
+        assert response.json()["message"] == "서버 내부 오류가 발생했습니다."
+        assert "Test Fatal Error" not in response.text
 
     # ERROR 로그에 "Unhandled Exception" 및 스택 트레이스 정보가 있는지 확인
     error_records = [r for r in caplog.records if r.levelname == "ERROR"]
@@ -59,3 +63,15 @@ async def test_unhandled_exception_logging(caplog):
     assert any("Unhandled Exception" in r.message for r in error_records)
     assert any("Test Fatal Error" in r.message for r in error_records)
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('handler,error,expected_status', [
+    (unhandled_exception_handler, RuntimeError('private-provider-detail'), 500),
+    (http_exception_handler, HTTPException(status_code=502, detail='private-provider-detail'), 502),
+])
+async def test_global_server_error_handlers_hide_internal_details(handler, error, expected_status):
+    request = Request({'type': 'http', 'method': 'GET', 'path': '/test', 'headers': []})
+    response = await handler(request, error)
+    assert response.status_code == expected_status
+    assert json.loads(response.body)['message'] == '서버 내부 오류가 발생했습니다.'
+    assert b'private-provider-detail' not in response.body

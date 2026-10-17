@@ -39,7 +39,7 @@ async def log_requests(request: Request, call_next):
             status_code=500,
             content={
                 "status": 500,
-                "message": f"서버 내부 오류가 발생했습니다: {exc!s}",
+                "message": "서버 내부 오류가 발생했습니다.",
             },
         )
 
@@ -83,7 +83,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         content={
             "status": exc.status_code,
-            "message": exc.detail,
+            "message": "서버 내부 오류가 발생했습니다." if exc.status_code >= 500 else exc.detail,
         },
     )
 
@@ -99,7 +99,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={
             "status": 500,
-            "message": f"서버 내부 오류가 발생했습니다: {exc!s}",
+            "message": "서버 내부 오류가 발생했습니다.",
         },
     )
 
@@ -119,4 +119,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app.main:app", port=8000, reload=True)
-

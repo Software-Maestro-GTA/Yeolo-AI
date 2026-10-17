@@ -1,109 +1,169 @@
-from typing import Literal
+"""Public request and compact SSE response contract for travel course generation."""
+
+import re
+from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    FieldSerializationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from app.schemas.taste_profile import TasteProfileSchema
-
-
-class PhotoAuthorSchema(BaseModel):
-    """A supplied photo author's name, profile link and distinct avatar link."""
-
-    displayName: str = Field(..., description="사진 작성자 표시 이름")
-    uri: str | None = Field(None, description="작성자 Google Maps 프로필 URL")
-    photoUri: str | None = Field(None, description="작성자 아바타 URL (장소 사진이 아님)")
-
-
-class PhotoAttributionSchema(BaseModel):
-    """Source information for the exact selected place photo."""
-
-    provider: Literal["Google Maps"] = Field(default="Google Maps", description="사진 공급자")
-    googleMapsUri: str = Field(..., description="선택한 개별 사진의 Google Maps 원본 URL")
-    authorAttributions: list[PhotoAuthorSchema] = Field(default_factory=list, description="제공된 사진 작성자 정보")
+from app.services.place_categories import (
+    PLACE_CATEGORY_LABELS,
+    PlaceCategoryCode,
+    map_actual_place_category,
+)
 
 
 class TripConditionSchema(BaseModel):
-    destinationCountry: str = Field(..., description="목적지 국가")
-    destinationCity: str = Field(..., description="목적지 도시")
-    startDate: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="시작일 (YYYY-MM-DD)")
+    destinationCountry: str = Field(..., min_length=1, description="목적지 국가")
+    destinationCity: str = Field(..., min_length=1, description="목적지 도시")
+    startDate: str = Field(
+        ..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="시작일 (YYYY-MM-DD)"
+    )
     totalDays: int = Field(..., ge=1, description="총 여행 일수")
-    budgetType: Literal["cost_effective", "moderate", "luxury"] = Field(..., description="예산 유형")
+    budget: float = Field(
+        ...,
+        strict=True,
+        ge=0,
+        allow_inf_nan=False,
+        description="전체 여행 예상 예산 금액 (KRW), 초과해도 생성 허용",
+    )
 
 
 class CourseRequestSchema(BaseModel):
     userId: UUID = Field(..., description="사용자 ID (UUID)")
-    mbti: str | None = Field(None, description="사용자 MBTI (string|null)")
-    tasteProfile: TasteProfileSchema | None = Field(None, description="성향 프로필 데이터 (object|null)")
+    language: str = Field(
+        ..., description="응답 문구의 BCP 47 언어 코드 (예: ko, en, ja, zh-TW)"
+    )
+    mbti: str | None = Field(None, description="사용자 MBTI")
+    tasteProfile: TasteProfileSchema | None = Field(
+        None, description="성향 프로필 데이터"
+    )
     tripCondition: TripConditionSchema = Field(..., description="여행 제약 조건")
 
+    @field_validator("language")
+    @classmethod
+    def normalize_language(cls, value: str) -> str:
+        """Normalize locale notation while rejecting arbitrary prompt instructions."""
+        value = value.strip().replace("_", "-")
+        if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", value):
+            raise ValueError("language must be a BCP 47 language code")
+        parts = value.split("-")
+        return "-".join(
+            [
+                parts[0].lower(),
+                *[
+                    part.title()
+                    if len(part) == 4
+                    else part.upper()
+                    if len(part) == 2
+                    else part.lower()
+                    for part in parts[1:]
+                ],
+            ]
+        )
+
     @model_validator(mode="after")
-    def check_mbti_or_taste_profile(self):
+    def check_mbti_or_taste_profile(self) -> Self:
         if not self.mbti and not self.tasteProfile:
             raise ValueError("mbti 또는 tasteProfile 중 최소 하나는 전달되어야 합니다.")
         return self
 
 
 class PlaceSchema(BaseModel):
-    placeId: str = Field(..., description="Google Maps Place ID 또는 서비스 장소 식별자")
-    placeName: str = Field(..., description="장소 한글 명칭")
-    placeEngName: str = Field(default="", description="장소 공식 영문/로마자 명칭 (한글 제외)")
-    category: str = Field(..., description="장소 카테고리")
-    address: str = Field(default="", description="장소 주소")
+    """Verified identity and map marker only; rich details stay in Google Maps."""
+
+    placeId: str = Field(..., description="검증된 Google Maps Place ID")
+    placeName: str = Field(..., description="LLM이 제안한 검색 장소명; Google 공식 표시 이름은 조회하지 않음")
+    category: PlaceCategoryCode = Field(
+        ...,
+        description="앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트)",
+        json_schema_extra={"enum": list(PLACE_CATEGORY_LABELS)},
+    )
     latitude: float = Field(..., description="위도")
     longitude: float = Field(..., description="경도")
-    rating: float | None = Field(None, description="장소 평점")
-    photoUrl: str = Field(default="", description="대표 사진 URL")
-    photoAttribution: PhotoAttributionSchema | None = Field(None, description="대표 사진의 원본 및 작성자 출처")
-    openingHours: list[str] = Field(default_factory=list, description="영업시간 정보 목록")
+
+    @field_serializer("placeId")
+    def serialize_place_id(self, value: str, info: FieldSerializationInfo) -> str:
+        """Return the standalone public ID while preserving internal resource names.
+
+        Args:
+            value: Verified ID or internally normalized ``places/ID`` value.
+            info: Serialization context identifying the public course response.
+        Returns:
+            Standalone ID for public responses, or the unchanged internal value.
+        """
+        if isinstance(info.context, dict) and info.context.get("public_response"):
+            return value.removeprefix("places/")
+        return value
+
+    @field_serializer("category")
+    def serialize_category(self, value: str, info: FieldSerializationInfo) -> str:
+        """Map only explicit public output; keep raw types in internal dumps."""
+        if isinstance(info.context, dict) and info.context.get("public_response"):
+            return map_actual_place_category(value, getattr(self, "providerTypes", ()))
+        return value
 
 
 class TransportToNextSchema(BaseModel):
-    type: Literal["walking", "transit", "driving", "taxi", "none"] = Field(..., description="다음 장소까지 이동 수단")
-    distance: float | None = Field(None, description="이동 거리 (미터)")
-    minutes: int | None = Field(None, description="이동 소요 시간 (분)")
-    cost: int | None = Field(None, description="예상 이동 비용 (원)")
-    memo: str | None = Field(None, description="이동 관련 참고 메모")
+    type: Literal["walking", "transit", "driving", "taxi", "none"] = Field(
+        ..., description="다음 장소까지 이동 수단"
+    )
+    distance: float | None = Field(None, description="실제 이동 거리 (미터)")
+    minutes: int | None = Field(None, description="실제 이동 소요 시간 (분)")
+    memo: str | None = Field(None, description="요청 언어로 작성된 이동 안내")
 
 
 class StopSchema(BaseModel):
-    sequence: int = Field(..., description="방문 순서 (1부터 시작)")
-    arrivalTime: str = Field(..., pattern=r"^\d{2}:\d{2}$", description="도착 시각 (HH:mm)")
+    sequence: int = Field(..., ge=1, description="방문 순서")
     stayMinutes: int = Field(..., ge=1, description="체류 시간 (분)")
-    memo: str = Field(..., description="메모 및 안내 사항")
-    reason: str = Field(..., description="해당 장소 추천 이유")
-    cost: int = Field(default=0, ge=0, description="해당 스톱 예상 활동/식사/입장 비용 (원)")
-    place: PlaceSchema = Field(..., description="장소 상세 정보 (Google Maps API 연동)")
-    transportToNext: TransportToNextSchema = Field(..., description="다음 장소까지 이동 정보 (Google Routes API 연동)")
+    memo: str = Field(..., description="요청 언어로 작성된 방문 팁")
+    reason: str = Field(..., description="취향과 검증된 장소에 근거한 추천 이유")
+    cost: int = Field(default=0, ge=0, description="예상 활동·식사·입장 비용 (KRW)")
+    place: PlaceSchema = Field(..., description="지도 연결용 장소 정보")
+    transportToNext: TransportToNextSchema = Field(
+        ..., description="다음 장소까지 실제 이동 정보"
+    )
 
 
 class DayItinerarySchema(BaseModel):
-    day: int = Field(..., description="일차 (1부터 시작)")
-    date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="날짜 (YYYY-MM-DD)")
-    memo: str = Field(..., description="해당 일자 요약 메모")
-    stops: list[StopSchema] = Field(..., description="일자별 스톱 목록")
+    day: int = Field(..., ge=1, description="일차")
+    date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="날짜")
+    stops: list[StopSchema] = Field(..., description="일자별 방문 장소")
 
 
 class ItinerarySchema(BaseModel):
-    days: list[DayItinerarySchema] = Field(..., description="일자별 여정 목록")
+    days: list[DayItinerarySchema] = Field(..., description="일자별 여정")
 
 
 class CourseSchema(BaseModel):
-    title: str = Field(..., description="코스 제목")
+    title: str = Field(..., description="요청 언어로 작성된 코스 제목")
     destinationCountry: str = Field(..., description="목적지 국가")
     destinationCity: str = Field(..., description="목적지 도시")
-    coverImageUrl: str = Field(default="", description="코스 커버 이미지 URL")
-    coverImageAttribution: PhotoAttributionSchema | None = Field(None, description="코스 커버 이미지의 원본 및 작성자 출처")
-    startDate: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="시작일 (YYYY-MM-DD)")
+    startDate: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="시작일")
     totalDays: int = Field(..., ge=1, description="총 여행 일수")
-    tags: list[str] = Field(default_factory=list, description="코스 태그 목록")
-    recommendationReason: str = Field(..., description="전체 코스 핵심 추천 이유")
-    itinerary: ItinerarySchema = Field(..., description="일자별 세부 여정")
+    totalCost: int = Field(
+        default=0,
+        ge=0,
+        description="제공된 일정 비용 및 조회 가능한 항공·숙박 견적의 합계 (KRW)",
+    )
+    tags: list[str] = Field(
+        default_factory=list, description="요청 언어로 작성된 여행 태그"
+    )
+    itinerary: ItinerarySchema = Field(..., description="확정된 세부 여정")
 
 
 class CourseResponseSchema(BaseModel):
-    course: CourseSchema = Field(..., description="생성된 여행 코스 정보")
+    course: CourseSchema = Field(..., description="생성된 여행 코스")
 
 
 class ProgressEventData(BaseModel):
-    step: str = Field(..., description="진행 단계 코드")
-    message: str = Field(..., description="진행 단계 안내 메시지")
+    step: Literal["GENERATING_ROUTE"] = "GENERATING_ROUTE"
+    message: str = Field(..., description="요청 언어로 작성된 진행 안내")

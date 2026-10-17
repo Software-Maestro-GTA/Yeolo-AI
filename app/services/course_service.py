@@ -1,7 +1,6 @@
 """Deliver live graph progress through the existing SSE event contract."""
 
 import asyncio
-import inspect
 import json
 import logging
 import sqlite3
@@ -15,6 +14,7 @@ from app.agent.course_graph import stream_course_generation
 from app.core.config import settings
 from app.schemas.course import CourseRequestSchema
 from app.services.course_history import CourseHistory
+from app.services.course_localization import progress_message
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
         raise HTTPException(status_code=400, detail='코스 생성 조건이 올바르지 않습니다.') from None
     if not request.tripCondition.destinationCity.strip() or not request.tripCondition.destinationCountry.strip():
         raise HTTPException(status_code=400, detail='코스 생성 조건이 올바르지 않습니다.')
-    if not settings.GEMINI_API_KEY or not settings.GOOGLE_MAPS_API_KEY:
+    if not settings.GEMINI_API_KEY.strip() or not settings.ABTO_CALLING_KEY.strip() or not settings.GOOGLE_MAPS_API_KEY.strip():
         raise HTTPException(status_code=500, detail='AI 코스 생성 설정을 확인할 수 없습니다.')
     try:
         async with asyncio.timeout(min(1., max(.001, deadline - asyncio.get_running_loop().time()))):
@@ -55,16 +55,14 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
 
         async def produce() -> None:
             try:
-                parameters = inspect.signature(stream_course_generation).parameters
-                kwargs = {'deadline': deadline} if 'deadline' in parameters else {}
-                async with aclosing(stream_course_generation(request, **kwargs)) as source:
+                async with aclosing(stream_course_generation(request, deadline=deadline)) as source:
                     async for item in source:
                         await queue.put(item)
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - sanitize the provider boundary
                 logger.error('Course generation failed after stream start: %s', type(error).__name__)
-                await queue.put(('progress', {'step': 'GENERATING_ROUTE', 'message': '검증 가능한 여행 코스를 완성하지 못했습니다. 잠시 후 다시 시도해 주세요.'}))
+                await queue.put(('progress', {'step': 'GENERATING_ROUTE', 'message': progress_message(request.language, 'failure')}))
             finally:
                 # A cancelled producer must not block forever on a full queue.
                 if not asyncio.current_task().cancelling():

@@ -7,16 +7,20 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.schemas.course import CourseRequestSchema, PlaceSchema, TransportToNextSchema
+from app.agent.tools.verified_maps import InternalPlaceSchema as PlaceSchema
+from app.agent.tools.verified_maps import (
+    InternalTransportSchema as TransportToNextSchema,
+)
+from app.schemas.course import CourseRequestSchema
 
 
 @pytest.fixture
 def visit_dependencies(mocker, tmp_path):
-    from app.agent.course_graph import Candidate, CourseDraft, DraftDay
+    from app.agent.course_state import Candidate, CourseDraft, DraftDay
     from app.agent.tools.verified_maps import Destination, VerifiedPlace
     from app.services.course_history import CourseHistory
 
-    request = CourseRequestSchema.model_validate({'userId': '550e8400-e29b-41d4-a716-446655440000', 'mbti': 'INTJ', 'tripCondition': {'destinationCountry': '대한민국', 'destinationCity': '서울', 'startDate': '2026-10-05', 'totalDays': 1, 'budgetType': 'moderate'}})
+    request = CourseRequestSchema.model_validate({'userId': '550e8400-e29b-41d4-a716-446655440000', 'language': 'ko', 'mbti': 'INTJ', 'tripCondition': {'destinationCountry': '대한민국', 'destinationCity': '서울', 'startDate': '2026-10-05', 'totalDays': 1, 'budget': 900000}})
     places = {}
 
     def make_draft(prefix='base', cores=3, extras=(), days=1):
@@ -40,10 +44,7 @@ def visit_dependencies(mocker, tmp_path):
     provider.resolve_destination = AsyncMock(return_value=Destination(country_code='KR', south=37.3, west=126.7, north=37.8, east=127.3))
     provider.search = AsyncMock(side_effect=lambda candidate, destination: places[candidate.name])
     provider.route = AsyncMock(return_value=TransportToNextSchema(type='walking', distance=400, minutes=10, cost=0))
-    provider.discover_meals = AsyncMock(return_value=[])
-    provider.discover_attractions = AsyncMock(return_value=[])
-    provider.photo = AsyncMock(return_value=None)
-    llm = mocker.patch('app.agent.course_graph.draft_candidates', new_callable=AsyncMock)
+    llm = mocker.patch('app.agent.course_nodes.draft_candidates', new_callable=AsyncMock)
     history = CourseHistory(tmp_path / 'history.sqlite3')
     return request, provider, history, llm, places, make_draft
 
@@ -80,8 +81,6 @@ async def test_pace_targets_require_three_verified_core_visits(visit_dependencie
     assert len(day.stops) == expected
     assert len(core_ids(day)) >= 3
     llm.assert_awaited_once()
-    provider.discover_attractions.assert_not_awaited()
-    assert '줄' not in day.memo
 
 
 @pytest.mark.asyncio
@@ -99,7 +98,7 @@ async def test_five_complete_visits_beat_four_more_novel_visits_in_same_verified
     day = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course'].itinerary.days[0]
     assert len(day.stops) >= 5 and len(core_ids(day)) >= 3
     llm.assert_awaited_once()
-    assert provider.search.await_count == 9
+    assert provider.search.await_count <= 6  # Deferred alternatives need no paid lookup after a complete day.
 
 
 @pytest.mark.parametrize('food_category', ['coffee_shop', 'bakery', 'dessert_restaurant', 'japanese_restaurant'])
@@ -152,13 +151,10 @@ async def test_count_fill_failure_preserves_verified_four_with_explicit_day_note
     day = course.itinerary.days[0]
     assert len(day.stops) == 4 and len(core_ids(day)) == 2
     assert course.title == f'{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행'
-    assert '4' in day.memo and ('이동' in day.memo or '영업' in day.memo)
     if failure == 'deadline':
         assert llm.await_count <= 2
     else:
         assert 3 <= llm.await_count <= 4
-        provider.discover_attractions.assert_awaited_once()
-    assert '이전 코스' not in course.recommendationReason
     assert all(stop.place.latitude > 37 for stop in day.stops)
 
 
@@ -198,9 +194,7 @@ async def test_five_route_failure_uses_safe_four_before_three(visit_dependencies
     day = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course'].itinerary.days[0]
     assert len(day.stops) == 4 and len(core_ids(day)) == 2
     assert impossible not in {stop.place.placeId for stop in day.stops}
-    assert '4' in day.memo
     assert 3 <= llm.await_count <= 4
-    provider.discover_attractions.assert_awaited_once()
     assert all(stop.transportToNext.minutes <= 90 for stop in day.stops[:-1])
 
 
@@ -213,13 +207,11 @@ async def test_only_three_verified_venues_remain_safe_exception_without_inventio
     day = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course'].itinerary.days[0]
     assert len(day.stops) == 3 and len(core_ids(day)) == 1
     assert {stop.place.placeId for stop in day.stops} == {venue.place.placeId for venue in places.values()}
-    assert '3' in day.memo
     assert 3 <= llm.await_count <= 4
-    provider.discover_attractions.assert_awaited_once()
 
 
 def test_compact_repair_can_select_five_when_verified_pool_is_sufficient(visit_dependencies):
-    from app.agent.course_graph import _day_plans
+    from app.services.course_planning import _day_plans
 
     _, _, _, _, places, make_draft = visit_dependencies
     candidates = make_draft(cores=3).days[0].candidates
@@ -239,8 +231,6 @@ async def test_dense_five_complete_visits_do_not_trigger_llm_for_optional_sixth(
     day = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course'].itinerary.days[0]
     assert len(day.stops) == 5 and len(core_ids(day)) == 3
     llm.assert_awaited_once()
-    provider.discover_attractions.assert_not_awaited()
-    assert '줄' not in day.memo
 
 
 @pytest.mark.asyncio
@@ -253,11 +243,7 @@ async def test_food_inflated_five_fallback_explains_core_deficit_without_fake_re
     course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
     day = course.itinerary.days[0]
     assert len(day.stops) == 5 and len(core_ids(day)) == 2
-    assert '5곳' in day.memo or '5 곳' in day.memo
-    assert not any(internal in day.memo for internal in ['최소 5', '명소 3', '목표', '축소'])
-    assert '이전 코스' not in course.recommendationReason
     assert 3 <= llm.await_count <= 4
-    provider.discover_attractions.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -272,7 +258,6 @@ async def test_final_repair_returns_five_when_routes_recover_without_reduced_not
     provider.route.side_effect = route
     day = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course'].itinerary.days[0]
     assert len(day.stops) == 5 and len(core_ids(day)) == 3
-    assert '줄' not in day.memo
     assert 2 <= llm.await_count <= 4
     assert provider.route.await_count <= 4 * 4 + 16 * 4
 
@@ -333,76 +318,78 @@ async def test_initial_three_drafts_do_not_consume_independent_fullness_refills(
 
 
 @pytest.mark.asyncio
-async def test_actual_nearby_attraction_completes_day_even_when_refill_llm_is_unavailable(visit_dependencies):
-    """Google-supplied official place facts can fill one missing tourist slot."""
+async def test_named_refill_candidate_completes_day_using_existing_verified_pool(visit_dependencies):
     from app.agent.course_graph import build_course_graph
 
     request, provider, history, llm, places, make_draft = visit_dependencies
     initial = make_draft(cores=2)
     nearby = make_draft('nearby', cores=3).days[0].candidates[-1]
-    venue = places[nearby.name]
-    provider.discover_attractions.return_value = [venue]
-    llm.side_effect = [initial] + [TimeoutError('504 DEADLINE_EXCEEDED')] * 4
+    refilled = initial.model_copy(deep=True)
+    refilled.days[0].candidates.append(nearby)
+    llm.side_effect = [initial, initial, refilled]
     course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
     assert len(course.itinerary.days[0].stops) == 5
     assert len(core_ids(course.itinerary.days[0])) == 3
-    assert venue.place.placeId in core_ids(course.itinerary.days[0])
-    provider.discover_attractions.assert_awaited_once()
-    assert provider.search.await_count == 4
+    assert places[nearby.name].place.placeId in core_ids(course.itinerary.days[0])
+    assert provider.search.await_count == 5
+    assert llm.await_count == 3
     assert all(stop.transportToNext.minutes == 10 for stop in course.itinerary.days[0].stops[:-1])
 
 
 @pytest.mark.asyncio
-async def test_local_refill_queries_only_incomplete_day_and_respects_completed_day_ids(visit_dependencies):
+async def test_named_refill_queries_only_incomplete_day_and_respects_completed_day_ids(visit_dependencies):
     from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
 
     request, provider, history, llm, places, make_draft = visit_dependencies
     request.tripCondition.totalDays = 2
     initial = make_draft(cores=3, days=2)
     initial.days[1].candidates.pop()
     completed_ids = {places[c.name].place.placeId for c in initial.days[0].candidates}
-    completed_venue = places[initial.days[0].candidates[0].name]
-    completed_venue = copy.deepcopy(completed_venue)
+    completed_venue = copy.deepcopy(places[initial.days[0].candidates[0].name])
     completed_venue.place.placeId = completed_venue.place.placeId.removeprefix('places/')
+    duplicate = Candidate(name='재제안된 완료 장소', stay_minutes=40)
+    places[duplicate.name] = completed_venue
     new = make_draft('local', cores=3).days[0].candidates[-1]
-    provider.discover_attractions.return_value = [completed_venue, places[new.name]]
-    llm.return_value = initial
+    refilled = initial.model_copy(deep=True)
+    refilled.days[1].candidates.extend([duplicate, new])
+    llm.side_effect = [initial, refilled]
     course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
     assert [len(day.stops) for day in course.itinerary.days] == [5, 5]
     assert {stop.place.placeId for stop in course.itinerary.days[0].stops} == completed_ids
-    provider.discover_attractions.assert_awaited_once()
-    anchor = provider.discover_attractions.await_args.args[1]
-    assert anchor.place.placeId not in completed_ids
     ids = [stop.place.placeId for day in course.itinerary.days for stop in day.stops]
     assert len(ids) == len(set(ids))
+    assert places[new.name].place.placeId in {stop.place.placeId for stop in course.itinerary.days[1].stops}
     assert all(call.kwargs['pending_days'] == [1] for call in llm.await_args_list[1:])
-    assert provider.search.await_count == 9
+    assert provider.search.await_count == 11
 
 
 @pytest.mark.asyncio
-async def test_local_invalid_or_duplicate_candidates_cannot_satisfy_shortage(visit_dependencies):
+async def test_named_invalid_or_duplicate_candidates_cannot_satisfy_shortage(visit_dependencies):
     from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import VerifiedPlace
 
     request, provider, history, llm, places, make_draft = visit_dependencies
     short = make_draft(cores=2)
     first = places[short.days[0].candidates[0].name]
     raw = first.place.model_copy(update={'placeId': 'places/new', 'placeName': 'invalid'})
-    unsafe = [
-        first,
-        VerifiedPlace(raw.model_copy(update={'category': 'restaurant'})),
-        VerifiedPlace(raw.model_copy(update={'latitude': 0.})),
-        VerifiedPlace(raw.model_copy(update={'latitude': 37.7})),
-        VerifiedPlace(raw.model_copy(update={'placeId': ''})),
-    ]
-    provider.discover_attractions.return_value = unsafe
-    llm.return_value = short
+    unsafe = [first, VerifiedPlace(raw.model_copy(update={'category': 'neighborhood'})),
+              VerifiedPlace(raw.model_copy(update={'latitude': 0.})),
+              VerifiedPlace(raw.model_copy(update={'latitude': 38.5})),
+              VerifiedPlace(raw.model_copy(update={'placeId': ''}))]
+    refilled = short.model_copy(deep=True)
+    for index, venue in enumerate(unsafe):
+        name = f'검증 불가 후보 {index}'
+        places[name] = venue
+        refilled.days[0].candidates.append(Candidate(name=name, stay_minutes=40))
+    llm.side_effect = [short, refilled, refilled, refilled]
     course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
     assert len(course.itinerary.days[0].stops) == 4
     assert len(core_ids(course.itinerary.days[0])) == 2
     assert {stop.place.placeId for stop in course.itinerary.days[0].stops} == {places[c.name].place.placeId for c in short.days[0].candidates}
-    provider.discover_attractions.assert_awaited_once()
     assert 3 <= llm.await_count <= 5
+    assert all(call.args[0].name in places for call in provider.search.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -420,18 +407,18 @@ async def test_underfull_refill_is_not_limited_by_novelty_only_twenty_five_secon
         timeout_budgets.append(delay)
         return real_timeout(delay)
 
-    mocker.patch('app.agent.course_graph.asyncio.timeout', side_effect=record_timeout)
+    mocker.patch('app.agent.course_nodes.asyncio.timeout', side_effect=record_timeout)
     course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
     assert len(course.itinerary.days[0].stops) == 4
     assert 3 <= llm.await_count <= 4
     assert 25. not in timeout_budgets
-    provider.discover_attractions.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_actual_route_refill_shortens_five_before_restoring_four_stop_snapshot(visit_dependencies):
     """Optimistic long visits can require shorter stays once real travel is known."""
-    from app.agent.course_graph import _day_plans, _schedule_day, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.services.course_planning import _day_plans, _schedule_day
 
     request, provider, history, llm, places, make_draft = visit_dependencies
     short = make_draft(cores=2)
@@ -472,7 +459,8 @@ async def test_actual_route_refill_shortens_five_before_restoring_four_stop_snap
 @pytest.mark.asyncio
 async def test_partial_initial_day_proposals_are_retained_when_only_missing_day_needs_refill(visit_dependencies):
     """Initial partial proposals survive both draft and independent refill budgets."""
-    from app.agent.course_graph import PartialDraftError, build_course_graph
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import PartialDraftError
 
     request, provider, history, llm, _, make_draft = visit_dependencies
     request.tripCondition.totalDays = 2
@@ -487,3 +475,34 @@ async def test_partial_initial_day_proposals_are_retained_when_only_missing_day_
         assert call.kwargs['existing_days'][0].model_dump() == full.days[0].model_dump()
     assert provider.search.await_count == 10
     assert {stop.place.placeName for stop in course.itinerary.days[0].stops} == {candidate.name for candidate in full.days[0].candidates}
+
+
+@pytest.mark.asyncio
+async def test_transient_named_refill_lookup_retries_and_keeps_five(visit_dependencies):
+    from collections import Counter
+
+    from app.agent.course_graph import build_course_graph
+    from app.agent.tools.verified_maps import MapsProviderError
+
+    request, provider, history, llm, places, make_draft = visit_dependencies
+    initial = make_draft(cores=2)
+    nearby = make_draft('recovered', cores=3).days[0].candidates[-1]
+    refilled = initial.model_copy(deep=True)
+    refilled.days[0].candidates.append(nearby)
+    llm.side_effect = [initial, initial, refilled, refilled]
+    queries = Counter()
+
+    async def search(candidate, destination):
+        queries[candidate.name] += 1
+        if candidate.name == nearby.name and queries[candidate.name] == 1:
+            raise MapsProviderError('transient')
+        return places[candidate.name]
+
+    provider.search.side_effect = search
+    course = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course']
+    assert len(course.itinerary.days[0].stops) == 5
+    assert len(core_ids(course.itinerary.days[0])) == 3
+    assert places[nearby.name].place.placeId in core_ids(course.itinerary.days[0])
+    assert queries[nearby.name] == 2
+    assert all(queries[candidate.name] == 1 for candidate in initial.days[0].candidates)
+    assert llm.await_count <= 4

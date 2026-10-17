@@ -2,7 +2,6 @@
 
 import html
 import re
-from datetime import datetime
 from typing import Any
 
 ROUTE_METRIC_FIELDS = frozenset({'routes.duration', 'routes.distanceMeters'})
@@ -35,23 +34,53 @@ def _mapping(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def fallback_route_guidance(mode: str, destination_name: str, departure_time: datetime | None = None) -> str:
+def fallback_route_guidance(mode: str, language: str = 'ko') -> str | None:
     """Return a generic action without inventing missing navigation details.
 
     Args:
         mode: Existing transport type.
-        destination_name: Verified destination name.
-        departure_time: Actual aware transit query departure, if supplied.
+        language: Requested BCP 47 language; supported generic fallbacks use its base.
     Returns:
-        Short mode-specific action without repeated destination or query metadata.
-        The retained destination/time parameters preserve the provider interface.
+        Short localized action, or None when a safe translation is unavailable.
     """
-    return {
-        'walking': '지도 앱의 도보 길찾기를 열고 안내된 보행 경로를 따라가세요.',
-        'transit': '지도 앱의 대중교통 길찾기를 열고 노선과 행선지를 확인해 타세요.',
-        'driving': '내비게이션에 목적지를 설정하고 안내된 차량 경로를 따라가세요.',
-        'taxi': '택시 기사에게 목적지를 보여주고 내비게이션의 도착지를 확인하세요.',
-    }.get(mode, '지도 앱에서 도착지 이름을 목적지와 대조하며 이동하세요.')
+    base = language.split('-', 1)[0].lower()
+    if base == 'zh' and any(part in {'hant', 'tw', 'hk', 'mo'} for part in language.lower().split('-')[1:]):
+        base = 'zh-Hant'
+    actions = {
+        'ko': {
+            'walking': '지도 앱의 도보 길찾기를 열고 안내된 보행 경로를 따라가세요.',
+            'transit': '지도 앱의 대중교통 길찾기를 열고 노선과 행선지를 확인해 타세요.',
+            'driving': '내비게이션에 목적지를 설정하고 안내된 차량 경로를 따라가세요.',
+            'taxi': '택시 기사에게 목적지를 보여주고 내비게이션의 도착지를 확인하세요.',
+        },
+        'en': {
+            'walking': 'Open walking directions in your map app and follow the route.',
+            'transit': 'Open transit directions in your map app and check the line and destination before boarding.',
+            'driving': 'Set your destination in navigation and follow the driving route.',
+            'taxi': 'Show the driver your destination and check it in navigation.',
+        },
+        'ja': {
+            'walking': '地図アプリで徒歩ルートを開き、案内に沿って進んでください。',
+            'transit': '地図アプリで公共交通ルートを開き、路線と行き先を確認して乗車してください。',
+            'driving': 'ナビに目的地を設定し、案内されたルートを進んでください。',
+            'taxi': '運転手に目的地を見せ、ナビの行き先を確認してください。',
+        },
+        'zh-Hant': {
+            'walking': '在地圖應用程式中開啟步行導航，並沿指示路線前進。',
+            'transit': '在地圖應用程式中開啟大眾運輸導航，確認路線和方向後搭車。',
+            'driving': '在導航中設定目的地，並沿指示路線行駛。',
+            'taxi': '向司機出示目的地，並確認導航中的終點。',
+        },
+        'zh': {
+            'walking': '在地图应用中打开步行导航，并沿指示路线前进。',
+            'transit': '在地图应用中打开公共交通导航，确认线路和方向后乘车。',
+            'driving': '在导航中设置目的地，并沿指示路线行驶。',
+            'taxi': '向司机出示目的地，并确认导航中的终点。',
+        },
+    }
+    if base not in actions:
+        return None
+    return actions[base].get(mode)
 
 
 def _sentence(instruction: str) -> str:
@@ -70,20 +99,20 @@ def _memo(actions: list[str]) -> str:
     return ' '.join(actions)
 
 
-def format_route_guidance(data: dict, mode: str, destination_name: str, departure_time: datetime | None = None) -> str:
+def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | None:
     """Summarize supplied navigation, including transit connections and final walk.
 
     Args:
         data: Already validated route response; optional steps may be malformed.
         mode: Existing transport type.
-        destination_name: Verified arrival venue name.
-        departure_time: Actual transit query departure, when supplied.
+        language: Requested language; non-Korean transit uses provider instructions.
     Returns:
         One paragraph of at most 240 characters and three complete action units.
         All transit connections must fit; otherwise a generic action is returned.
         No route fact is inferred and no identifier or instruction is sliced.
+        Unsupported languages without usable provider instructions return None.
     """
-    fallback = fallback_route_guidance(mode, destination_name, departure_time)
+    fallback = fallback_route_guidance(mode, language)
     routes = _mapping(data).get('routes')
     if not isinstance(routes, list) or not routes:
         return fallback
@@ -111,7 +140,15 @@ def format_route_guidance(data: dict, mode: str, destination_name: str, departur
             supplied_instruction = _mapping(raw.get('navigationInstruction')).get('instructions')
             instruction = _clean(supplied_instruction)
             transit = raw.get('travelMode') == 'TRANSIT'
-            if transit:
+            if transit and language.split('-', 1)[0].lower() != 'ko':
+                # Navigation instructions were requested from Maps in the user
+                # language; never apply Korean sentence templates to foreign text.
+                if not instruction:
+                    return fallback
+                transit_count += 1
+                if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
+                    return fallback
+            elif transit:
                 details = _mapping(raw.get('transitDetails'))
                 stops = _mapping(details.get('stopDetails'))
                 start = _clean(_mapping(stops.get('departureStop')).get('name'))

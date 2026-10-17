@@ -1,4 +1,4 @@
-"""One-call inference preserves the API and guarantees auditable seasonal output."""
+"""One scoring call preserves evidence guards before the separate summary call."""
 
 import importlib
 import json
@@ -28,14 +28,24 @@ def full_profile(seasonal=None):
 
 @pytest.fixture
 def chain(mocker):
+    from tests.test_taste_summary import mock_summary_model
+
+    mock_summary_model(mocker)
     result = AsyncMock()
-    result.ainvoke.return_value = full_profile(['dry_weather', 'off_season'])
-    mocker.patch('app.services.behavior_service.taste_profile_chain', result)
+    result.return_value = full_profile(['dry_weather', 'off_season'])
+    mocker.patch('app.services.behavior_service.generate_taste_profile', result)
+    mocker.patch('app.core.config.settings.GEMINI_API_KEY', 'offline-test-key')
     return result
 
 
 def request(items):
     return BehaviorAnalysisRequest(userId='550e8400-e29b-41d4-a716-446655440000', items=items)
+
+
+def repeated_photos():
+    """Support three distinct groups while leaving seasonal fallback evidence weak."""
+    return [photo(f'{kind}-{day}', f'2026-07-{day:02d}T10:00:00+09:00', place=kind, types=[kind])
+            for kind in ('cafe', 'museum', 'shopping_mall') for day in (18, 19, 20)]
 
 
 def adjusted(items, seasonal=None):
@@ -46,20 +56,20 @@ async def complete(items):
     events = [event async for event in analyze_behavior_stream(request(items))]
     assert events[0]['event'] == 'progress'
     assert events[-1]['event'] == 'complete'
-    assert set(events[-1]['data']) == {'tasteProfile'}
+    assert set(events[-1]['data']) == {'tasteProfile', 'summary'}
     return events[-1]['data']['tasteProfile']
 
 
 @pytest.mark.asyncio
-async def test_single_call_receives_visit_statistics_and_returns_exact_api(chain):
-    profile = await complete([photo('a')])
-    chain.ainvoke.assert_awaited_once()
-    payload = chain.ainvoke.call_args.args[0]
-    assert set(payload) == {'statistics_report'}
-    stats = json.loads(payload['statistics_report'])
-    assert stats['visitCount'] == stats['distinctPlaceCount'] == 1
-    assert str(request([]).userId) not in payload['statistics_report']
-    assert 'Cafe A' not in payload['statistics_report']
+async def test_single_scoring_call_receives_visit_statistics_and_returns_profile(chain):
+    profile = await complete(repeated_photos())
+    chain.assert_awaited_once()
+    payload = chain.call_args.args[0]
+    stats = json.loads(payload)
+    assert stats['visitCount'] == 9
+    assert stats['distinctPlaceCount'] == 3
+    assert str(request([]).userId) not in payload
+    assert 'Cafe A' not in payload
     assert profile['seasonalEnvironmentPreference'] == ['warm_region']
     TasteProfileSchema.model_validate(profile)
 
@@ -224,17 +234,18 @@ def sse_events(response):
 @pytest.mark.asyncio
 async def test_scoring_failure_returns_sse_error_without_complete_or_retry(chain, mocker):
     mocker.patch('app.core.config.settings.INTERNAL_API_KEY', 'test-key')
-    chain.ainvoke.side_effect = RuntimeError('scoring unavailable')
+    chain.side_effect = RuntimeError('scoring unavailable')
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post('/internal/ai/taste-profile/analysis',
-                                     json=request([photo('a')]).model_dump(mode='json'),
+                                     json=request(repeated_photos()).model_dump(mode='json'),
                                      headers={'X-Internal-Api-Key': 'test-key'})
     assert response.status_code == 200
     events = sse_events(response)
     assert events[-1][0] == 'error'
     assert events[-1][1]['status'] == 500
+    assert 'scoring unavailable' not in response.text
     assert all(kind != 'complete' for kind, _ in events)
-    chain.ainvoke.assert_awaited_once()
+    chain.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -246,22 +257,23 @@ async def test_invalid_records_rejected_before_llm(chain, mocker, items):
                                      json=request(items).model_dump(mode='json'),
                                      headers={'X-Internal-Api-Key': 'test-key'})
     assert response.status_code == 400
-    chain.ainvoke.assert_not_awaited()
+    assert response.json()['message'] == '분석 가능한 전처리 메타데이터가 부족합니다.'
+    chain.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_internal_trace_records_evidence_without_exposing_metadata(chain, mocker):
     active_run = mocker.MagicMock()
     mocker.patch('app.services.behavior_service.get_current_run_tree', return_value=active_run)
-    result = await complete([photo('a')])
+    result = await complete(repeated_photos())
     active_run.add_metadata.assert_called_once()
     saved = active_run.add_metadata.call_args.args[0]['analysisMetadata']
-    assert saved['statistics']['visitCount'] == 1
+    assert saved['statistics']['visitCount'] == 9
     assert saved['fieldEvidence']['seasonalEnvironmentPreference.warm_region']['confidence'] == 'low'
     assert saved['fieldEvidence']['seasonalEnvironmentPreference.warm_region']['evidence']['fallbackReason']
     assert 'seasonalEnvironmentPreference.warm_region' in saved['requiresUserConfirmation']
     assert 'analysisMetadata' not in result
-    chain.ainvoke.assert_awaited_once()
+    chain.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -269,7 +281,7 @@ async def test_trace_metadata_recording_failure_does_not_break_successful_infere
     active_run = mocker.MagicMock()
     active_run.add_metadata.side_effect = RuntimeError('trace unavailable')
     mocker.patch('app.services.behavior_service.get_current_run_tree', return_value=active_run)
-    profile = await complete([photo('a')])
+    profile = await complete(repeated_photos())
     assert profile['seasonalEnvironmentPreference'] == ['warm_region']
-    chain.ainvoke.assert_awaited_once()
+    chain.assert_awaited_once()
     active_run.add_metadata.assert_called_once()

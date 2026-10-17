@@ -8,7 +8,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
-from app.agent.prompts import COURSE_GENERATION_PROMPT
 from app.main import app
 from app.schemas.course import (
     CourseSchema,
@@ -107,14 +106,14 @@ def valid_trip_condition():
         "destinationCity": "제주",
         "startDate": "2026-08-01",
         "totalDays": 2,
-        "budgetType": "moderate",
+        "budget": 900000,
     }
 
 
 @pytest.fixture
 def valid_course_request_payload(valid_taste_profile, valid_trip_condition):
     return {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
+        "userId": "550e8400-e29b-41d4-a716-446655440000", 'language': 'ko',
         "mbti": "ENFP",
         "tasteProfile": valid_taste_profile,
         "tripCondition": valid_trip_condition,
@@ -123,206 +122,48 @@ def valid_course_request_payload(valid_taste_profile, valid_trip_condition):
 
 @pytest.fixture
 def sample_course_schema():
-    return CourseSchema(
-        title="제주 가성비 힐링 & 미식 여행 2일",
-        destinationCountry="대한민국",
-        destinationCity="제주",
-        coverImageUrl="https://images.unsplash.com/photo-1508009603885-50cf7c579365",
-        startDate="2026-08-01",
-        totalDays=2,
-        tags=["#제주미식", "#가성비여행", "#힐링", "#친구와함께"],
-        recommendationReason="친구와 함께 즐기는 가성비 높은 제주 미식과 힐링 명소 코스입니다.",
-        itinerary={
-            "days": [
-                {
-                    "day": 1,
-                    "date": "2026-08-01",
-                    "memo": "1일차: 동문시장 야시장 먹거리 탐방 후 해안 산책로로 이어지는 미식 힐링 코스",
-                    "stops": [
-                        {
-                            "sequence": 1,
-                            "arrivalTime": "11:00",
-                            "stayMinutes": 90,
-                            "memo": "제주 대표 전통시장으로 오메기떡, 흑돼지말이 등 다양한 로컬 먹거리를 체험할 수 있습니다. 야시장 구역은 오후부터 붐비므로 식사 시간대를 잘 조율하세요.",
-                            "reason": "풍성한 길거리 음식과 활기찬 시장 분위기를 경험할 수 있는 대표 미식 명소",
-                            "cost": 15000,
-                            "place": {
-                                "placeId": "places/ChIJN1t_tDeuEmsRUsoyG83frY4",
-                                "placeName": "제주 동문시장",
-                                "placeEngName": "Jeju Dongmun Traditional Market",
-                                "category": "전통시장",
-                                "address": "대한민국 제주특별자치도 제주시 관덕로14길 20",
-                                "latitude": 33.5126,
-                                "longitude": 126.5283,
-                                "rating": 4.5,
-                                "photoUrl": "https://places.googleapis.com/v1/places/ChIJN1t_tDeuEmsRUsoyG83frY4/photos/photo1",
-                                "openingHours": [
-                                    "월요일: 오전 8:00 ~ 오후 9:00",
-                                    "화요일: 오전 8:00 ~ 오후 9:00",
-                                    "수요일: 오전 8:00 ~ 오후 9:00",
-                                    "목요일: 오전 8:00 ~ 오후 9:00",
-                                    "금요일: 오전 8:00 ~ 오후 9:00",
-                                    "토요일: 오전 8:00 ~ 오후 9:00",
-                                    "일요일: 오전 8:00 ~ 오후 9:00",
-                                ],
-                            },
-                            "transportToNext": {
-                                "type": "transit",
-                                "distance": 3200.0,
-                                "minutes": 15,
-                                "cost": 1400,
-                                "memo": "동문시장 정류장에서 312번 버스를 탑승하여 용두암 입구 정류장에서 하차 후 도보 4분 이동합니다.",
-                            },
-                        },
-                        {
-                            "sequence": 2,
-                            "arrivalTime": "13:00",
-                            "stayMinutes": 60,
-                            "memo": "용의 머리를 닮은 독특한 화산암 바위와 탁 트인 바다 전망을 감상할 수 있는 무료 관광 명소입니다. 해안 바람이 강할 수 있으니 겉옷을 챙기세요.",
-                            "reason": "제주 북부 해안의 대표적인 자연 지형을 감상할 수 있는 힐링 명소",
-                            "cost": 0,
-                            "place": {
-                                "placeId": "places/ChIJy30XyWuuEmsRw_Zq5JbA87w",
-                                "placeName": "용두암",
-                                "placeEngName": "Yongduam Rock",
-                                "category": "자연명소",
-                                "address": "대한민국 제주특별자치도 제주시 용두암길 15",
-                                "latitude": 33.5163,
-                                "longitude": 126.5125,
-                                "rating": 4.3,
-                                "photoUrl": "https://places.googleapis.com/v1/places/ChIJy30XyWuuEmsRw_Zq5JbA87w/photos/photo2",
-                                "openingHours": [],
-                            },
-                            "transportToNext": {
-                                "type": "none",
-                                "distance": 0.0,
-                                "minutes": 0,
-                                "cost": 0,
-                                "memo": "오늘의 일정을 마무리하고 숙소로 이동하거나 자유 일정을 즐깁니다.",
-                            },
-                        },
-                    ],
-                }
-            ]
-        },
-    )
+    return CourseSchema.model_validate({
+        "title": "제주 가성비 힐링 & 미식 여행 2일",
+        "destinationCountry": "대한민국", "destinationCity": "제주",
+        "startDate": "2026-08-01", "totalDays": 2, "totalCost": 15000,
+        "tags": ["#제주미식", "#가성비여행", "#힐링", "#친구와함께"],
+        "itinerary": {"days": [{
+            "day": 1, "date": "2026-08-01", "stops": [{
+                "sequence": 1, "stayMinutes": 90,
+                "memo": "시장 안내도를 보고 둘러볼 구역을 먼저 정해 보세요.",
+                "reason": "다양한 먹거리를 둘러보며 미식 여행을 즐길 수 있는 전통시장입니다.",
+                "cost": 15000,
+                "place": {"placeId": "places/dongmun", "placeName": "제주 동문시장",
+                          "category": "FOOD", "latitude": 33.5126, "longitude": 126.5283},
+                "transportToNext": {"type": "none", "distance": 0, "minutes": 0, "memo": None},
+            }],
+        }]},
+    })
 
 
 @pytest.mark.asyncio
-async def test_generate_course_success(mock_env, valid_course_request_payload, sample_course_schema, mocker):
-    """
-    정상적인 성향 프로필, MBTI 및 여행 조건 요청 시 API-AI-2 SSE 스트리밍 (progress, complete) 응답 검증
-    """
+@pytest.mark.parametrize('preference', ['mbti_only', 'taste_only', 'both'])
+async def test_generate_course_success(mock_env, valid_course_request_payload, sample_course_schema, mocker, preference):
+    """Each supported preference combination returns the complete SSE contract."""
+    if preference == 'mbti_only':
+        valid_course_request_payload['tasteProfile'] = None
+    elif preference == 'taste_only':
+        valid_course_request_payload['mbti'] = None
     mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: successful_stream(sample_course_schema),
+        'app.services.course_service.stream_course_generation',
+        side_effect=lambda request, *, deadline: successful_stream(sample_course_schema),
     )
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post(
+            '/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY},
             json=valid_course_request_payload,
         )
-
     assert response.status_code == 200
-    assert "text/event-stream" in response.headers.get("content-type", "")
-    content = response.text
-    assert "event: progress" in content
-    assert "event: complete" in content
-    assert "GENERATING_ROUTE" in content
-    assert "제주 가성비 힐링 & 미식 여행 2일" in content
-
-
-@pytest.mark.asyncio
-async def test_generate_course_with_mbti_only(mock_env, valid_trip_condition, sample_course_schema, mocker):
-    """
-    mbti만 전달되고 tasteProfile은 null/누락된 요청 시 200 OK 정상 처리 검증 (API-AI-2 준수)
-    """
-    mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: successful_stream(sample_course_schema),
-    )
-
-    payload = {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
-        "mbti": "INTJ",
-        "tasteProfile": None,
-        "tripCondition": valid_trip_condition,
-    }
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
-            json=payload,
-        )
-
-    assert response.status_code == 200
-    assert "event: complete" in response.text
-
-
-@pytest.mark.asyncio
-async def test_generate_course_with_taste_profile_only(mock_env, valid_taste_profile, valid_trip_condition, sample_course_schema, mocker):
-    """
-    tasteProfile만 전달되고 mbti는 null/누락된 요청 시 200 OK 정상 처리 검증 (API-AI-2 준수)
-    """
-    mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: successful_stream(sample_course_schema),
-    )
-
-    payload = {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
-        "mbti": None,
-        "tasteProfile": valid_taste_profile,
-        "tripCondition": valid_trip_condition,
-    }
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
-            json=payload,
-        )
-
-    assert response.status_code == 200
-    assert "event: complete" in response.text
-
-
-@pytest.mark.asyncio
-async def test_generate_course_with_both_mbti_and_taste_profile(mock_env, valid_taste_profile, valid_trip_condition, sample_course_schema, mocker):
-    """
-    mbti와 tasteProfile이 둘 다 전달되는 요청 시 200 OK 정상 처리 검증
-    """
-    mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: successful_stream(sample_course_schema),
-    )
-
-    payload = {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
-        "mbti": "INFJ",
-        "tasteProfile": valid_taste_profile,
-        "tripCondition": valid_trip_condition,
-    }
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
-            json=payload,
-        )
-
-    assert response.status_code == 200
+    assert 'text/event-stream' in response.headers.get('content-type', '')
+    assert 'event: progress' in response.text
+    assert response.text.count('event: complete') == 1
+    assert 'GENERATING_ROUTE' in response.text
+    assert sample_course_schema.title in response.text
 
 
 @pytest.mark.asyncio
@@ -331,7 +172,7 @@ async def test_generate_course_missing_both_mbti_and_taste_profile(mock_env, val
     mbti와 tasteProfile이 둘 다 누락된 요청 시 API-AI-2 400 Bad Request 에러 반환 검증
     """
     payload = {
-        "userId": "550e8400-e29b-41d4-a716-446655440000",
+        "userId": "550e8400-e29b-41d4-a716-446655440000", 'language': 'ko',
         "mbti": None,
         "tasteProfile": None,
         "tripCondition": valid_trip_condition,
@@ -352,27 +193,12 @@ async def test_generate_course_missing_both_mbti_and_taste_profile(mock_env, val
 
 
 @pytest.mark.asyncio
-async def test_generate_course_unauthorized(mock_env, valid_course_request_payload):
-    """
-    내부 인증 API Key 헤더 누락 또는 잘못된 키 입력 시 401 에러 반환 검증
-    """
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses", json=valid_course_request_payload
-        )
-        assert response.status_code == 401
-        assert response.json()["message"] == "내부 인증 실패"
-
-
-@pytest.mark.asyncio
 async def test_generate_course_bad_request(mock_env):
     """
     필수 데이터 누락 또는 스키마 미충족 시 400 Bad Request 반환 검증
     """
     invalid_payload = {
-        "userId": "invalid-uuid-or-missing-fields",
+        "userId": "invalid-uuid-or-missing-fields", 'language': 'ko',
     }
 
     async with AsyncClient(
@@ -390,66 +216,24 @@ async def test_generate_course_bad_request(mock_env):
 
 
 @pytest.mark.asyncio
-async def test_generate_course_not_found(mock_env, valid_course_request_payload, mocker):
-    """
-    실시간 스트림 시작 후 장소 부족은 progress 안내 후 complete 없이 종료한다.
-    """
+@pytest.mark.parametrize('error', [
+    pytest.param(ValueError('조건에 맞는 장소가 없습니다.'), id='no_places'),
+    pytest.param(RuntimeError('provider unavailable'), id='provider_error'),
+])
+async def test_generation_error_after_stream_start_never_completes(mock_env, valid_course_request_payload, mocker, error):
+    """Both place and model failures close an HTTP 200 stream without completion."""
     mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: failed_stream(ValueError("조건에 맞는 장소가 없습니다.")),
+        'app.services.course_service.stream_course_generation',
+        side_effect=lambda request, *, deadline: failed_stream(error),
     )
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post(
+            '/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY},
             json=valid_course_request_payload,
         )
-
     assert response.status_code == 200
-    assert "event: progress" in response.text
-    assert "event: complete" not in response.text
-
-
-@pytest.mark.asyncio
-async def test_generate_course_ai_error(mock_env, valid_course_request_payload, mocker):
-    """
-    스트림 시작 이후 모델 오류는 HTTP 200 스트림에서 complete 없이 종료한다.
-    """
-    mocker.patch(
-        "app.services.course_service.stream_course_generation",
-        side_effect=lambda request: failed_stream(RuntimeError("provider unavailable")),
-    )
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        response = await ac.post(
-            "/internal/ai/courses",
-            headers={"X-Internal-Api-Key": TEST_API_KEY},
-            json=valid_course_request_payload,
-        )
-
-    assert response.status_code == 200
-    assert "event: progress" in response.text
-    assert "event: complete" not in response.text
-
-
-def test_course_prompt_requirements():
-    """
-    COURSE_GENERATION_PROMPT에 MBTI, 아침/점심/저녁 식사, memo 내 장소 설명 및 주의사항, 그리고 스톱별 예상 비용(cost) 산정 지침이 포함되어 있는지 검증
-    """
-    prompt_str = str(COURSE_GENERATION_PROMPT)
-    assert "MBTI" in prompt_str or "mbti" in prompt_str
-    assert "아침" in prompt_str
-    assert "점심" in prompt_str
-    assert "저녁" in prompt_str
-    assert "설명" in prompt_str
-    assert "주의" in prompt_str or "유의" in prompt_str
-    assert "비용" in prompt_str or "cost" in prompt_str
-    assert "placeEngName" in prompt_str or "영문" in prompt_str
+    assert 'event: progress' in response.text
+    assert 'event: complete' not in response.text
 
 
 def test_stop_schema_cost_field_validation():
@@ -459,7 +243,7 @@ def test_stop_schema_cost_field_validation():
     place = PlaceSchema(
         placeId="places/test1234",
         placeName="테스트 장소",
-        category="관광지",
+        category="SPOT",
         latitude=37.5,
         longitude=127.0,
     )
@@ -471,7 +255,6 @@ def test_stop_schema_cost_field_validation():
     # 1. cost 기본값 검증 (0)
     stop_default = StopSchema(
         sequence=1,
-        arrivalTime="10:00",
         stayMinutes=60,
         memo="테스트 메모",
         reason="테스트 추천 이유",
@@ -483,7 +266,6 @@ def test_stop_schema_cost_field_validation():
     # 2. 명시적 cost 지정 검증
     stop_custom_cost = StopSchema(
         sequence=2,
-        arrivalTime="12:00",
         stayMinutes=90,
         memo="식사 메모",
         reason="맛집 추천",
@@ -499,7 +281,6 @@ def test_stop_schema_cost_field_validation():
     with pytest.raises(ValidationError):
         StopSchema(
             sequence=3,
-            arrivalTime="14:00",
             stayMinutes=30,
             memo="잘못된 비용 메모",
             reason="추천",
@@ -517,7 +298,7 @@ async def test_service_emits_progress_before_generation_finishes(mock_env, valid
 
     release = asyncio.Event()
 
-    async def blocked_generation(request):
+    async def blocked_generation(request, *, deadline):
         yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '후보 생성 중'}
         await release.wait()
         yield 'complete', {'course': sample_course_schema.model_dump()}
@@ -548,7 +329,7 @@ async def test_service_cancellation_closes_pending_generation(mock_env, valid_co
     entered = asyncio.Event()
     cleaned = asyncio.Event()
 
-    async def pending_generation(request):
+    async def pending_generation(request, *, deadline):
         try:
             yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '생성 중'}
             entered.set()
@@ -568,15 +349,6 @@ async def test_service_cancellation_closes_pending_generation(mock_env, valid_co
 
 
 @pytest.mark.asyncio
-async def test_invalid_calendar_date_fails_before_stream(mock_env, valid_course_request_payload):
-    valid_course_request_payload['tripCondition']['startDate'] = '2026-02-30'
-    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
-        response = await client.post('/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY}, json=valid_course_request_payload)
-    assert response.status_code == 400
-    assert response.json()['status'] == 400
-
-
-@pytest.mark.asyncio
 async def test_service_preserves_source_timeout_across_progress_events(mock_env, valid_course_request_payload, mocker):
     """A timeout opened before progress must still cancel later generation work."""
     from app.schemas.course import CourseRequestSchema
@@ -584,7 +356,7 @@ async def test_service_preserves_source_timeout_across_progress_events(mock_env,
 
     cleaned = asyncio.Event()
 
-    async def timed_generation(request):
+    async def timed_generation(request, *, deadline):
         try:
             async with asyncio.timeout(.03):
                 yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '후보 생성 중'}
@@ -614,7 +386,7 @@ async def test_service_complete_allows_producer_to_finish_normally(mock_env, val
     normal_exit = asyncio.Event()
     cancelled = asyncio.Event()
 
-    async def finishing_generation(request):
+    async def finishing_generation(request, *, deadline):
         try:
             yield 'progress', {'step': 'GENERATING_ROUTE', 'message': '생성 중'}
             yield 'complete', {'course': sample_course_schema.model_dump()}
@@ -654,14 +426,14 @@ async def test_unavailable_history_keeps_verified_sse_generation_available(
 
     probe = mocker.patch.object(
         CourseHistory, 'ensure_available', new_callable=AsyncMock,
-        create=True, side_effect=storage_error,
+        side_effect=storage_error,
     )
     generation = mocker.patch(
         'app.services.course_service.stream_course_generation',
-        side_effect=lambda request: successful_stream(sample_course_schema),
+        side_effect=lambda request, *, deadline: successful_stream(sample_course_schema),
     )
     maps_provider = mocker.patch('app.agent.course_graph.VerifiedMapsProvider')
-    model = mocker.patch('app.agent.course_graph.ChatGoogleGenerativeAI')
+    model = mocker.patch('app.agent.course_drafting.ChatOpenAI')
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post(
             '/internal/ai/courses', headers={'X-Internal-Api-Key': TEST_API_KEY},
@@ -698,11 +470,11 @@ async def test_history_preflight_finishes_before_stream_factory(
 
     probe = mocker.patch.object(
         CourseHistory, 'ensure_available', new_callable=AsyncMock,
-        create=True, side_effect=blocked_probe,
+        side_effect=blocked_probe,
     )
     generation = mocker.patch(
         'app.services.course_service.stream_course_generation',
-        side_effect=lambda request: successful_stream(sample_course_schema),
+        side_effect=lambda request, *, deadline: successful_stream(sample_course_schema),
     )
     task = asyncio.create_task(generate_course_service(
         CourseRequestSchema.model_validate(valid_course_request_payload),
@@ -733,7 +505,7 @@ async def test_invalid_request_does_not_touch_history(
     from app.services.course_history import CourseHistory
 
     probe = mocker.patch.object(
-        CourseHistory, 'ensure_available', new_callable=AsyncMock, create=True,
+        CourseHistory, 'ensure_available', new_callable=AsyncMock,
         side_effect=AssertionError('Rejected request must not touch storage'),
     )
     headers = {'X-Internal-Api-Key': TEST_API_KEY}
@@ -748,4 +520,8 @@ async def test_invalid_request_does_not_touch_history(
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post('/internal/ai/courses', headers=headers, json=valid_course_request_payload)
     assert response.status_code == expected_status
+    assert response.json()['status'] == expected_status
+    assert response.json()['message'] == (
+        '내부 인증 실패' if expected_status == 401 else '코스 생성 조건이 올바르지 않습니다.'
+    )
     probe.assert_not_awaited()
