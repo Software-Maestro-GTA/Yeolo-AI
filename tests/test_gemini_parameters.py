@@ -25,8 +25,9 @@ FEATURES = {'taste': 'taste.profile.analysis', 'summary': 'taste.profile.analysi
 def output_for(operation):
     if operation == 'summary':
         return {
-            'intro': '여행 취향을 알아가는 중이에요.', 'hashtags': ['#여행', '#탐색', '#발견'],
-            'types': [], 'recommendCity': {'cityCode': 'SEOUL', 'reason': '먼저 둘러보기 좋은 도시로 제안해요.'},
+            'intro': '카페와 디저트를 즐기는 여행자예요.', 'hashtags': ['#카페', '#디저트', '#여행'],
+            'types': [{'typeCode': code, 'typeName': code} for code in ('CAFE_DESSERT', 'CULTURE', 'SHOPPING')],
+            'recommendCity': {'cityCode': 'SEOUL', 'reason': '카페에 대한 관심을 바탕으로 제안해요.'},
         }
     if operation == 'candidates':
         return {'title': '서울 여행', 'reason': '문화 탐방', 'days': [
@@ -115,6 +116,8 @@ async def test_gemini_gateway_request_preserves_schema_parameters_and_identity(o
         summary_schema = body['response_format']['json_schema']['schema']
         assert summary_schema['properties']['hashtags']['minItems'] == 3
         assert summary_schema['properties']['hashtags']['maxItems'] == 4
+        assert summary_schema['properties']['types']['minItems'] == 3
+        assert summary_schema['properties']['types']['maxItems'] == 3
         assert 'score' not in summary_schema['$defs']['SummaryTypeCopy']['properties']
         assert 'lowName' not in summary_schema['$defs']['SummaryTypeCopy']['properties']
         assert 'countryName' not in summary_schema['$defs']['CityRecommendationCopy']['properties']
@@ -233,8 +236,12 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
     from httpx import ASGITransport, AsyncClient
 
     from app.main import app
-    from tests.test_behavior_evidence import full_profile, request, sse_events
-    from tests.test_behavior_statistics import photo
+    from tests.test_behavior_evidence import (
+        full_profile,
+        repeated_photos,
+        request,
+        sse_events,
+    )
     from tests.test_taste_summary import draft_for
 
     requests = []
@@ -260,7 +267,7 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
         return completion(draft.model_dump())
 
     clients = offline_wire(respond)
-    payload = request([photo(str(day), f'2026-07-{day:02d}T10:00:00+09:00') for day in (1, 2, 3)]).model_dump(mode='json')
+    payload = request(repeated_photos()).model_dump(mode='json')
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post('/internal/ai/taste-profile/analysis', json=payload,
                                      headers={'X-Internal-Api-Key': 'offline-api-key'})
@@ -271,8 +278,8 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
     assert set(result) == {'tasteProfile', 'summary'}
     assert result['tasteProfile']['companionType'] == 'solo'
     assert result['summary']['types'] == [{
-        'typeCode': 'CAFE_DESSERT', 'typeName': '나만의 CAFE_DESSERT', 'lowName': '약함', 'highName': '강함', 'score': 100,
-    }]
+        'typeCode': code, 'typeName': '나만의 ' + code, 'lowName': '약함', 'highName': '강함', 'score': 100,
+    } for code in ('CAFE_DESSERT', 'CULTURE', 'SHOPPING')]
     assert result['summary']['recommendCity']['countryName'] == '호주'
     assert result['summary']['recommendCity']['cityName'] == '멜버른'
     assert 'cityCode' not in result['summary']['recommendCity']

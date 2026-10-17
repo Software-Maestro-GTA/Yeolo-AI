@@ -5,12 +5,22 @@ from typing import Any
 
 from app.schemas.taste_profile import AnalysisMetadataSchema, TasteProfileSchema
 from app.schemas.taste_summary import (
+    SUMMARY_TYPE_COUNT,
     CityRecommendation,
     SummaryType,
     TasteSummary,
     TasteSummaryDraft,
 )
-from app.services.taste_city_catalog import CITY_CANDIDATES, EXPLORATORY_CITY_CODES
+from app.services.behavior_evidence import MIN_EVIDENCE_DAYS, MIN_EVIDENCE_VISITS
+from app.services.taste_city_catalog import CITY_CANDIDATES
+
+
+class InsufficientTasteEvidenceError(ValueError):
+    """Signal a recoverable lack of evidence, mapped to API-AI-1 status 400."""
+
+    def __init__(self) -> None:
+        super().__init__('분석 가능한 기록이 부족해요. 다른 날짜와 장소의 사진을 추가해 주세요.')
+
 
 # A display registry for the existing profile, not the proposed v2 scoring model.
 # Each group contributes at most one slider to avoid restating the same evidence.
@@ -35,6 +45,24 @@ AXIS_LABELS = {
     "fr": ("Faible", "Fort"), "es": ("Menor", "Mayor"),
     "de": ("Schwächer", "Stärker"), "pt": ("Menor", "Maior"),
 }
+
+
+def validate_taste_evidence(statistics: dict[str, Any]) -> None:
+    """Require repeated evidence for three distinct interest groups before inference.
+
+    Args:
+        statistics: Deduplicated visit counts and distinct-day counts by field.
+    Raises:
+        InsufficientTasteEvidenceError: Fewer than three groups meet the guard threshold.
+    """
+    visits = statistics['fieldVisitCounts']
+    days = statistics['fieldDayCounts']
+    supported_groups = {
+        group for _, path, _, group in TYPE_DEFINITIONS
+        if visits.get(path, 0) >= MIN_EVIDENCE_VISITS and days.get(path, 0) >= MIN_EVIDENCE_DAYS
+    }
+    if len(supported_groups) < SUMMARY_TYPE_COUNT:
+        raise InsufficientTasteEvidenceError
 
 
 @dataclass(frozen=True)
@@ -66,7 +94,7 @@ def _select_cities(
         supported: Evidence-backed interests and their shared group identities.
         language: Normalized locale for existing Korean/English proper names.
     Returns:
-        At most eight matching cities, or the neutral exploratory set if empty.
+        At most eight cities matching the supported interests.
         Ties favor coverage, then city codes rather than catalog insertion order.
     """
     ranked = []
@@ -77,9 +105,7 @@ def _select_cities(
             if interest["typeCode"] in city.interests:
                 weights[group] = max(weights.get(group, 0), interest["sourceScore"] - 3)
                 matched.append(interest["typeCode"])
-        if supported and not matched:
-            continue
-        if not supported and city.code not in EXPLORATORY_CITY_CODES:
+        if not matched:
             continue
         korean = language.split("-")[0] == "ko"
         candidate = {
@@ -88,23 +114,24 @@ def _select_cities(
             "cityName": city.city_ko if korean else city.city_en,
             "interestCodes": list(city.interests), "matchedTypeCodes": sorted(matched),
         }
-        tie = city.code if supported else f"{EXPLORATORY_CITY_CODES.index(city.code):02d}"
-        ranked.append(((-sum(weights.values()), -len(weights), -len(matched), tie), candidate))
+        ranked.append(((-sum(weights.values()), -len(weights), -len(matched), city.code), candidate))
     return [candidate for _, candidate in sorted(ranked, key=lambda item: item[0])[:MAX_CITY_CANDIDATES]]
 
 
 def prepare_summary_context(
     profile: TasteProfileSchema, metadata: AnalysisMetadataSchema, language: str,
 ) -> SummaryContext:
-    """Select at most three distinct interests supported by guarded evidence.
+    """Select exactly three distinct interests supported by guarded evidence.
 
     Args:
         profile: Final guarded profile, whose numeric values must remain unchanged.
         metadata: Internal evidence used to exclude compatibility placeholders.
         language: Normalized request locale.
     Returns:
-        Up to three display axes and eight cities matched using all supported
+        Exactly three display axes and up to eight cities matched using all supported
         interests, including interests not displayed as sliders. No network I/O.
+    Raises:
+        InsufficientTasteEvidenceError: Fewer than three groups have supported scores of 4 or 5.
     """
     ranked = []
     for order, (code, path, subject, group) in enumerate(TYPE_DEFINITIONS):
@@ -126,8 +153,11 @@ def prepare_summary_context(
         if group not in groups:
             selected.append(item)
             groups.add(group)
-        if len(selected) == 3:
+        if len(selected) == SUMMARY_TYPE_COUNT:
             break
+
+    if len(selected) != SUMMARY_TYPE_COUNT:
+        raise InsufficientTasteEvidenceError
 
     supported = [(group, item) for _, group, item in ranked]
     cities = _select_cities(supported, language)
