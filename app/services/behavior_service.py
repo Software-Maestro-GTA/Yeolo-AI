@@ -78,7 +78,7 @@ async def _summarize_profile(
     """Turn supported profile facts into display copy without rescoring.
 
     Args:
-        context: Exactly three supported interests and allowed cities, validated before progress.
+        context: Exactly three display interests and all supported recommendation interests.
         user_id: Validated identity, without the original photo payload.
     Returns:
         Summary with validated references and server-owned numeric values.
