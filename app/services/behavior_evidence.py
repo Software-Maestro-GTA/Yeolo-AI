@@ -8,6 +8,9 @@ from app.schemas.taste_profile import (
     TasteProfileSchema,
 )
 
+MIN_EVIDENCE_VISITS = 3
+MIN_EVIDENCE_DAYS = 2
+
 # Deliberately narrow mappings: a generic restaurant does not establish local food,
 # fame, fine dining, dietary restrictions or relative interest in food.
 FIELD_TYPES: dict[str, set[str]] = {
@@ -105,7 +108,7 @@ def guard_taste_profile(
 
     def evidence(path: str) -> FieldEvidenceSchema:
         count, day_count = visits.get(path, 0), days.get(path, 0)
-        sufficient = count >= 3 and day_count >= 2
+        sufficient = count >= MIN_EVIDENCE_VISITS and day_count >= MIN_EVIDENCE_DAYS
         return FieldEvidenceSchema(
             evidence={
                 "visitCount": count,

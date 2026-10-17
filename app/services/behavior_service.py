@@ -26,7 +26,13 @@ from app.schemas.taste_summary import (
 )
 from app.services.behavior_evidence import guard_taste_profile
 from app.services.behavior_statistics import build_behavior_statistics
-from app.services.taste_summary import assemble_taste_summary, prepare_summary_context
+from app.services.taste_summary import (
+    InsufficientTasteEvidenceError,
+    SummaryContext,
+    assemble_taste_summary,
+    prepare_summary_context,
+    validate_taste_evidence,
+)
 
 logger = logging.getLogger(__name__)
 ANALYSIS_ERROR_MESSAGE = '취향 분석을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요.'
@@ -67,21 +73,18 @@ async def _analyze_profile(
 
 @traceable(name="taste_profile_summary", run_type="chain")
 async def _summarize_profile(
-    profile: TasteProfileSchema, metadata: AnalysisMetadataSchema, user_id: UUID, language: str,
+    context: SummaryContext, user_id: UUID,
 ) -> TasteSummary:
     """Turn supported profile facts into display copy without rescoring.
 
     Args:
-        profile: Guarded analysis result.
-        metadata: Private evidence, including compatibility placeholders.
+        context: Exactly three supported interests and allowed cities, validated before progress.
         user_id: Validated identity, without the original photo payload.
-        language: Normalized output locale.
     Returns:
         Summary with validated references and server-owned numeric values.
     Raises:
         Exception: Provider, schema or evidence-reference validation failures.
     """
-    context = prepare_summary_context(profile, metadata, language)
     output = await generate_taste_summary(
         json.dumps(context.model_input(), ensure_ascii=False, sort_keys=True), user_id=user_id,
     )
@@ -99,12 +102,14 @@ async def analyze_behavior_stream(
         API-AI-1 events; complete contains tasteProfile and summary only.
     Raises:
         HTTPException: 400 for no valid records; 500 for inference failures.
+        InsufficientTasteEvidenceError: Repetition or guarded interest scores are insufficient.
     """
     statistics = build_behavior_statistics(request.items)
     if not statistics["validPhotoCount"]:
         raise HTTPException(
             status_code=400, detail="분석 가능한 위치·촬영 시각 메타데이터가 없습니다.",
         )
+    validate_taste_evidence(statistics)
     validate_behavior_configuration()
 
     yield {
@@ -118,14 +123,17 @@ async def analyze_behavior_stream(
         deadline = asyncio.get_running_loop().time() + settings.TASTE_ANALYSIS_TIMEOUT_SECONDS
         async with asyncio.timeout_at(deadline):
             taste_profile, metadata = await _analyze_profile(statistics, request.userId)
+            context = prepare_summary_context(taste_profile, metadata, request.language)
         # Never suspend a generator inside a timeout scope: it can cancel the SSE consumer.
         yield {
             "event": "progress",
             "data": {"step": "GENERATING_SUMMARY", "message": "사용자 취향 정보를 요약합니다."},
         }
         async with asyncio.timeout_at(deadline):
-            summary = await _summarize_profile(taste_profile, metadata, request.userId, request.language)
+            summary = await _summarize_profile(context, request.userId)
             result = BehaviorAnalysisResponse(tasteProfile=taste_profile, summary=summary)
+    except InsufficientTasteEvidenceError:
+        raise
     except TimeoutError as exc:
         logger.warning('Taste profile analysis exceeded its deadline', exc_info=True)
         raise HTTPException(status_code=500, detail=ANALYSIS_TIMEOUT_MESSAGE) from exc

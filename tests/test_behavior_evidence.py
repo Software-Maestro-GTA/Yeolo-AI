@@ -42,6 +42,12 @@ def request(items):
     return BehaviorAnalysisRequest(userId='550e8400-e29b-41d4-a716-446655440000', items=items)
 
 
+def repeated_photos():
+    """Support three distinct groups while leaving seasonal fallback evidence weak."""
+    return [photo(f'{kind}-{day}', f'2026-07-{day:02d}T10:00:00+09:00', place=kind, types=[kind])
+            for kind in ('cafe', 'museum', 'shopping_mall') for day in (18, 19, 20)]
+
+
 def adjusted(items, seasonal=None):
     return guard_taste_profile(full_profile(seasonal), statistics(items))
 
@@ -56,11 +62,12 @@ async def complete(items):
 
 @pytest.mark.asyncio
 async def test_single_scoring_call_receives_visit_statistics_and_returns_profile(chain):
-    profile = await complete([photo('a')])
+    profile = await complete(repeated_photos())
     chain.assert_awaited_once()
     payload = chain.call_args.args[0]
     stats = json.loads(payload)
-    assert stats['visitCount'] == stats['distinctPlaceCount'] == 1
+    assert stats['visitCount'] == 9
+    assert stats['distinctPlaceCount'] == 3
     assert str(request([]).userId) not in payload
     assert 'Cafe A' not in payload
     assert profile['seasonalEnvironmentPreference'] == ['warm_region']
@@ -230,7 +237,7 @@ async def test_scoring_failure_returns_sse_error_without_complete_or_retry(chain
     chain.side_effect = RuntimeError('scoring unavailable')
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post('/internal/ai/taste-profile/analysis',
-                                     json=request([photo('a')]).model_dump(mode='json'),
+                                     json=request(repeated_photos()).model_dump(mode='json'),
                                      headers={'X-Internal-Api-Key': 'test-key'})
     assert response.status_code == 200
     events = sse_events(response)
@@ -258,10 +265,10 @@ async def test_invalid_records_rejected_before_llm(chain, mocker, items):
 async def test_internal_trace_records_evidence_without_exposing_metadata(chain, mocker):
     active_run = mocker.MagicMock()
     mocker.patch('app.services.behavior_service.get_current_run_tree', return_value=active_run)
-    result = await complete([photo('a')])
+    result = await complete(repeated_photos())
     active_run.add_metadata.assert_called_once()
     saved = active_run.add_metadata.call_args.args[0]['analysisMetadata']
-    assert saved['statistics']['visitCount'] == 1
+    assert saved['statistics']['visitCount'] == 9
     assert saved['fieldEvidence']['seasonalEnvironmentPreference.warm_region']['confidence'] == 'low'
     assert saved['fieldEvidence']['seasonalEnvironmentPreference.warm_region']['evidence']['fallbackReason']
     assert 'seasonalEnvironmentPreference.warm_region' in saved['requiresUserConfirmation']
@@ -274,7 +281,7 @@ async def test_trace_metadata_recording_failure_does_not_break_successful_infere
     active_run = mocker.MagicMock()
     active_run.add_metadata.side_effect = RuntimeError('trace unavailable')
     mocker.patch('app.services.behavior_service.get_current_run_tree', return_value=active_run)
-    profile = await complete([photo('a')])
+    profile = await complete(repeated_photos())
     assert profile['seasonalEnvironmentPreference'] == ['warm_region']
     chain.assert_awaited_once()
     active_run.add_metadata.assert_called_once()

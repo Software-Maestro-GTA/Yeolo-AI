@@ -88,8 +88,3 @@ CITY_CANDIDATES: tuple[SummaryCity, ...] = (
     SummaryCity("QUEENSTOWN", "뉴질랜드", "퀸스타운", "New Zealand", "Queenstown",
                 ("NATURE", "OUTDOOR"), "https://www.newzealand.com/int/queenstown/"),
 )
-
-# Without supported interests, preserve a broad exploratory set, not a match claim.
-EXPLORATORY_CITY_CODES = (
-    "SEOUL", "BUSAN", "KYOTO", "TOKYO", "LISBON", "BARCELONA", "VANCOUVER", "SINGAPORE",
-)

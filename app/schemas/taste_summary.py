@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.taste_profile import TasteProfileSchema
 
+SUMMARY_TYPE_COUNT = 3
+
 SummaryTypeCode = Literal[
     "CAFE_DESSERT", "CULTURE", "BEACH", "OUTDOOR", "NATURE",
     "FOOD", "SHOPPING", "NIGHTLIFE", "WELLNESS", "EXPERIENCE",
@@ -87,12 +89,12 @@ class SummaryCopy(SummaryModel):
 class TasteSummaryDraft(SummaryCopy):
     """Internal structured LLM output without editable scores or axis endpoints."""
 
-    types: list[SummaryTypeCopy] = Field(..., max_length=3, description="입력 유형을 각 1회 사용, 입력이 없으면 빈 배열")
+    types: list[SummaryTypeCopy] = Field(..., min_length=SUMMARY_TYPE_COUNT, max_length=SUMMARY_TYPE_COUNT, description="근거가 있는 입력 유형 정확히 3개를 각 1회 사용")
     recommendCity: CityRecommendationCopy = Field(..., description="후보 도시와 추천 설명")
 
 
 class TasteSummary(SummaryCopy):
-    types: list[SummaryType] = Field(..., max_length=3, description="근거가 있는 맞춤 유형, 부족하면 0~2개")
+    types: list[SummaryType] = Field(..., min_length=SUMMARY_TYPE_COUNT, max_length=SUMMARY_TYPE_COUNT, description="근거가 있는 맞춤 유형 정확히 3개")
     recommendCity: CityRecommendation = Field(..., description="국가·도시·추천 이유")
 
 

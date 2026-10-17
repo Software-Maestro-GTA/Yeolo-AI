@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,7 +22,7 @@ def mock_env(mocker):
 
 @pytest.fixture
 def valid_request_payload():
-    return {
+    payload = {
         "userId": "550e8400-e29b-41d4-a716-446655440000",
         "items": [
             {
@@ -62,6 +63,23 @@ def valid_request_payload():
             }
         ]
     }
+    for day, weekday in [(20, 'mon'), (21, 'tue')]:
+        item = deepcopy(payload['items'][1])
+        item['sourceImageId'] = f'cafe-{day}'
+        item['location']['placeTypes'] = ['cafe', 'food']
+        item['timeContext'].update(capturedAt=f'2026-07-{day}T10:00:00+09:00',
+                                   dayOfWeek=weekday, isWeekend=False)
+        payload['items'].append(item)
+    for kind, template, days in [('park', 0, [(20, 'mon'), (21, 'tue')]),
+                                 ('museum', 0, [(19, 'sun'), (20, 'mon'), (21, 'tue')])]:
+        for day, weekday in days:
+            item = deepcopy(payload['items'][template])
+            item['sourceImageId'] = f'{kind}-{day}'
+            item['location'].update(placeTypes=[kind], placeName=f'Mock {kind}')
+            item['timeContext'].update(capturedAt=f'2026-07-{day}T10:00:00+09:00',
+                                       dayOfWeek=weekday, isWeekend=weekday in {'sat', 'sun'})
+            payload['items'].append(item)
+    return payload
 
 @pytest.mark.asyncio
 async def test_behavior_analysis_success(mocker, mock_env, valid_request_payload):

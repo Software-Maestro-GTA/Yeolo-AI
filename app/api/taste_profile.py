@@ -15,6 +15,10 @@ from app.services.behavior_service import (
     validate_behavior_configuration,
 )
 from app.services.behavior_statistics import build_behavior_statistics
+from app.services.taste_summary import (
+    InsufficientTasteEvidenceError,
+    validate_taste_evidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +47,8 @@ async def analyze_behavior_api(
         request = request.model_copy(update={"language": language_from_header(accept_language)})
 
     # 2. 데이터 유효성 검사 (데이터 부족 예외 처리)
-    if (
-        not request.items
-        or not build_behavior_statistics(request.items)["validPhotoCount"]
-    ):
+    statistics = build_behavior_statistics(request.items)
+    if not statistics["validPhotoCount"]:
         logger.warning(
             f"Behavior analysis requested with no valid items for userId={request.userId}"
         )
@@ -60,7 +62,13 @@ async def analyze_behavior_api(
         )
 
     try:
+        validate_taste_evidence(statistics)
         validate_behavior_configuration()
+    except InsufficientTasteEvidenceError as error:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"status": 400, "message": str(error), "data": None},
+        )
     except HTTPException as error:
         return JSONResponse(
             status_code=error.status_code,
@@ -77,6 +85,9 @@ async def analyze_behavior_api(
             async for event in analyze_behavior_stream(request):
                 # SSE 포맷 규격에 맞추어 \n\n으로 이벤트를 구분하여 반환
                 yield f"event: {event['event']}\ndata: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
+        except InsufficientTasteEvidenceError as error:
+            error_data = {"status": 400, "message": str(error)}
+            yield f"event: error\ndata: {json.dumps(error_data, ensure_ascii=False)}\n\n"
         except HTTPException as e:
             logger.warning(
                 f"HTTPException in behavior stream for userId={request.userId} -> Code {e.status_code}: {e.detail}"
