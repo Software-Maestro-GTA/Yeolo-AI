@@ -24,7 +24,7 @@ from app.services.behavior_service import analyze_behavior_stream
 
 # 공통 테스트 페이로드 정의 (행동 데이터 메타데이터)
 def get_test_behavior_payload() -> BehaviorAnalysisRequest:
-    return BehaviorAnalysisRequest(
+    payload = BehaviorAnalysisRequest(
         userId="550e8400-e29b-41d4-a716-446655440000",
         items=[
             BehaviorItemSchema(
@@ -65,6 +65,29 @@ def get_test_behavior_payload() -> BehaviorAnalysisRequest:
             ),
         ],
     )
+    # Support three independent interest groups before requesting a live summary.
+    for day, weekday in [(20, 'mon'), (21, 'tue')]:
+        original = payload.items[1]
+        payload.items.append(original.model_copy(update={
+            'sourceImageId': f'img_test_{day}',
+            'timeContext': original.timeContext.model_copy(update={
+                'capturedAt': f'2026-07-{day}T10:00:00+09:00',
+                'dayOfWeek': weekday, 'isWeekend': False,
+            }),
+        }))
+    for kind, days in [('park', [(20, 'mon'), (21, 'tue')]),
+                       ('museum', [(19, 'sun'), (20, 'mon'), (21, 'tue')])]:
+        for day, weekday in days:
+            original = payload.items[0]
+            payload.items.append(original.model_copy(update={
+                'sourceImageId': f'{kind}-{day}',
+                'location': original.location.model_copy(update={'placeName': f'Mock {kind}', 'placeTypes': [kind]}),
+                'timeContext': original.timeContext.model_copy(update={
+                    'capturedAt': f'2026-07-{day}T10:00:00+09:00',
+                    'dayOfWeek': weekday, 'isWeekend': weekday in {'sat', 'sun'},
+                }),
+            }))
+    return payload
 
 
 # ----------------- A. Pytest E2E 테스트 케이스 -----------------
