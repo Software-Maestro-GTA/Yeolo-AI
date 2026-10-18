@@ -65,7 +65,7 @@ async def test_actual_graph_verifies_and_schedules_before_complete(request_data,
     graph = build_course_graph(provider, history)
     updates = [update async for update in graph.astream({'request': request_data, 'attempt': 0}, stream_mode='updates')]
     names = [name for update in updates for name in update]
-    assert [name for name in names if name != 'quote_trip'] == ['prepare', 'draft', 'verify_places', 'verify_routes', 'schedule', 'finalize', 'finalize_course']
+    assert [name for name in names if name != 'quote_trip'] == ['prepare', 'draft', 'verify_places', 'verify_routes', 'schedule', 'finalize', 'localize_display', 'finalize_course']
     assert names.count('quote_trip') == 1
     assert names.index('prepare') < names.index('quote_trip') < names.index('finalize_course')
     result = updates[-1]['finalize_course']['course']
@@ -98,14 +98,72 @@ async def test_actual_graph_verifies_and_schedules_before_complete(request_data,
 
 
 @pytest.mark.asyncio
-async def test_missing_verified_route_cannot_produce_course(request_data, graph_dependencies):
+@pytest.mark.parametrize('remaining', [10, 180])
+async def test_final_copy_uses_remaining_generation_time_instead_of_short_optional_budget(request_data, graph_dependencies, mocker, remaining):
+    from app.agent.course_graph import build_course_graph
+
+    provider, history, _, _, _ = graph_dependencies
+    localize = mocker.patch('app.agent.course_nodes.localize_course', side_effect=lambda request, course, **kwargs: course)
+    deadline = asyncio.get_running_loop().time() + remaining
+    result = await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0, 'deadline': deadline})
+    assert len(result['course'].itinerary.days[0].stops) == 5
+    localize.assert_awaited_once()
+    budget = localize.await_args.kwargs['timeout_seconds']
+    assert 0 < budget <= min(60, remaining - 1)
+    if remaining == 180:
+        assert budget == 60
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind,status', [('not_found', 404), ('place_data', 200)])
+async def test_individual_place_error_preserves_complete_verified_peers(
+    request_data, graph_dependencies, kind, status,
+):
+    """A failed sixth proposal must not discard five feasible verified venues."""
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
+    from app.agent.tools.verified_maps import MapsProviderError
+
+    provider, history, llm, draft, places = graph_dependencies
+    draft.days[0].candidates.append(Candidate(name='조회불가명소', stay_minutes=60))
+
+    def search(candidate, destination):
+        if candidate.name == '조회불가명소':
+            raise MapsProviderError(kind, status)
+        return places[candidate.name]
+
+    provider.search.side_effect = search
+    result = await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
+    stops = result['course'].itinerary.days[0].stops
+    assert len(stops) == 5
+    assert {stop.place.placeId for stop in stops} == {place.place.placeId for place in places.values()}
+    assert {stop.place.placeName for stop in stops if stop.cost} == {'점심식당', '저녁식당'}
+    assert provider.route.await_count == 4
+    llm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_missing_route_preserves_venue_course_without_invented_metrics(request_data, graph_dependencies):
     from app.agent.course_graph import build_course_graph
 
     provider, history, llm, _, _ = graph_dependencies
     provider.route.side_effect = ValueError('No verified route')
-    with pytest.raises(ValueError):
-        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 4
+    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
+    assert_unknown_transfers(course)
+    assert len(course.itinerary.days[0].stops) == 5
+    llm.assert_awaited_once()
+
+
+def assert_unknown_transfers(course):
+    """Check honest missing travel and the distinct final-stop marker."""
+    for day in course.itinerary.days:
+        for stop in day.stops[:-1]:
+            route = stop.transportToNext
+            assert route.type == 'unknown'
+            assert route.distance is route.minutes is route.memo is None
+            assert getattr(route, 'cost', None) is None
+        assert day.stops[-1].transportToNext.type == 'none'
+    assert course.totalCost == sum(stop.cost for day in course.itinerary.days for stop in day.stops)
 
 
 @pytest.mark.asyncio
@@ -979,35 +1037,38 @@ async def test_korean_routes_use_transit_and_trip_departure_time(request_data, g
 
 
 @pytest.mark.asyncio
-async def test_missing_route_with_nearby_verified_places_never_invents_success(request_data, graph_dependencies):
+async def test_missing_route_keeps_places_and_records_history_with_unknown_travel(request_data, graph_dependencies):
     from app.agent.course_graph import build_course_graph
-    from app.agent.course_state import CourseGenerationError
     from app.agent.tools.verified_maps import NoRouteError
     from app.services.course_history import history_key
 
     provider, history, _, _, _ = graph_dependencies
     provider.route.side_effect = NoRouteError()
-    with pytest.raises(CourseGenerationError):
-        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert await history.recent(history_key(request_data)) == []
+    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
+    assert_unknown_transfers(course)
+    assert await history.recent(history_key(request_data)) == [
+        {stop.place.placeId for day in course.itinerary.days for stop in day.stops}
+    ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('kind', ['unauthorized', 'invalid'])
-async def test_provider_permission_or_malformed_route_never_becomes_estimate(request_data, graph_dependencies, kind):
+async def test_route_permission_or_malformed_response_becomes_unknown_not_estimate(request_data, graph_dependencies, kind):
     from app.agent.course_graph import build_course_graph
     from app.agent.tools.verified_maps import MapsProviderError
     from app.services.course_history import history_key
 
     provider, history, _, _, _ = graph_dependencies
     provider.route.side_effect = MapsProviderError(kind=kind, status_code=403 if kind == 'unauthorized' else 400)
-    with pytest.raises(ValueError):
-        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert await history.recent(history_key(request_data)) == []
+    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
+    assert_unknown_transfers(course)
+    assert await history.recent(history_key(request_data))
+    if kind == 'unauthorized':
+        assert provider.route.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_distant_missing_routes_cannot_be_invented_as_short_walks(request_data, graph_dependencies):
+async def test_distant_missing_routes_remain_unknown_instead_of_short_walks(request_data, graph_dependencies):
     from app.agent.course_graph import build_course_graph
     from app.agent.tools.verified_maps import NoRouteError, VerifiedPlace
     from app.services.course_history import history_key
@@ -1016,10 +1077,10 @@ async def test_distant_missing_routes_cannot_be_invented_as_short_walks(request_
     for index, (name, place) in enumerate(list(places.items())):
         places[name] = VerifiedPlace(place.place.model_copy(update={'latitude': 37.40 + index * .08}))
     provider.route.side_effect = NoRouteError()
-    with pytest.raises(ValueError):
-        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert llm.await_count <= 4
-    assert await history.recent(history_key(request_data)) == []
+    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
+    assert_unknown_transfers(course)
+    llm.assert_awaited_once()
+    assert await history.recent(history_key(request_data))
 
 
 @pytest.mark.asyncio
@@ -1188,17 +1249,16 @@ async def test_model_authentication_failure_is_not_retried(request_data, graph_d
 
 
 @pytest.mark.asyncio
-async def test_nearby_route_transient_exhaustion_never_becomes_formula_success(request_data, graph_dependencies):
+async def test_transient_route_exhaustion_finishes_with_unknown_not_formula(request_data, graph_dependencies):
     from app.agent.course_graph import build_course_graph
-    from app.agent.course_state import CourseGenerationError
     from app.agent.tools.verified_maps import MapsProviderError
     from app.services.course_history import history_key
 
     provider, history, _, _, _ = graph_dependencies
     provider.route.side_effect = MapsProviderError(kind='transient', status_code=503)
-    with pytest.raises(CourseGenerationError):
-        await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
-    assert await history.recent(history_key(request_data)) == []
+    course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
+    assert_unknown_transfers(course)
+    assert await history.recent(history_key(request_data))
 
 
 @pytest.mark.asyncio
@@ -1334,7 +1394,7 @@ async def test_optional_navigation_failure_still_completes_actual_graph_and_sse(
 
 
 @pytest.mark.asyncio
-async def test_same_temporary_route_failure_is_deduplicated_per_stage_and_retried_next_draft(request_data, graph_dependencies):
+async def test_temporary_route_failure_is_deduplicated_without_llm_redraft(request_data, graph_dependencies):
     from collections import Counter
 
     from app.agent.course_graph import build_course_graph
@@ -1359,12 +1419,12 @@ async def test_same_temporary_route_failure_is_deduplicated_per_stage_and_retrie
     provider.route.side_effect = route
     course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
     assert len(course.itinerary.days[0].stops) >= 3
-    assert 2 <= llm.await_count <= 4
+    llm.assert_awaited_once()
     first_stage = [entry[1:] for entry in queried if entry[0] == 1]
     second_stage = [entry[1:] for entry in queried if entry[0] == 2]
-    assert first_stage and second_stage
+    assert first_stage and not second_stage
     assert max(Counter(first_stage).values()) == 1
-    assert set(first_stage) & set(second_stage)  # A new draft may recover the failed edge.
+    assert_unknown_transfers(course)
 
 
 @pytest.mark.asyncio

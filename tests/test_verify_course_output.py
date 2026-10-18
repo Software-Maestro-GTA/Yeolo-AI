@@ -61,6 +61,24 @@ def test_synthetic_successful_three_day_output_passes(archived_output):
     assert report['stops'] == sum(len(day['stops']) for day in result['course']['itinerary']['days'])
 
 
+def test_explicit_unknown_transfer_passes_with_feasibility_warning(archived_output):
+    request, result = archived_output
+    result['course']['itinerary']['days'][0]['stops'][0]['transportToNext'] = {
+        'type': 'unknown', 'distance': None, 'minutes': None, 'memo': None,
+    }
+    report = validate(request, result)
+    assert report['passed'] and report['errors'] == []
+    assert any('travel feasibility is unconfirmed' in warning for warning in report['warnings'])
+
+
+@pytest.mark.parametrize('field,value', [('distance', 0), ('distance', 500), ('minutes', 0), ('minutes', 10)])
+def test_unknown_transfer_rejects_fabricated_metrics(archived_output, field, value):
+    request, result = archived_output
+    transfer = {'type': 'unknown', 'distance': None, 'minutes': None, 'memo': None, field: value}
+    result['course']['itinerary']['days'][0]['stops'][0]['transportToNext'] = transfer
+    assert not validate(request, result)['passed']
+
+
 @pytest.mark.parametrize('missing', ['event', 'completed_flag', 'course'])
 def test_missing_completion_evidence_fails(archived_output, missing):
     request, result = archived_output

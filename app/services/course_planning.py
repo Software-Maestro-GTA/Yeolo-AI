@@ -1,7 +1,8 @@
 """Explore venue combinations and construct schedules from verified facts.
 
-Geographic distance ranks candidates; only actual provider routes confirm travel."""
+Geographic distance ranks candidates; unknown transfers leave timing provisional."""
 
+from collections.abc import Callable
 from datetime import date
 
 from app.agent.course_state import (
@@ -32,6 +33,7 @@ from app.services.course_reasons import (
 )
 from app.services.course_routing import (
     distance_meters,
+    minimum_travel_minutes,
 )
 
 
@@ -104,7 +106,11 @@ def _schedule_day(
     day_date: date,
     day_number: int,
 ) -> ScheduledDaySchema:
-    """Build one day using actual routes; reject any full-visit window violation."""
+    """Build visit order; clocks after unknown transfers are provisional bounds.
+
+    Full visits must fit known windows. Unknown travel is not measured as zero:
+    only its lower bound is used internally, and no clock is publicly returned.
+    """
     if len(routes) != len(selected) - 1:
         raise CourseGenerationError(f"{day_number}일차: 이동 경로가 누락되었습니다.")
     current, stops = 540, []
@@ -148,7 +154,7 @@ def _schedule_day(
         current = (
             arrival
             + candidate.stay_minutes
-            + (transport.minutes or 0)
+            + minimum_travel_minutes(transport)
             + (0 if last else 10)
         )
     return ScheduledDaySchema(day=day_number, date=day_date.isoformat(), stops=stops)
@@ -534,38 +540,57 @@ def _choose_disjoint_plans(
     day_plans: dict[int, list[list[Visit]]],
     reserved_ids: set[str],
     search_budget: int = 5000,
+    *,
+    plan_cost: Callable[[int, list[Visit]], int] | None = None,
 ) -> dict[int, list[Visit]]:
-    """Find a bounded global assignment, protecting days with few alternatives."""
+    """Cover as many disjoint days as possible, then minimize optional cost.
+
+    Args:
+        day_plans: Already ranked visit alternatives per day.
+        reserved_ids: Verified venues already committed to other days.
+        search_budget: Existing bound on explored assignments.
+        plan_cost: Optional nonnegative count, such as unknown transfers. With
+            no cost the original first-complete search and ordering are kept.
+    Returns:
+        Best assignment found within the bound, retaining all possible days
+        before preferring a lower total cost. No external requests are made.
+    """
     reserved = {_canonical_id(value) for value in reserved_ids}
     options = {
         index: [
-            (plan, {_canonical_id(venue.place.placeId) for _, venue in plan})
+            (plan, {_canonical_id(venue.place.placeId) for _, venue in plan},
+             plan_cost(index, plan) if plan_cost else 0)
             for plan in plans
         ]
         for index, plans in day_plans.items()
     }
     order = sorted(options, key=lambda index: (len(options[index]), index))
     best: dict[int, list[Visit]] = {}
+    best_cost = float('inf')
     visited = 0
 
-    def search(offset: int, used: set[str], chosen: dict[int, list[Visit]]) -> bool:
-        nonlocal best, visited
-        visited += 1
-        if len(chosen) > len(best):
-            best = dict(chosen)
-        if offset == len(order):
-            return len(chosen) == len(order)
+    def search(offset: int, used: set[str], chosen: dict[int, list[Visit]], cost: int) -> bool:
+        nonlocal best, best_cost, visited
         if visited >= search_budget:
             return False
+        visited += 1
+        if len(chosen) > len(best) or len(chosen) == len(best) and cost < best_cost:
+            best = dict(chosen)
+            best_cost = cost
+        if offset == len(order):
+            return len(chosen) == len(order) and (plan_cost is None or cost == 0)
+        possible_days = len(chosen) + len(order) - offset
+        if possible_days < len(best) or possible_days == len(best) and cost >= best_cost:
+            return False
         index = order[offset]
-        for plan, ids in options[index]:
+        for plan, ids, weight in options[index]:
             if len(ids) != len(plan) or used & ids:
                 continue
             chosen[index] = plan
-            if search(offset + 1, used | ids, chosen):
+            if search(offset + 1, used | ids, chosen, cost + weight):
                 return True
             chosen.pop(index)
-        return search(offset + 1, used, chosen)
+        return search(offset + 1, used, chosen, cost)
 
-    search(0, reserved, {})
+    search(0, reserved, {}, 0)
     return dict(sorted(best.items()))

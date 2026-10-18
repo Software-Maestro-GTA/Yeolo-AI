@@ -119,6 +119,11 @@ def translated():
                 "memo": "Follow the on-site guidance and explore the surroundings.",
             },
         ],
+        "navigation": [
+            {"id": "n0", "text": "Follow the pedestrian route."},
+            {"id": "n1", "text": "Verified Museum"},
+            {"id": "n2", "text": "Verified Park"},
+        ],
     }
 
 
@@ -130,6 +135,8 @@ def facts(value):
         for stop in day["stops"]:
             stop.pop("reason")
             stop.pop("memo")
+            stop["place"].pop("placeName")  # A translated label is not an identity.
+            stop["transportToNext"].pop("memo")
     return output
 
 
@@ -203,27 +210,29 @@ async def test_real_gateway_wire_copy_schema_identity_deadline_and_owned_client_
         and result.tags == ["Culture", "Nature"]
     )
     assert facts(result) == before
+    assert result.itinerary.days[0].stops[0].transportToNext.memo == "Follow the pedestrian route."
     assert (
-        result.itinerary.days[0].stops[0].reason == translated()["stops"][0]["reason"]
+        result.itinerary.days[0].stops[0].reason == translated()["stops"][0]["reason"].replace("검증된 박물관", "Verified Museum")
     )
     assert len(calls) == 1
     http_request = calls[0]
     assert str(http_request.url) == "https://gateway.abto.app/v1/chat/completions"
-    assert http_request.headers["x-abto-feature-id"] == "course.copy.localize"
+    assert http_request.headers["x-abto-feature-id"] == "course.candidates.generate"
     assert http_request.headers["x-abto-device-id"] == USER_ID
     assert http_request.headers["authorization"] == "Bearer ck-abto-offline"
     assert http_request.headers["x-abto-key-gemini"] == "offline-gemini-key"
-    assert http_request.extensions["timeout"]["read"] == 15
+    assert http_request.extensions["timeout"]["read"] == 60
     payload = json.loads(http_request.content)
     assert (
-        payload["max_completion_tokens"] == 6000
+        payload["max_completion_tokens"] == 10000
         and payload["reasoning_effort"] == "low"
     )
     assert payload["response_format"]["type"] == "json_schema"
     assert payload["response_format"]["json_schema"]["strict"] is False
     assert "temperature" not in payload and "tools" not in payload
     schema = payload["response_format"]["json_schema"]["schema"]
-    assert set(schema["properties"]) == {"title", "tags", "stops"}
+    assert set(schema["properties"]) == {"title", "tags", "stops", "navigation"}
+    assert result.itinerary.days[0].stops[0].place.placeName == "Verified Museum"
     assert not {"latitude", "cost", "stayMinutes", "transportToNext"} & set(
         schema["$defs"]["LocalizedStopCopy"]["properties"]
     )
@@ -243,6 +252,7 @@ async def test_korean_is_returned_untouched_without_optional_model(language, moc
         side_effect=AssertionError("No optional Korean model"),
     )
     value = course()
+    value.itinerary.days[0].stops[0].transportToNext.memo = "보행 경로를 따라 이동하세요."
     before = value.model_dump()
     result = await course_localization.localize_course(request(language), value)
     assert result is value and result.model_dump() == before
@@ -372,7 +382,26 @@ async def test_strong_actual_preferences_only_and_low_budget_skip_model(mocker):
 
 
 @pytest.mark.asyncio
-async def test_provider_navigation_preserved_while_legacy_korean_navigation_is_null(
+async def test_korean_mixed_navigation_preserves_source_when_translation_is_unavailable(mocker):
+    constructor = mocker.patch.object(
+        course_localization, "get_abto", side_effect=ValueError("Offline translation unavailable")
+    )
+    value = course()
+    route = value.itinerary.days[0].stops[0].transportToNext
+    route.type = "transit"
+    route.memo = "Số 131 Hoàng Diệu에서 07번을 타고 Đối Diện 18-20에서 내리세요."
+    before = facts(value)
+
+    result = await course_localization.localize_course(request("ko-KR"), value)
+
+    assert result is value and facts(result) == before
+    assert route.memo == "Số 131 Hoàng Diệu에서 07번을 타고 Đối Diện 18-20에서 내리세요."
+    assert result.itinerary.days[0].stops[1].transportToNext.memo is None
+    constructor.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_foreign_and_legacy_mixed_navigation_use_requested_language(
     mocker,
 ):
     mocker.patch.object(
@@ -386,10 +415,7 @@ async def test_provider_navigation_preserved_while_legacy_korean_navigation_is_n
         1
     ].transportToNext.memo = "주요 이동: 안내를 따라 이동하세요."
     result = await course_localization.localize_course(request("ja"), value)
-    assert (
-        result.itinerary.days[0].stops[0].transportToNext.memo
-        == "Follow the pedestrian route to 검증된 공원."
-    )
+    assert result.itinerary.days[0].stops[0].transportToNext.memo == "Follow the pedestrian route to 검증된 공원."
     assert result.itinerary.days[0].stops[1].transportToNext.memo is None
 
 

@@ -39,7 +39,7 @@ def validate_output(request: dict, result: dict) -> dict:
     from pydantic import ValidationError
 
     from app.schemas.course import CourseRequestSchema, CourseSchema
-    from app.services.course_routing import valid_route
+    from app.services.course_routing import is_unknown_route, usable_route
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -121,8 +121,10 @@ def validate_output(request: dict, result: dict) -> dict:
                 if route.type != 'none' or route.minutes not in {None, 0} or route.distance not in {None, 0}:
                     errors.append(f'{label}: invalid final route')
             else:
-                if not valid_route(route):
+                if not usable_route(route):
                     errors.append(f'{label}: invalid route')
+                elif is_unknown_route(route):
+                    warnings.append(f'{label}: transfer unavailable; travel feasibility is unconfirmed')
         if food_stops < 2:
             warnings.append(f'{prefix}: {food_stops} FOOD stops; review meal coverage using internal provider categories')
     for trace in result.get('local_traces', []):

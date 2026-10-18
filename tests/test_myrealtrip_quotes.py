@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+from dataclasses import replace
 from datetime import date
 
 import httpx
@@ -495,3 +496,183 @@ async def test_flight_uses_matching_item_total_and_ignores_cheaper_unrelated_sum
             MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
         result = await provider.quote(trip(days=1))
     assert result.flight.status == 'available' and result.flight.amount_krw == 375000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('country,city', [('Japan', 'Tokyo'), ('Japon', '東京')])
+async def test_lodging_region_accepts_verified_geographic_names_across_input_languages(country, city):
+    """MRT's Korean region still matches the already verified real destination."""
+    async def detail(arguments):
+        return stay_detail(arguments)
+
+    request = replace(trip(flight_required=False), country=country, city=city,
+                      verified_country_name='일본', verified_city_name='도쿄')
+    async with httpx.AsyncClient(transport=lodging_transport(detail)) as client, \
+            MyRealTripQuoteProvider(client) as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'available' and result.lodging.amount_krw == 475374
+    assert result.complete
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('country,city', [('미국', '도쿄'), ('일본', '오사카'), ('일본', '도쿄 근교')])
+async def test_verified_region_names_never_accept_same_name_abroad_or_a_different_city(country, city):
+    async def detail(arguments):
+        data = stay_detail(arguments)
+        data['property']['region'].update(country=country, city=city)
+        return data
+
+    request = replace(trip(flight_required=False), country='Japan', city='Tokyo',
+                      verified_country_name='일본', verified_city_name='도쿄')
+    async with httpx.AsyncClient(transport=lodging_transport(detail)) as client, \
+            MyRealTripQuoteProvider(client) as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
+    assert result.lodging.reason == 'unverified_property_region'
+
+
+@pytest.mark.asyncio
+async def test_missing_verified_names_preserves_exact_region_validation():
+    async def detail(arguments):
+        return stay_detail(arguments)
+
+    request = replace(trip(flight_required=False), country='Japan', city='Tokyo')
+    async with httpx.AsyncClient(transport=lodging_transport(detail)) as client, \
+            MyRealTripQuoteProvider(client) as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
+    assert result.lodging.reason == 'unverified_property_region'
+
+
+@pytest.mark.parametrize('field,value', [('verified_country_name', ''), ('verified_city_name', ' '),
+                                        ('verified_country_name', True), ('verified_city_name', 123)])
+def test_quote_request_rejects_invalid_verified_region_names(field, value):
+    with pytest.raises(ValueError, match='verified quote destination'):
+        replace(trip(), **{field: value})
+
+
+def supplier_city(*, identifier=2734, name='도쿄', english='Tokyo', country='일본', kind='CITY'):
+    return {'regionId': identifier, 'name': name, 'enName': english, 'subName': country, 'type': kind}
+
+
+def lodging_region_transport(regions, calls, *, make_detail=None, gids=(5008360, 5008361), status=200):
+    async def default_detail(arguments):
+        return stay_detail(arguments)
+
+    mcp_transport = lodging_transport(make_detail or default_detail, gids=gids)
+
+    async def transport(request):
+        if request.url.host == 'partner-ext-api.myrealtrip.com':
+            calls.append(request)
+            return httpx.Response(status, json={'data': {'regions': regions}, 'result': {'status': 200}})
+        return await mcp_transport.handle_async_request(request)
+
+    return httpx.MockTransport(transport)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('city', ['Tokyo', '東京'])
+async def test_live_region_id_bridges_english_verified_city_to_korean_stay_name_once(city):
+    calls = []
+    request = replace(trip(flight_required=False), country='Japan', city=city,
+                      verified_country_name='일본', verified_city_name='Tokyo')
+    async with httpx.AsyncClient(transport=lodging_region_transport([supplier_city()], calls)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-region-key') as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'available' and result.lodging.amount_krw == 475374
+    assert len(calls) == 1  # Two concurrent details share the actual provider lookup.
+    assert str(calls[0].url) == PARTNER_BASE_URL + '/v1/products/accommodation/region-autocomplete'
+    assert calls[0].headers['Authorization'] == 'Bearer offline-region-key'
+    assert json.loads(calls[0].content) == {'keyword': 'Tokyo', 'isDomestic': False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('regions', [
+    [supplier_city(country='미국')],
+    [supplier_city(country='일본 근교')],
+    [supplier_city(english='Osaka')],
+    [supplier_city(kind='NEIGHBORHOOD')],
+    [supplier_city(identifier=True)],
+    [supplier_city(identifier=0)],
+    [supplier_city(), supplier_city(identifier=2735)],
+    [],
+])
+async def test_lodging_name_bridge_rejects_wrong_country_city_type_id_and_ambiguity(regions):
+    calls = []
+    request = replace(trip(flight_required=False), country='Japan', city='東京',
+                      verified_country_name='일본', verified_city_name='Tokyo')
+    async with httpx.AsyncClient(transport=lodging_region_transport(regions, calls)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key') as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
+    assert result.lodging.reason == 'unverified_property_region'
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_region_bridge_accepts_exact_last_country_component_and_duplicate_same_identity():
+    calls = []
+    region = supplier_city(country='간토, 일본')
+    request = replace(trip(flight_required=False), country='Japan', city='Tokyo',
+                      verified_country_name='일본', verified_city_name='Tokyo')
+    async with httpx.AsyncClient(transport=lodging_region_transport([region, dict(region)], calls)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key') as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'available' and result.lodging.amount_krw == 475374
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('key,country_name', [('', '일본'), ('offline-key', None)])
+async def test_region_bridge_without_key_or_verified_country_retains_strict_unknown_quote(key, country_name):
+    calls = []
+    request = replace(trip(flight_required=False), country='Japan', city='Tokyo',
+                      verified_country_name=country_name, verified_city_name='Tokyo')
+    async with httpx.AsyncClient(transport=lodging_region_transport([supplier_city()], calls)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key=key) as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
+    assert result.lodging.reason == 'unverified_property_region'
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_matching_stay_needs_no_region_bridge_even_with_key_configured():
+    calls = []
+    request = replace(trip(flight_required=False), verified_country_name='일본', verified_city_name='Tokyo')
+    async with httpx.AsyncClient(transport=lodging_region_transport([], calls, status=503)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key') as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'available' and result.lodging.amount_krw == 475374
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_optional_region_outage_is_not_retried_per_hotel_or_fabricated_as_a_quote():
+    calls = []
+    request = replace(trip(flight_required=False), country='Japan', city='Tokyo',
+                      verified_country_name='일본', verified_city_name='Tokyo')
+    async with httpx.AsyncClient(transport=lodging_region_transport([], calls, status=503)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key') as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
+    assert result.lodging.reason == 'unverified_property_region'
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_verified_name_bridge_cannot_override_domestic_or_overseas_identity():
+    calls = []
+
+    async def detail(arguments):
+        data = stay_detail(arguments)
+        data['property']['region']['isDomestic'] = True
+        return data
+
+    request = replace(trip(flight_required=False), country='Japan', city='Tokyo',
+                      verified_country_name='일본', verified_city_name='Tokyo')
+    async with httpx.AsyncClient(transport=lodging_region_transport([supplier_city()], calls, make_detail=detail)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key') as provider:
+        result = await provider.quote(request)
+    assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
+    assert result.lodging.reason == 'unverified_property_region'

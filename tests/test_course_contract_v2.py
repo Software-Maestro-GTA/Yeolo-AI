@@ -1,5 +1,6 @@
 """Exercise compact API output, optional quote totals and bounded lazy lookups."""
 
+from dataclasses import replace
 from datetime import date
 from unittest.mock import AsyncMock
 
@@ -62,6 +63,10 @@ async def test_real_graph_includes_known_travel_prices_and_keeps_over_budget_cou
     request_data, graph_dependencies, mocker, lodging_available,
 ):
     provider, history, llm, draft, places = graph_dependencies
+    provider.resolve_destination.return_value = replace(
+        provider.resolve_destination.return_value,
+        verified_country_name='대한민국', verified_city_name='Seoul',
+    )
     add_second_day(request_data, draft, places)
     request_data.tripCondition.budget = 20000
     provider.route.return_value.cost = 1800
@@ -96,6 +101,7 @@ async def test_real_graph_includes_known_travel_prices_and_keeps_over_budget_cou
     quotes.quote.assert_awaited_once()
     quoted = quotes.quote.await_args.args[0]
     assert (quoted.country_code, quoted.city) == ('KR', '서울')
+    assert (quoted.verified_country_name, quoted.verified_city_name) == ('대한민국', 'Seoul')
     assert (quoted.start_date, quoted.end_date) == (date(2026, 10, 5), date(2026, 10, 6))
     assert provider.route.await_count == 8
     llm.assert_awaited_once()
@@ -154,13 +160,23 @@ async def test_deferred_real_candidates_restore_failed_day_before_another_llm_ca
         if 'finalize_course' in update:
             final = update['finalize_course']['course']
     assert final is not None
-    assert stages.count('expand_places') == 1, (stages, query_counts)
-    assert query_counts == [11, 13]  # First day six plus second day five; expand only two.
+    if failure == 'invalid_place':
+        assert stages.count('expand_places') == 1, (stages, query_counts)
+        assert query_counts == [11, 13]  # Invalid venue facts still require replacements.
+        assert not any(stop.place.placeName in failed_names for stop in final.itinerary.days[0].stops)
+        assert all(stop.transportToNext.minutes == 12
+                   for day in final.itinerary.days for stop in day.stops[:-1])
+    else:
+        assert stages.count('expand_places') == 0 and query_counts == [11]
+        unknown = [stop.transportToNext for stop in final.itinerary.days[0].stops[:-1]
+                   if stop.transportToNext.type == 'unknown']
+        assert unknown and all(route.distance is route.minutes is route.memo is None for route in unknown)
+        assert any(stop.place.placeName in failed_names for stop in final.itinerary.days[0].stops)
+        assert all(stop.transportToNext.minutes == 12 for stop in final.itinerary.days[1].stops[:-1])
     assert all(len(day.stops) >= 5 for day in final.itinerary.days)
-    assert not any(stop.place.placeName in failed_names for stop in final.itinerary.days[0].stops)
     ids = [stop.place.placeId for day in final.itinerary.days for stop in day.stops]
     assert len(ids) == len(set(ids))
-    assert all(stop.transportToNext.type != 'none' and stop.transportToNext.minutes == 12
+    assert all(stop.transportToNext.type != 'none'
                for day in final.itinerary.days for stop in day.stops[:-1])
     llm.assert_awaited_once()
 

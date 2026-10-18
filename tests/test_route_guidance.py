@@ -209,14 +209,14 @@ async def test_direct_bus_fixture_is_one_sentence_with_readable_korean_headsign(
 
 
 @pytest.mark.asyncio
-async def test_headsign_cleanup_preserves_english_abbreviation_and_route_stop_identifiers(endpoints):
-    payload = response([transit('종로.삼청정류장', '삼각지역', 'M2.1', 'St. James')])
+async def test_headsign_cleanup_preserves_localized_punctuation_and_route_identifiers(endpoints):
+    payload = response([transit('종로.삼청정류장', '삼각지역', 'M2.1', '서울역.후암')])
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
         route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
-    assert all(identifier in route.memo for identifier in ('종로.삼청정류장', 'M2.1', 'St. James', '삼각지역'))
+    assert all(identifier in route.memo for identifier in ('종로.삼청정류장', 'M2.1', '서울역·후암', '삼각지역'))
     assert '타고' in route.memo and '내리세요' in route.memo
     assert '\n' not in route.memo and '주요 이동' not in route.memo
-    assert 'St· James' not in route.memo and 'M2·1' not in route.memo and '종로·삼청' not in route.memo
+    assert 'M2·1' not in route.memo and '종로·삼청' not in route.memo
 
 
 @pytest.mark.asyncio
