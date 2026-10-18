@@ -1,0 +1,217 @@
+$kind: http-request
+name: 코스 생성 - tasteProfile 2박 3일
+url: "{{baseUrl}}/internal/ai/courses"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: text/event-stream
+  Accept-Language: "{{language}}"
+  X-Internal-Api-Key: "{{internalApiKey}}"
+body:
+  type: json
+  content: |-
+    {
+      "userId": "{{userId}}",
+      "language": "{{language}}",
+      "mbti": null,
+      "tasteProfile": {
+        "travelPurpose": {
+          "relaxation": 4,
+          "sightseeing": 3,
+          "culturalExperience": 3,
+          "gourmet": 5,
+          "natureExploration": 4,
+          "activity": 3,
+          "shopping": 3,
+          "festivalEvent": 3,
+          "wellness": 3,
+          "selfDevelopment": 3
+        },
+        "preferredLocationType": {
+          "bigCity": 3,
+          "smallTownAlley": 3,
+          "natureHinterland": 3,
+          "beachResort": 5,
+          "mountainPlateau": 3,
+          "historicalCity": 3,
+          "themeParkResort": 3,
+          "famousSpotPreferred": 3,
+          "hiddenSpotPreferred": 4
+        },
+        "activityPreference": {
+          "viewing": 3,
+          "experience": 3,
+          "adventure": 3,
+          "photographyVideo": 4,
+          "gourmetExploration": 5,
+          "nightlife": 3,
+          "shopping": 3,
+          "relaxation": 4,
+          "localInteraction": 3
+        },
+        "foodPreference": {
+          "localFoodActive": 5,
+          "famousRestaurantCentered": 3,
+          "streetFood": 4,
+          "cafeDessert": 4,
+          "fineDining": 3,
+          "familiarFoodPreferred": 3,
+          "dietaryRestriction": 3,
+          "sightseeingOverFood": 3
+        },
+        "travelPaceDensity": "balanced",
+        "spendingTendency": "moderate",
+        "companionType": "solo",
+        "seasonalEnvironmentPreference": [
+          "warm_region"
+        ]
+      },
+      "tripCondition": {
+        "destinationCountry": "{{destinationCountry}}",
+        "destinationCity": "{{destinationCity}}",
+        "startDate": "{{resolvedStartDate}}",
+        "totalDays": {{totalDays}},
+        "budget": {{budget}}
+      }
+    }
+scripts:
+  - type: beforeRequest
+    code: |-
+      const key = pm.variables.get("internalApiKey");
+      if (!key || /^\{\{/.test(key)) {
+        throw new Error("Postman 환경/로컬 변수 internalApiKey에 AI 서버의 내부 API 키를 설정하세요.");
+      }
+      const date = new Date();
+      date.setUTCDate(date.getUTCDate() + 30);
+      pm.variables.set("resolvedStartDate", pm.variables.get("startDate") || date.toISOString().slice(0, 10));
+      // Remove only a trailing slash; preserve an optional deployment base path.
+      pm.variables.set("baseUrl", String(pm.variables.get("baseUrl")).replace(/\/+$/, ""));
+    language: text/javascript
+  - type: afterResponse
+    code: |-
+      // SSE is not a single JSON document. Ignore heartbeat comments and join data lines.
+      const events = [];
+      let parseError = null;
+      try {
+        for (const frame of pm.response.text().replace(/^\uFEFF/, "").split(/\r?\n\r?\n/)) {
+          let name = "message";
+          const data = [];
+          for (const line of frame.split(/\r?\n/)) {
+            if (line.startsWith("event:")) name = line.slice(6).trim();
+            if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+          }
+          if (data.length) events.push({name, data: JSON.parse(data.join("\n"))});
+        }
+      } catch (error) { parseError = error; }
+      pm.test("HTTP 200", () => pm.response.to.have.status(200));
+      pm.test("Content-Type is SSE", () => {
+        pm.expect(pm.response.headers.get("Content-Type") || "").to.match(/^text\/event-stream\b/i);
+      });
+      pm.test("SSE data is JSON with only progress/complete events", () => {
+        pm.expect(parseError && parseError.message).to.equal(null);
+        pm.expect(events.length).to.be.above(0);
+        for (const event of events) pm.expect(event.name).to.be.oneOf(["progress", "complete"]);
+      });
+      const progress = events.filter(event => event.name === "progress");
+      pm.test("Progress keeps the GENERATING_ROUTE contract", () => {
+        pm.expect(progress.length).to.be.above(0);
+        for (const event of progress) {
+          pm.expect(event.data).to.have.all.keys("step", "message");
+          pm.expect(event.data.step).to.equal("GENERATING_ROUTE");
+          pm.expect(event.data.message).to.be.a("string").and.match(/\S/);
+        }
+      });
+      const complete = events.filter(event => event.name === "complete");
+      pm.test("Exactly one complete event ends the stream", () => {
+        pm.expect(complete.length, "HTTP 200 alone is not generation success").to.equal(1);
+        pm.expect(events[events.length - 1].name).to.equal("complete");
+      });
+      if (complete.length === 1) {
+        const payload = complete[0].data;
+        const requested = JSON.parse(pm.variables.replaceIn(pm.request.body.raw));
+        const object = properties => ({type: "object", required: Object.keys(properties), additionalProperties: false, properties});
+        const text = {type: "string", minLength: 1, pattern: "\\S"};
+        const integer = {type: "integer", minimum: 0};
+        const date = {type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$"};
+        const route = object({
+          type: {enum: ["walking", "transit", "driving", "taxi", "unknown", "none"]},
+          distance: {type: ["number", "null"], minimum: 0},
+          minutes: {type: ["integer", "null"], minimum: 0},
+          memo: {type: ["string", "null"], maxLength: 240}
+        });
+        const place = object({
+          placeId: {type: "string", minLength: 1, pattern: "^(?!places/).+"}, placeName: text,
+          category: {enum: ["FOOD", "CAFE", "SPOT", "CULTURE", "NATURE", "ACTIVITY", "NIGHTLIFE"]},
+          latitude: {type: "number", minimum: -90, maximum: 90},
+          longitude: {type: "number", minimum: -180, maximum: 180}
+        });
+        const stop = object({sequence: {type: "integer", minimum: 1}, stayMinutes: {type: "integer", minimum: 1},
+                             memo: text, reason: text, cost: integer, place, transportToNext: route});
+        const day = object({day: {type: "integer", minimum: 1}, date, stops: {type: "array", minItems: 1, items: stop}});
+        const schema = object({course: object({title: text, destinationCountry: text, destinationCity: text,
+          startDate: date, totalDays: {type: "integer", minimum: 1}, totalCost: integer,
+          tags: {type: "array", items: text}, itinerary: object({days: {type: "array", minItems: 1, items: day}})})});
+        pm.test("Complete follows API-AI-2 (compact fields/category/coordinates)", () => pm.expect(payload).to.have.jsonSchema(schema));
+        const course = payload.course;
+        if (course && course.itinerary && Array.isArray(course.itinerary.days)) {
+          const days = course.itinerary.days;
+          const stops = days.flatMap(day => Array.isArray(day.stops) ? day.stops : []);
+          pm.test("Destination and start date match the request", () => {
+            for (const key of ["destinationCountry", "destinationCity", "startDate"]) {
+              pm.expect(course[key], key).to.equal(requested.tripCondition[key]);
+            }
+          });
+          pm.test("Requested duration and day count are preserved", () => {
+            pm.expect(course.totalDays).to.equal(requested.tripCondition.totalDays);
+            pm.expect(days.length).to.equal(requested.tripCondition.totalDays);
+          });
+          pm.test("Days and dates are consecutive", () => {
+            days.forEach((day, i) => {
+              const date = new Date(requested.tripCondition.startDate + "T00:00:00Z");
+              date.setUTCDate(date.getUTCDate() + i);
+              pm.expect(day.day).to.equal(i + 1);
+              pm.expect(day.date).to.equal(date.toISOString().slice(0, 10));
+            });
+          });
+          pm.test("Each day has at least five stops", () => {
+            days.forEach(day => pm.expect(day.stops.length, "day " + day.day).to.be.at.least(5));
+          });
+          pm.test("Visit sequence starts at one and has no gaps", () => {
+            days.forEach(day => day.stops.forEach((stop, i) => pm.expect(stop.sequence).to.equal(i + 1)));
+          });
+          pm.test("No duplicate place IDs, including across days", () => {
+            const ids = stops.map(stop => stop.place.placeId.replace(/^places\//, ""));
+            pm.expect(new Set(ids).size).to.equal(ids.length);
+          });
+          pm.test("Unknown transfers keep null metrics and memo", () => {
+            stops.filter(stop => stop.transportToNext.type === "unknown").forEach(stop => {
+              pm.expect(stop.transportToNext).to.deep.equal({type: "unknown", distance: null, minutes: null, memo: null});
+            });
+          });
+          pm.test("Only the final stop has none (zero distance/time, null memo)", () => {
+            days.forEach(day => day.stops.forEach((stop, i) => {
+              const route = stop.transportToNext;
+              if (i === day.stops.length - 1) {
+                pm.expect(route).to.deep.equal({type: "none", distance: 0, minutes: 0, memo: null});
+              } else pm.expect(route.type).not.to.equal("none");
+            }));
+          });
+          pm.test("Known transfers have measured distance and time", () => {
+            stops.filter(stop => !["unknown", "none"].includes(stop.transportToNext.type)).forEach(stop => {
+              pm.expect(stop.transportToNext.distance).to.be.a("number").and.at.least(0);
+              pm.expect(stop.transportToNext.minutes).to.be.a("number").and.at.least(0);
+            });
+          });
+          pm.test("Route memos are single paragraphs", () => {
+            stops.forEach(stop => {
+              if (stop.transportToNext.memo !== null) pm.expect(stop.transportToNext.memo).not.to.match(/[\r\n]/);
+            });
+          });
+          pm.test("Total cost covers stop costs (over-budget courses are valid)", () => {
+            const cost = stops.reduce((total, stop) => total + stop.cost, 0);
+            pm.expect(course.totalCost).to.be.at.least(cost);
+          });
+        }
+      }
+    language: text/javascript
+order: 1000
