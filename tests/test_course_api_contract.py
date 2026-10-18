@@ -6,12 +6,14 @@ planning, history and public response serialization remain real.
 
 import json
 import math
+from collections import Counter
 from copy import deepcopy
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
+from app.agent.course_state import Candidate
 from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 from app.core.config import settings
 from app.main import app
@@ -101,24 +103,33 @@ def assert_complete_contract(payload):
             assert_number(place["longitude"])
             transfer = stop["transportToNext"]
             assert set(transfer) == {"type", "distance", "minutes", "memo"}
-            assert transfer["type"] in {"walking", "transit", "driving", "taxi", "none"}
+            assert transfer["type"] in {"walking", "transit", "driving", "taxi", "unknown", "none"}
+            if transfer["type"] == "unknown":
+                assert transfer["distance"] is transfer["minutes"] is None
             assert_number(transfer["distance"], nullable=True)
             assert_number(transfer["minutes"], nullable=True)
             assert transfer["memo"] is None or isinstance(transfer["memo"], str)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('route_failure,place_failure', [
+    (None, None), ('taxi_only', None), ('empty', None), ('503', None), ('malformed', None),
+    ('403', None), ('timeout', None), (None, 'stale_candidate'),
+    (None, 'malformed_candidate'), (None, 'wrong_id_candidate'),
+    (None, 'stale_destination'),
+])
 async def test_production_endpoint_graph_and_serializer_emit_exact_public_contract(
-    api_request, graph_dependencies, mocker,
+    api_request, graph_dependencies, mocker, route_failure, place_failure,
 ):
     """Exercise final serialization with real verified IDs, types and routes."""
     _, _, llm, draft, venues = graph_dependencies
     search_ids = {"대한민국": "country-KR", "서울, 대한민국": "city-Seoul"}
     records = {
         "country-KR": {"id": "country-KR", "types": ["country", "political"],
-                       "addressComponents": [{"shortText": "KR", "types": ["country"]}]},
+                       "addressComponents": [{"longText": "대한민국", "shortText": "KR", "types": ["country"]}]},
         "city-Seoul": {"id": "city-Seoul", "types": ["locality", "political"],
-                       "addressComponents": [{"shortText": "KR", "types": ["country"]}],
+                       "addressComponents": [{"longText": "대한민국", "shortText": "KR", "types": ["country"]},
+                                             {"longText": "Seoul", "types": ["locality"]}],
                        "viewport": {"low": {"latitude": 37.3, "longitude": 126.7},
                                     "high": {"latitude": 37.8, "longitude": 127.3}}},
     }
@@ -132,6 +143,9 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
             "addressComponents": [{"shortText": "KR", "types": ["country"]}],
             "location": {"latitude": place.latitude, "longitude": place.longitude},
         }
+    if place_failure and place_failure.endswith('_candidate'):
+        draft.days[0].candidates.append(Candidate(name='조회불가명소', stay_minutes=60))
+        search_ids['조회불가명소'] = 'unavailable-venue'
     calls = []
 
     def respond(outgoing):
@@ -140,16 +154,33 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
         if outgoing.url.path.endswith(":searchText"):
             assert mask == "places.id"
             query = json.loads(outgoing.content)["textQuery"]
+            if place_failure == 'stale_destination' and query == '대한민국':
+                return httpx.Response(200, json={'places': [{'id': 'country-KR'}, {'id': 'deleted-country'}]})
             return httpx.Response(200, json={"places": [{"id": search_ids[query]}]})
         if outgoing.method == "GET":
             fields = set(mask.split(","))
             assert fields <= {"id", "addressComponents", "formattedAddress", "location", "types", "viewport"}
             identifier = outgoing.url.path.rsplit("/", 1)[-1]
+            if identifier == 'deleted-country' or (identifier == 'unavailable-venue' and place_failure == 'stale_candidate'):
+                return httpx.Response(404, json={'error': {'code': 404}})
+            if identifier == 'unavailable-venue' and place_failure == 'malformed_candidate':
+                return httpx.Response(200, text='<html>invalid place</html>')
+            if identifier == 'unavailable-venue' and place_failure == 'wrong_id_candidate':
+                return httpx.Response(200, json={**records['city-Seoul'], 'id': 'unrelated-id'})
             return httpx.Response(200, json={key: value for key, value in records[identifier].items() if key in fields})
         assert outgoing.url.path.endswith(":computeRoutes")
         route = json.loads(outgoing.content)
         assert route["origin"]["placeId"] in records and route["destination"]["placeId"] in records
-        return httpx.Response(200, json={"routes": [{"duration": "720s", "distanceMeters": 700}]})
+        if route_failure == 'timeout':
+            raise httpx.ReadTimeout('offline route timeout', request=outgoing)
+        if route_failure in {'503', '403'}:
+            return httpx.Response(int(route_failure), json={'error': {'message': 'offline route failure'}})
+        if route_failure == 'malformed':
+            return httpx.Response(200, text='<html>unavailable</html>')
+        if route_failure == 'taxi_only' and route['travelMode'] != 'DRIVE':
+            return httpx.Response(200, json={'routes': []})
+        return httpx.Response(200, json={'routes': []} if route_failure == 'empty'
+                              else {"routes": [{"duration": "720s", "distanceMeters": 700}]})
 
     quote = mocker.patch.object(
         MyRealTripQuoteProvider, "quote", new_callable=AsyncMock,
@@ -189,14 +220,31 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
         venue.place.placeId.removeprefix("places/") for venue in venues.values()
     }
     assert [stop["sequence"] for stop in stops] == [1, 2, 3, 4, 5]
-    assert {stop["place"]["placeName"] for stop in stops} == {candidate.name for candidate in draft.days[0].candidates}
+    assert {stop["place"]["placeName"] for stop in stops} == set(venues)
     assert {stop["place"]["category"] for stop in stops} == {"SPOT", "FOOD"}
-    assert all(stop["transportToNext"]["minutes"] == 12 for stop in stops[:-1])
+    if route_failure and route_failure != 'taxi_only':
+        assert all(stop['transportToNext'] == {'type': 'unknown', 'distance': None, 'minutes': None, 'memo': None}
+                   for stop in stops[:-1])
+    else:
+        assert all(stop["transportToNext"]["minutes"] == 12 for stop in stops[:-1])
+        if route_failure == 'taxi_only':
+            assert all(stop['transportToNext']['type'] == 'taxi' for stop in stops[:-1])
     assert stops[-1]["transportToNext"] == {"type": "none", "distance": 0.0, "minutes": 0, "memo": None}
     llm.assert_awaited_once()
     quote.assert_awaited_once()
+    quoted = quote.await_args.args[0]
+    assert (quoted.verified_country_name, quoted.verified_city_name) == ('대한민국', 'Seoul')
     factory.assert_called_once()
-    assert len(calls) == 18  # 7 ID searches + 7 Essentials lookups + 4 routes.
+    if not route_failure and not place_failure:
+        assert len(calls) == 18  # 7 ID searches + 7 Essentials lookups + 4 routes.
+    assert any(call.url.path.endswith(':computeRoutes') for call in calls)
+    if route_failure in {'503', 'timeout'}:
+        # One exhausted provider lookup per mode, two HTTP attempts each.
+        # An outage must not be retried again for every edge or candidate plan.
+        modes = Counter(json.loads(call.content)['travelMode'] for call in calls if call.url.path.endswith(':computeRoutes'))
+        assert modes == {'TRANSIT': 2, 'WALK': 2, 'DRIVE': 2}
+    if route_failure == '403':
+        assert sum(call.url.path.endswith(':computeRoutes') for call in calls) == 1
 
 
 @pytest.mark.asyncio

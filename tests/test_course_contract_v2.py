@@ -160,13 +160,23 @@ async def test_deferred_real_candidates_restore_failed_day_before_another_llm_ca
         if 'finalize_course' in update:
             final = update['finalize_course']['course']
     assert final is not None
-    assert stages.count('expand_places') == 1, (stages, query_counts)
-    assert query_counts == [11, 13]  # First day six plus second day five; expand only two.
+    if failure == 'invalid_place':
+        assert stages.count('expand_places') == 1, (stages, query_counts)
+        assert query_counts == [11, 13]  # Invalid venue facts still require replacements.
+        assert not any(stop.place.placeName in failed_names for stop in final.itinerary.days[0].stops)
+        assert all(stop.transportToNext.minutes == 12
+                   for day in final.itinerary.days for stop in day.stops[:-1])
+    else:
+        assert stages.count('expand_places') == 0 and query_counts == [11]
+        unknown = [stop.transportToNext for stop in final.itinerary.days[0].stops[:-1]
+                   if stop.transportToNext.type == 'unknown']
+        assert unknown and all(route.distance is route.minutes is route.memo is None for route in unknown)
+        assert any(stop.place.placeName in failed_names for stop in final.itinerary.days[0].stops)
+        assert all(stop.transportToNext.minutes == 12 for stop in final.itinerary.days[1].stops[:-1])
     assert all(len(day.stops) >= 5 for day in final.itinerary.days)
-    assert not any(stop.place.placeName in failed_names for stop in final.itinerary.days[0].stops)
     ids = [stop.place.placeId for day in final.itinerary.days for stop in day.stops]
     assert len(ids) == len(set(ids))
-    assert all(stop.transportToNext.type != 'none' and stop.transportToNext.minutes == 12
+    assert all(stop.transportToNext.type != 'none'
                for day in final.itinerary.days for stop in day.stops[:-1])
     llm.assert_awaited_once()
 

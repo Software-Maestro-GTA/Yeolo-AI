@@ -714,12 +714,13 @@
       "TransportToNextSchema": {
         "properties": {
           "type": {
-            "description": "다음 장소까지 이동 수단",
+            "description": "다음 장소까지 이동 수단; unknown은 조회 미확보, none은 다음 이동 없음",
             "enum": [
               "walking",
               "transit",
               "driving",
               "taxi",
+              "unknown",
               "none"
             ],
             "title": "Type",
