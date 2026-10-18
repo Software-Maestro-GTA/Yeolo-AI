@@ -65,6 +65,90 @@ async def test_provider_uses_place_facts_from_http_response(place_payload):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('failure', [404, 410, 'malformed_json', 'non_object', 'wrong_id'])
+async def test_unusable_individual_detail_skips_to_next_verified_id_with_essentials(place_payload, failure):
+    from app.agent.course_state import Candidate
+    from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
+
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if request.method == 'POST':
+            return httpx.Response(200, json={'places': [{'id': 'unusable-hit'}, {'id': place_payload['id']}]})
+        assert set(request.headers['X-Goog-FieldMask'].split(',')) == {'id', 'formattedAddress', 'addressComponents', 'location', 'types'}
+        if request.url.path.endswith('/unusable-hit'):
+            if isinstance(failure, int):
+                return httpx.Response(failure, json={'error': {'message': 'private provider data'}})
+            if failure == 'malformed_json':
+                return httpx.Response(200, content=b'not json')
+            return httpx.Response(200, json=[] if failure == 'non_object' else {'id': 'different-hit'})
+        return place_response(request, place_payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        result = await provider.search(Candidate(name='서울 미술관'), Destination('KR', 37.3, 126.7, 37.8, 127.3))
+        metrics = provider.metrics.snapshot()
+    assert result.place.placeId == place_payload['id']
+    assert [request.url.path for request in calls] == ['/v1/places:searchText', '/v1/places/unusable-hit', f'/v1/places/{place_payload["id"]}']
+    assert set(metrics['skus']) == {'text_search_ids', 'place_details_essentials'}
+    assert metrics['skus']['place_details_essentials']['errors'] == 1
+
+
+@pytest.mark.asyncio
+async def test_deleted_localized_hit_allows_existing_english_name_fallback(place_payload):
+    from app.agent.course_state import Candidate
+    from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
+
+    queries, detail_ids = [], []
+
+    def respond(request):
+        if request.method == 'POST':
+            query = json.loads(request.content)['textQuery']
+            queries.append(query)
+            identifiers = ['deleted-hit'] if query == '서울 미술관' else ['deleted-hit', place_payload['id']]
+            return httpx.Response(200, json={'places': [{'id': identifier} for identifier in identifiers]})
+        identifier = request.url.path.rsplit('/', 1)[-1]
+        detail_ids.append(identifier)
+        return httpx.Response(404, json={'error': {}}) if identifier == 'deleted-hit' else place_response(request, place_payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        result = await provider.search(Candidate(name='서울 미술관', english_name='Seoul Museum'), Destination('KR', 37.3, 126.7, 37.8, 127.3))
+    assert result.place.placeId == place_payload['id']
+    assert queries == ['서울 미술관', 'Seoul Museum']
+    assert detail_ids == ['deleted-hit', place_payload['id']]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('status', 'kind', 'detail_requests'), [(400, 'invalid', 1), (401, 'unauthorized', 1), (403, 'unauthorized', 1), (503, 'transient', 2)])
+async def test_global_detail_failure_is_not_hidden_by_other_hit_or_language(place_payload, status, kind, detail_requests):
+    from app.agent.course_state import Candidate
+    from app.agent.tools.verified_maps import (
+        Destination,
+        MapsProviderError,
+        VerifiedMapsProvider,
+    )
+
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if request.method == 'POST':
+            return httpx.Response(200, json={'places': [{'id': 'first-hit'}, {'id': place_payload['id']}]})
+        return httpx.Response(status, json={'error': {'message': 'private provider data'}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='private-test-key')
+        with pytest.raises(MapsProviderError) as error:
+            await provider.search(Candidate(name='서울 미술관', english_name='Seoul Museum'), Destination('KR', 37.3, 126.7, 37.8, 127.3))
+    assert error.value.kind == kind and error.value.status_code == status
+    assert len(calls) == 1 + detail_requests
+    assert all(request.url.path.endswith('/first-hit') for request in calls[1:])
+    assert 'private' not in str(error.value)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('mutation', ['missing_id', 'out_of_bounds', 'wrong_country', 'nan', 'missing_address', 'bool_coordinate', 'missing_category', 'malformed_types', 'conflicting_country'])
 async def test_invalid_place_facts_are_rejected(place_payload, mutation):
     from app.agent.course_state import Candidate

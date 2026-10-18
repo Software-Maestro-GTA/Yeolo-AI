@@ -1,5 +1,6 @@
 """Exercise compact API output, optional quote totals and bounded lazy lookups."""
 
+from dataclasses import replace
 from datetime import date
 from unittest.mock import AsyncMock
 
@@ -62,6 +63,10 @@ async def test_real_graph_includes_known_travel_prices_and_keeps_over_budget_cou
     request_data, graph_dependencies, mocker, lodging_available,
 ):
     provider, history, llm, draft, places = graph_dependencies
+    provider.resolve_destination.return_value = replace(
+        provider.resolve_destination.return_value,
+        verified_country_name='대한민국', verified_city_name='Seoul',
+    )
     add_second_day(request_data, draft, places)
     request_data.tripCondition.budget = 20000
     provider.route.return_value.cost = 1800
@@ -96,6 +101,7 @@ async def test_real_graph_includes_known_travel_prices_and_keeps_over_budget_cou
     quotes.quote.assert_awaited_once()
     quoted = quotes.quote.await_args.args[0]
     assert (quoted.country_code, quoted.city) == ('KR', '서울')
+    assert (quoted.verified_country_name, quoted.verified_city_name) == ('대한민국', 'Seoul')
     assert (quoted.start_date, quoted.end_date) == (date(2026, 10, 5), date(2026, 10, 6))
     assert provider.route.await_count == 8
     llm.assert_awaited_once()

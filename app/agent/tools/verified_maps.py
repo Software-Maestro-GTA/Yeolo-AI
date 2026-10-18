@@ -38,12 +38,14 @@ class MapsProviderError(ValueError):
 
     Args:
         kind: Transient outage, authorization failure, invalid response/request,
-            or a valid response that supplies no route. ``route_data`` means
-            unusable route facts and permits safe alternatives, unlike config errors.
+            or a valid response that supplies no route. ``not_found`` identifies
+            a deleted detail ID; ``place_data`` identifies unusable detail facts.
+            These permit skipping a venue without hiding request/configuration
+            errors. ``route_data`` similarly permits safe route alternatives.
         status_code: HTTP status when available; provider text is never retained.
     """
 
-    def __init__(self, kind: Literal['transient', 'unauthorized', 'invalid', 'no_route', 'route_data'], status_code: int | None = None) -> None:
+    def __init__(self, kind: Literal['transient', 'unauthorized', 'invalid', 'not_found', 'place_data', 'no_route', 'route_data'], status_code: int | None = None) -> None:
         self.kind = kind
         self.status_code = status_code
         super().__init__(f'Maps provider {kind} failure')
@@ -100,7 +102,7 @@ def _cacheable_response(data: dict, url: str) -> bool:
             return False
         return bool(places)
     if url.startswith('https://places.googleapis.com/v1/places/') and data.get('id') != url.rsplit('/', 1)[-1]:
-        raise MapsProviderError('invalid')
+        raise MapsProviderError('place_data')
     return bool(data)
 
 
@@ -114,6 +116,8 @@ class Destination:
     north: float
     east: float
     place_id: str = ''
+    verified_country_name: str = ''
+    verified_city_name: str = ''
 
     def contains(self, latitude: float, longitude: float) -> bool:
         """Check a point, including viewports that cross the date line."""
@@ -191,6 +195,31 @@ def _destination_country_code(raw: dict) -> str | None:
             return None
         codes.add(code)
     return next(iter(codes)) if len(codes) == 1 else None
+
+
+def _destination_component_name(raw: dict, geographic_types: set[str]) -> str:
+    """Keep a single supplied administrative name for cross-provider matching.
+
+    Args:
+        raw: Existing Essentials geographic detail response in a requested locale.
+        geographic_types: Entity types whose own address component may name it.
+    Returns:
+        The one matching nonblank ``longText``, or an empty string when missing
+        or ambiguous. No display-name lookup, translation, or alias is invented.
+    """
+    components = raw.get('addressComponents', [])
+    if not isinstance(components, list):
+        return ''
+    names = set()
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        types, name = component.get('types', []), component.get('longText')
+        if isinstance(types, list) and all(isinstance(kind, str) for kind in types) and geographic_types.intersection(types) and isinstance(name, str):
+            cleaned = _destination_query(name)
+            if cleaned:
+                names.add(cleaned)
+    return next(iter(names)) if len(names) == 1 else ''
 
 
 def _destination_bounds(raw: dict) -> tuple[float, float, float, float] | None:
@@ -381,6 +410,8 @@ class VerifiedMapsProvider:
     async def _request(self, method: str, url: str, *, use_cache: bool = True, **kwargs: Any) -> dict:
         import json
         sku = classify_maps_sku(method, url, kwargs)
+        detail_request = method == 'GET' and url.startswith('https://places.googleapis.com/v1/places/')
+        data_error_kind = 'route_data' if url.endswith(':computeRoutes') else 'place_data' if detail_request else 'invalid'
         self.metrics.record_call(sku)
         key = json.dumps([method, url, kwargs], sort_keys=True) if use_cache else None
         lock = self.locks.setdefault(key, asyncio.Lock()) if use_cache else nullcontext()
@@ -401,18 +432,18 @@ class VerifiedMapsProvider:
                             raise MapsProviderError('unauthorized', status)
                         if status == 429 or 500 <= status <= 599:
                             raise MapsProviderError('transient', status)
+                        if detail_request and status in {404, 410}:
+                            raise MapsProviderError('not_found', status)
                         if status >= 400 or status < 200 or status >= 300:
                             raise MapsProviderError('invalid', status)
                         try:
                             data = response.json()
                         except ValueError:
-                            kind = 'route_data' if url.endswith(':computeRoutes') else 'invalid'
-                            raise MapsProviderError(kind, status) from None
+                            raise MapsProviderError(data_error_kind, status) from None
                         if isinstance(data, dict) and 'error' in data:
                             raise MapsProviderError('invalid', status)
                         if not isinstance(data, dict):
-                            kind = 'route_data' if url.endswith(':computeRoutes') else 'invalid'
-                            raise MapsProviderError(kind, status)
+                            raise MapsProviderError(data_error_kind, status)
                         cacheable = use_cache and _cacheable_response(data, url)
                 except asyncio.CancelledError:
                     if sent:
@@ -460,13 +491,20 @@ class VerifiedMapsProvider:
             headers={'X-Goog-Api-Key': self.api_key, 'X-Goog-FieldMask': DESTINATION_DETAIL_FIELDS if destination else PLACE_DETAIL_FIELDS},
             params={'languageCode': language or self.language})
         if data.get('id') != identifier:
-            raise MapsProviderError('invalid')
+            raise MapsProviderError('place_data')
         return data
 
-    async def _destination_records(self, query: str) -> dict:
-        """Join bounded geographic detail requests, including caller cancellation."""
+    async def _destination_records(self, query: str, *, language: str = 'ko') -> dict:
+        """Join geographic facts, excluding deleted IDs but preserving uncertainty.
+
+        A definitive missing ID cannot be the destination. Other failed detail
+        requests could conceal another valid entity, so their failures propagate
+        instead of making an incomplete response appear unambiguous.
+        """
         identifiers = await self._search_ids(query, language=self.language)
-        tasks = [asyncio.create_task(self._details(identifier, destination=True)) for identifier in identifiers]
+        # Reuse the existing country/city detail requests for Korean country and
+        # English city identifiers; venue/navigation language is unchanged.
+        tasks = [asyncio.create_task(self._details(identifier, destination=True, language=language)) for identifier in identifiers]
         try:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         finally:
@@ -477,12 +515,12 @@ class VerifiedMapsProvider:
         for result in results:
             if isinstance(result, asyncio.CancelledError):
                 raise result
-        failures = [result for result in results if isinstance(result, MapsProviderError)]
+        failures = [result for result in results if isinstance(result, MapsProviderError) and result.kind != 'not_found']
         if failures:
             raise min(failures, key=lambda failure: failure.transient)
-        if any(isinstance(result, BaseException) for result in results):
+        if any(isinstance(result, BaseException) and not isinstance(result, MapsProviderError) for result in results):
             raise MapsProviderError('invalid')
-        return {'places': results}
+        return {'places': [result for result in results if isinstance(result, dict)]}
 
     async def resolve_destination(self, country: str, city: str) -> Destination:
         """Resolve one real geographic entity using ID search and Essentials facts.
@@ -502,8 +540,13 @@ class VerifiedMapsProvider:
         country_query, city_query = _destination_query(country), _destination_query(city)
         if not country_query or not city_query:
             raise ValueError('Destination search text is empty')
-        tasks = [asyncio.create_task(self._destination_records(query))
-                 for query in (country_query, f'{city_query}, {country_query}')]
+        # Query whitespace cleanup cannot establish identical input intent.
+        same_input = unicodedata.normalize('NFKC', country).casefold().strip() == unicodedata.normalize('NFKC', city).casefold().strip()
+        # Country-as-city destinations can share one detail result as before;
+        # their Korean administrative name already matches the lodging locale.
+        city_language = 'ko' if same_input else 'en'
+        tasks = [asyncio.create_task(self._destination_records(query, language=language))
+                 for query, language in ((country_query, 'ko'), (f'{city_query}, {country_query}', city_language))]
         try:
             country_data, city_data = await asyncio.gather(*tasks, return_exceptions=True)
         finally:
@@ -522,16 +565,14 @@ class VerifiedMapsProvider:
         for result in results:
             if isinstance(result, BaseException):
                 raise MapsProviderError('invalid') from None
-        countries: list[tuple[str, str]] = []
+        countries: list[tuple[str, str, str]] = []
         for raw in country_data.get('places', []):
             identifier, code = _destination_id(raw), _destination_country_code(raw)
             if 'country' in _destination_types(raw) and identifier is not None and code is not None:
-                countries.append((identifier, code))
+                countries.append((identifier, code, _destination_component_name(raw, {'country'})))
         if len(countries) != 1:
             raise ValueError('Country could not be unambiguously verified')
-        country_id, expected = countries[0]
-        # Query whitespace cleanup cannot establish identical input intent.
-        same_input = unicodedata.normalize('NFKC', country).casefold().strip() == unicodedata.normalize('NFKC', city).casefold().strip()
+        country_id, expected, country_name = countries[0]
         geographic_types = {'locality', 'postal_town', 'administrative_area_level_1', 'administrative_area_level_2'}
         matches: list[Destination] = []
         for raw in city_data.get('places', []):
@@ -546,7 +587,8 @@ class VerifiedMapsProvider:
             bounds = _destination_bounds(raw)
             if bounds is None:
                 continue
-            matches.append(Destination(expected, *bounds, place_id=identifier))
+            city_name = _destination_component_name(raw, {'country'} if 'country' in types else types & geographic_types)
+            matches.append(Destination(expected, *bounds, place_id=identifier, verified_country_name=country_name, verified_city_name=city_name))
         if len(matches) != 1:
             raise ValueError('City could not be unambiguously verified')
         return matches[0]
@@ -560,8 +602,9 @@ class VerifiedMapsProvider:
         Returns:
             Verified provider ID/types/coordinates/address with the proposed name.
         Raises:
-            ValueError: At most five inspected IDs supplied no suitable venue.
-            MapsProviderError: Request, identity or authorization failure.
+            ValueError: At most five inspected IDs supplied no suitable venue,
+                including deleted IDs and unusable individual detail responses.
+            MapsProviderError: Global request, authorization, or outage failure.
 
         Multiple suitable results retain provider query order. Essentials cannot
         compare official names or verify operating status, so no Pro lookup or
@@ -581,7 +624,12 @@ class VerifiedMapsProvider:
                 if len(inspected) == MAX_SEARCH_IDS:
                     break
                 inspected.add(identifier)
-                raw = await self._details(identifier, language=language)
+                try:
+                    raw = await self._details(identifier, language=language)
+                except MapsProviderError as error:
+                    if error.kind not in {'not_found', 'place_data'}:
+                        raise
+                    continue
                 verified = _verified_place(raw, destination, candidate.meal, candidate)
                 if verified is not None:
                     return verified

@@ -98,6 +98,35 @@ async def test_actual_graph_verifies_and_schedules_before_complete(request_data,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('kind,status', [('not_found', 404), ('place_data', 200)])
+async def test_individual_place_error_preserves_complete_verified_peers(
+    request_data, graph_dependencies, kind, status,
+):
+    """A failed sixth proposal must not discard five feasible verified venues."""
+    from app.agent.course_graph import build_course_graph
+    from app.agent.course_state import Candidate
+    from app.agent.tools.verified_maps import MapsProviderError
+
+    provider, history, llm, draft, places = graph_dependencies
+    draft.days[0].candidates.append(Candidate(name='조회불가명소', stay_minutes=60))
+
+    def search(candidate, destination):
+        if candidate.name == '조회불가명소':
+            raise MapsProviderError(kind, status)
+        return places[candidate.name]
+
+    provider.search.side_effect = search
+    result = await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
+    stops = result['course'].itinerary.days[0].stops
+    assert len(stops) == 5
+    assert {stop.place.placeId for stop in stops} == {place.place.placeId for place in places.values()}
+    assert {stop.place.placeName for stop in stops if stop.cost} == {'점심식당', '저녁식당'}
+    assert provider.route.await_count == 4
+    llm.assert_awaited_once()
+
+
+
+@pytest.mark.asyncio
 async def test_missing_verified_route_cannot_produce_course(request_data, graph_dependencies):
     from app.agent.course_graph import build_course_graph
 

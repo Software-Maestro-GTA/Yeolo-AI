@@ -50,7 +50,7 @@ def forbid_live_http(mocker):
 @pytest.fixture(autouse=True)
 def offline_trip_quotes(request, mocker):
     """Use unknown quotes for graph tests; provider wire tests keep the real client."""
-    if request.module.__name__.endswith('test_myrealtrip_quotes'):
+    if request.module.__name__.endswith(('test_myrealtrip_quotes', 'test_myrealtrip_airports')):
         return
     from app.services.myrealtrip_quotes import (
         MyRealTripQuoteProvider,

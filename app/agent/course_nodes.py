@@ -201,6 +201,8 @@ class CourseGraphNodes:
                     city=trip.destinationCity,
                     start_date=start,
                     end_date=start + timedelta(days=trip.totalDays - 1),
+                    verified_country_name=state["destination"].verified_country_name or None,
+                    verified_city_name=state["destination"].verified_city_name or None,
                 )
             )
         except Exception:  # noqa: BLE001 - optional quotes must not discard a verified itinerary; cancellation propagates
@@ -349,6 +351,14 @@ class CourseGraphNodes:
                 "invalid",
             }:
                 raise venue
+            if isinstance(venue, MapsProviderError) and venue.kind in {
+                "not_found",
+                "place_data",
+            }:
+                # One stale or malformed place must not discard verified peers.
+                # Keep it out of the success cache; deferred venues can replace it.
+                logger.info("Course candidate unavailable: kind=%s", venue.kind)
+                continue
             if isinstance(venue, VerifiedPlace):
                 venue.place.placeId = (
                     ("places/" + _canonical_id(venue.place.placeId))
