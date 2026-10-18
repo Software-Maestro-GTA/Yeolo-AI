@@ -2,6 +2,7 @@
 
 import html
 import re
+import unicodedata
 from typing import Any
 
 ROUTE_METRIC_FIELDS = frozenset({'routes.duration', 'routes.distanceMeters'})
@@ -32,6 +33,95 @@ def _clean(value: Any) -> str:
 
 def _mapping(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
+
+
+def guidance_matches_language(value: str, language: str, *, allow_line_codes: bool = False) -> bool:
+    """Reject incompatible writing systems without translating navigation facts.
+
+    Args:
+        value: Complete supplied or formatted navigation text.
+        language: Requested BCP 47 locale.
+        allow_line_codes: Permit short uppercase identifiers in transit copy.
+    Returns:
+        Whether supported copy uses its expected script. Transit line codes
+        and measured units remain valid identifiers. This is a script guard,
+        not a language classifier for
+        languages that share the same writing system.
+    """
+    text = unicodedata.normalize('NFKC', _clean(value))
+    base = language.split('-', 1)[0].lower()
+    latin_languages = {'en', 'fr', 'es', 'de', 'pt'}
+    if base not in {'ko', 'ja', 'zh'} | latin_languages:
+        # Preserve the previous localization safeguard for other locales.
+        return bool(text) and not any('HANGUL' in unicodedata.name(char, '') for char in text)
+    # Keep identifiers such as JR, MRT, G09 and M2.1, never transliterate names.
+    tokens = re.findall(r'[A-Za-z][A-Za-z0-9]*(?:[./-][A-Za-z0-9]+)*', text) if allow_line_codes else []
+    for token in set(tokens):
+        if re.fullmatch(r'[A-Z]{1,3}|[A-Z][A-Z0-9./-]*\d[A-Z0-9./-]*', token) and len(token) <= 16:
+            text = re.sub(r'(?<![A-Za-z0-9])' + re.escape(token) + r'(?![A-Za-z0-9])', '', text)
+    text = re.sub(r'(?<=\d)\s*(?:km|m)(?![A-Za-z])', '', text)
+    letters = [unicodedata.name(char, '') for char in text if unicodedata.category(char).startswith('L')]
+    if not letters:
+        return False
+    allowed = {
+        'ko': ('HANGUL',),
+        'ja': ('HIRAGANA', 'KATAKANA', 'CJK UNIFIED IDEOGRAPH', 'CJK COMPATIBILITY IDEOGRAPH', 'IDEOGRAPHIC'),
+        'zh': ('CJK UNIFIED IDEOGRAPH', 'CJK COMPATIBILITY IDEOGRAPH'),
+    }.get(base, ('LATIN',))
+    return all(name.startswith(allowed) for name in letters)
+
+
+def _line_code(raw: dict) -> str:
+    """Keep only a short, supplied line code when stop names are untranslated."""
+    line = _mapping(_mapping(raw.get('transitDetails')).get('transitLine'))
+    value = _clean(line.get('nameShort')) or _clean(line.get('name'))
+    if re.fullmatch(r'[A-Z0-9][A-Z0-9./-]{0,15}', value):
+        return value
+    return ''
+
+
+def _transit_code_guidance(legs: list, language: str) -> str | None:
+    """Keep every supplied transit line in order, with localized map guidance.
+
+    Missing or excessive connections return generic guidance, so a partial
+    list of lines is never presented as the complete transfer sequence.
+    """
+    fallback = fallback_route_guidance('transit', language)
+    codes = []
+    for leg in legs:
+        steps = _mapping(leg).get('steps')
+        if not isinstance(steps, list) or len(steps) > 120:
+            return fallback
+        for step in steps:
+            raw = _mapping(step)
+            if raw.get('travelMode') not in {'WALK', 'TRANSIT'}:
+                return fallback
+            if raw.get('travelMode') != 'TRANSIT':
+                continue
+            code = _line_code(raw)
+            if not code:
+                return fallback
+            codes.append(code)
+            if len(codes) > 3:
+                return fallback
+    if not codes:
+        return fallback
+    base = language.split('-', 1)[0].lower()
+    if base == 'ko':
+        labels = [f'{code}번' if code.isdecimal() else code for code in codes]
+        action = f'{labels[0]} 노선을 이용하세요.' if len(labels) == 1 else f'{" → ".join(labels)} 순서로 이용하세요.'
+        result = action + ' 승차·하차 위치와 행선지는 지도 앱의 대중교통 길찾기에서 확인하세요.'
+    elif base == 'en':
+        result = f'Take {" → ".join(codes)} in order. Check boarding and alighting stops and direction in your map app.'
+    elif base == 'ja':
+        result = f'{" → ".join(codes)}を順に利用してください。乗降場所と行き先は地図アプリの公共交通案内で確認してください。'
+    elif base == 'zh':
+        traditional = any(part in {'hant', 'tw', 'hk', 'mo'} for part in language.lower().split('-')[1:])
+        result = (f'依序搭乘{" → ".join(codes)}路線。請在地圖應用程式的大眾運輸導航中確認上下車站和方向。'
+                  if traditional else f'依次搭乘{" → ".join(codes)}线路。请在地图应用的公共交通导航中确认上下车站和方向。')
+    else:
+        return fallback
+    return result if len(result) <= MAX_MEMO_LENGTH else fallback
 
 
 def fallback_route_guidance(mode: str, language: str = 'ko') -> str | None:
@@ -91,12 +181,67 @@ def _sentence(instruction: str) -> str:
 def _object_particle(name: str) -> str:
     """Select the object particle for a complete displayed Korean line name."""
     last = ord(name[-1])
-    return '을' if 0xAC00 <= last <= 0xD7A3 and (last - 0xAC00) % 28 else '를'
+    return '을' if name[-1] in '013678LMNR' or 0xAC00 <= last <= 0xD7A3 and (last - 0xAC00) % 28 else '를'
 
 
 def _memo(actions: list[str]) -> str:
     """Connect complete chronological actions in one paragraph."""
     return ' '.join(actions)
+
+
+def navigation_source(data: dict) -> list[dict[str, str]]:
+    """Retain complete source actions before optional language filtering.
+
+    Args:
+        data: The same provider route response used for measured metrics.
+    Returns:
+        At most three chronological actions, including every transit connection.
+        Malformed or excessive connections return no optional source. Original
+        stop names, directions and walking instructions are never translated or
+        sliced here. The existing final-walk/approach selection is preserved.
+    """
+    routes = _mapping(data).get('routes')
+    legs = _mapping(routes[0]).get('legs') if isinstance(routes, list) and routes else None
+    if not isinstance(legs, list) or len(legs) > 20:
+        return []
+    actions = []
+    for leg in legs:
+        steps = _mapping(leg).get('steps')
+        if not isinstance(steps, list) or len(steps) > 120:
+            return []
+        for step in steps:
+            raw = _mapping(step)
+            if raw.get('travelMode') == 'TRANSIT':
+                details = _mapping(raw.get('transitDetails'))
+                stops = _mapping(details.get('stopDetails'))
+                line = _mapping(details.get('transitLine'))
+                action = {
+                    'kind': 'transit',
+                    'start': _clean(_mapping(stops.get('departureStop')).get('name')),
+                    'end': _clean(_mapping(stops.get('arrivalStop')).get('name')),
+                    'line': _clean(line.get('nameShort')) or _clean(line.get('name')),
+                    'direction': _clean(details.get('headsign')),
+                }
+                if not all(action[key] for key in ('start', 'end', 'line')):
+                    return []
+            elif raw.get('travelMode') in {'WALK', 'DRIVE', 'BICYCLE', 'TWO_WHEELER'}:
+                text = _clean(_mapping(raw.get('navigationInstruction')).get('instructions'))
+                if not text:
+                    continue
+                action = {'kind': 'instruction', 'text': text}
+            else:
+                return []
+            actions.append(action)
+    required = [i for i, action in enumerate(actions) if action['kind'] == 'transit']
+    if len(required) > 3:
+        return []
+    selected = set(required)
+    optional = [i for i in range(len(actions)) if i not in selected]
+    for index in ([optional[-1], optional[0]] + optional) if optional else []:
+        if len(selected) < 3:
+            selected.add(index)
+    result = [actions[i] for i in sorted(selected)]
+    return result if sum(len(value) for action in result for value in action.values()) <= 1800 else []
 
 
 def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | None:
@@ -105,12 +250,14 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
     Args:
         data: Already validated route response; optional steps may be malformed.
         mode: Existing transport type.
-        language: Requested language; non-Korean transit uses provider instructions.
+        language: Requested language; provider instructions must use its script.
     Returns:
         One paragraph of at most 240 characters and three complete action units.
         All transit connections must fit; otherwise a generic action is returned.
         No route fact is inferred and no identifier or instruction is sliced.
-        Unsupported languages without usable provider instructions return None.
+        Untranslated transit names use supplied line codes and localized map
+        guidance. Optional foreign walking prose is omitted. Unsupported locales
+        without usable provider instructions return None.
     """
     fallback = fallback_route_guidance(mode, language)
     routes = _mapping(data).get('routes')
@@ -126,6 +273,7 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
     # bounded parsing of such a response as a complete transit route.
     if len(legs) > 20:
         return fallback
+    language_fallback = _transit_code_guidance(legs, language) if mode == 'transit' else fallback
     for leg in legs[:20]:
         steps = _mapping(leg).get('steps')
         if not isinstance(steps, list):
@@ -145,6 +293,8 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
                 # language; never apply Korean sentence templates to foreign text.
                 if not instruction:
                     return fallback
+                if not guidance_matches_language(instruction, language, allow_line_codes=True):
+                    return language_fallback
                 transit_count += 1
                 if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
                     return fallback
@@ -159,6 +309,14 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
                 direction = _clean(supplied_direction)
                 if not all((start, end, line_name)) or (supplied_direction and not direction):
                     return fallback
+                if not guidance_matches_language(f'{start} {end} {line_name} {direction}', language, allow_line_codes=True):
+                    if instruction and guidance_matches_language(instruction, language, allow_line_codes=True):
+                        transit_count += 1
+                        if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
+                            return fallback
+                        parts.append((count, _sentence(instruction), True))
+                        continue
+                    return language_fallback
                 direction_label = ''
                 if direction:
                     direction = re.sub(r'(?<=[가-힣])\.(?=[가-힣])', '·', direction)
@@ -175,6 +333,10 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
                 transit_count += 1
                 if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
                     return fallback
+            if instruction and not guidance_matches_language(instruction, language, allow_line_codes=transit):
+                # Walking access is optional; never mix foreign prose into a
+                # complete boarding/transfer chain that is already readable.
+                instruction = ''
             if instruction:
                 parts.append((count, _sentence(instruction), transit))
             else:

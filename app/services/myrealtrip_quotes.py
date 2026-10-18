@@ -2,8 +2,9 @@
 
 The official contracts are published at https://docs.myrealtrip.com/llms-full.txt.
 Flight search uses the public MCP; authenticated partner airport autocomplete
-establishes destination airport identity. Lodging accepts the observed structured
-detail contract only when dates, guests, property region and an available room
+establishes destination airport identity without a local airport data snapshot.
+Lodging accepts the observed structured detail contract only when dates, guests,
+property region and an available room
 all match. Numeric room totals are never derived from nightly price strings.
 """
 
@@ -14,7 +15,7 @@ import math
 import re
 import unicodedata
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from itertools import count
 from typing import Any, Literal, Self
@@ -26,6 +27,7 @@ MCP_URL = 'https://mcp-servers.myrealtrip.com/mcp'
 PARTNER_BASE_URL = 'https://partner-ext-api.myrealtrip.com'
 PROTOCOL_VERSION = '2025-03-26'
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_AIRPORT_CANDIDATES = 3
 
 
 @dataclass(frozen=True)
@@ -39,8 +41,10 @@ class QuoteRequest:
         start_date: Departure/check-in date.
         end_date: Return/check-out date; start plus total days minus one.
         flight_required: False only when the caller explicitly excludes flying.
+        verified_country_name: Country name from verified geographic address components.
+        verified_city_name: City name from the same verified geographic response.
     Raises:
-        ValueError: Missing destination identity or inconsistent dates.
+        ValueError: Invalid destination identity, dates or verified region names.
     """
 
     country_code: str
@@ -49,12 +53,17 @@ class QuoteRequest:
     start_date: date
     end_date: date
     flight_required: bool = True
+    verified_country_name: str | None = None
+    verified_city_name: str | None = None
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r'[A-Z]{2}', self.country_code) or not self.city.strip():
             raise ValueError('Invalid quote destination')
         if self.end_date < self.start_date:
             raise ValueError('Invalid quote dates')
+        if any(value is not None and (not isinstance(value, str) or not value.strip())
+               for value in (self.verified_country_name, self.verified_city_name)):
+            raise ValueError('Invalid verified quote destination names')
 
 
 @dataclass(frozen=True)
@@ -167,8 +176,13 @@ def _lodging_amount(data: dict[str, Any], arguments: dict[str, Any], request: Qu
     region = property_data.get('region')
     if type(property_data.get('gid')) is not int or property_data['gid'] != arguments['gid'] or not isinstance(region, dict):
         raise QuoteUnavailable('price_not_verifiable')
-    if not all(isinstance(region.get(field), str) and _normalized(region[field]) == _normalized(expected)
-               for field, expected in (('country', request.country), ('city', request.city))):
+    # Canonical geographic names come from the already verified Essentials
+    # response, never from model translations, static aliases or fuzzy matching.
+    expected_names = (('country', request.country, request.verified_country_name),
+                      ('city', request.city, request.verified_city_name))
+    if not all(isinstance(region.get(field), str) and _normalized(region[field]) in
+               {_normalized(name) for name in (original, verified) if name}
+               for field, original, verified in expected_names):
         raise QuoteUnavailable('unverified_property_region')
     if type(region.get('isDomestic')) is not bool or region['isDomestic'] != (request.country_code == 'KR'):
         raise QuoteUnavailable('unverified_property_region')
@@ -255,7 +269,7 @@ class MyRealTripQuoteProvider:
 
     Args:
         client: Injected HTTP client; ownership stays with the caller.
-        partner_api_key: Partner REST key used only for airport autocomplete.
+        partner_api_key: Partner REST key for airport and optional lodging-region autocomplete.
         origin_airport: Explicit IATA departure airport under the service policy.
         adults: Explicit adult count, supplied to both flight and stay searches.
         children: Explicit child count, supplied to both searches.
@@ -302,6 +316,10 @@ class MyRealTripQuoteProvider:
         self._initialized = False
         self._session_id: str | None = None
         self._identifiers = count(1)
+        self._airport_cache: dict[str, list[dict[str, Any]]] = {}
+        self._airport_locks: dict[str, asyncio.Lock] = {}
+        self._region_cache: dict[tuple[str, str], str | None] = {}
+        self._region_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     async def __aenter__(self) -> Self:
         return self
@@ -316,6 +334,10 @@ class MyRealTripQuoteProvider:
         finally:
             self._session_id = None
             self._initialized = False
+            self._airport_cache.clear()
+            self._airport_locks.clear()
+            self._region_cache.clear()
+            self._region_locks.clear()
             if self.owns_client:
                 try:
                     await self.client.aclose()
@@ -365,19 +387,27 @@ class MyRealTripQuoteProvider:
         await self._initialize()
         return _tool_data(await self._rpc('tools/call', {'name': name, 'arguments': arguments}))
 
-    async def _airports(self, request: QuoteRequest) -> list[str]:
+    async def _lookup_airports(self, keyword: str) -> list[dict[str, Any]]:
+        """Reuse successful request-local lookups; coalesce concurrent keywords."""
         if not self.partner_api_key:
             raise QuoteUnavailable('missing_partner_key')
-        response = await self.client.post(f'{self.partner_base_url}/v1/products/flight/airport-autocomplete',
-            headers={'Authorization': f'Bearer {self.partner_api_key}'},
-            json={'keyword': request.city, 'size': 20}, timeout=self.timeout_seconds)
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict) or payload.get('result', {}).get('status') != 200:
-            raise QuoteUnavailable('invalid_response')
-        airports = payload.get('data', {}).get('airports', [])
-        if not isinstance(airports, list):
-            raise QuoteUnavailable('invalid_response')
+        key = unicodedata.normalize('NFKC', keyword).strip().casefold()
+        async with self._airport_locks.setdefault(key, asyncio.Lock()):
+            if key not in self._airport_cache:
+                response = await self.client.post(f'{self.partner_base_url}/v1/products/flight/airport-autocomplete',
+                    headers={'Authorization': f'Bearer {self.partner_api_key}'},
+                    json={'keyword': keyword, 'size': 20}, timeout=self.timeout_seconds)
+                response.raise_for_status()
+                payload = response.json()
+                if (not isinstance(payload, dict) or not isinstance(payload.get('result'), dict)
+                        or payload['result'].get('status') != 200 or not isinstance(payload.get('data'), dict)
+                        or not isinstance(payload['data'].get('airports'), list)):
+                    raise QuoteUnavailable('invalid_response')
+                self._airport_cache[key] = payload['data']['airports']
+            return self._airport_cache[key]
+
+    def _airport_codes(self, airports: list[dict[str, Any]], request: QuoteRequest) -> list[str]:
+        """Accept actual airport codes with a consistent verified country."""
         codes: list[str] = []
         for entry in airports:
             if not isinstance(entry, dict):
@@ -387,14 +417,27 @@ class MyRealTripQuoteProvider:
                 continue
             country_codes = {code for code in (entry.get('isoCode'), country.get('code')) if isinstance(code, str) and code}
             city_names = [city.get('koName'), city.get('enName')]
-            if country_codes != {request.country_code} or not any(isinstance(name, str) and _normalized(name) == _normalized(request.city) for name in city_names):
+            if country_codes != {request.country_code}:
+                continue
+            expected_cities = {_normalized(name) for name in (request.city, request.verified_city_name) if name}
+            if not any(isinstance(name, str) and _normalized(name) in expected_cities for name in city_names):
                 continue
             code = airport.get('code')
             if isinstance(code, str) and re.fullmatch(r'[A-Z]{3}', code) and code != self.origin_airport and code not in codes:
                 codes.append(code)
+        return codes
+
+    async def _airports(self, request: QuoteRequest) -> list[str]:
+        """Return actual same-city airport codes verified by live autocomplete.
+
+        No local catalog or inferred country-wide substitute establishes airport
+        proximity. A city without a confirmed airport simply has no flight quote;
+        the optional quote boundary preserves the verified itinerary.
+        """
+        codes = self._airport_codes(await self._lookup_airports(request.verified_city_name or request.city), request)
         if not codes:
             raise QuoteUnavailable('unverified_airport')
-        return codes[:3]
+        return codes[:MAX_AIRPORT_CANDIDATES]
 
     async def _flight(self, request: QuoteRequest, deadline: float | None = None) -> QuoteItem:
         if not request.flight_required:
@@ -422,6 +465,59 @@ class MyRealTripQuoteProvider:
         if not prices:
             return results[0]
         return QuoteItem('available', min(prices))
+
+    async def _lodging_region_name(self, request: QuoteRequest) -> str | None:
+        """Bridge names through one unambiguous live supplier city record.
+
+        Args:
+            request: Destination country/city names already established by Maps.
+        Returns:
+            Supplier's Korean city name, or None when identity is not certain.
+            The region ID establishes uniqueness only; it is never passed into
+            MCP tools, whose published request contract is different.
+        Raises:
+            asyncio.CancelledError: Caller cancellation remains immediate.
+        """
+        if not self.partner_api_key or not request.verified_country_name:
+            return None
+        keyword = request.verified_city_name or request.city
+        if len(keyword) > 100:
+            return None
+        key = (_normalized(request.verified_country_name), _normalized(keyword))
+        async with self._region_locks.setdefault(key, asyncio.Lock()):
+            if key in self._region_cache:
+                return self._region_cache[key]
+            name = None
+            try:
+                response = await self.client.post(f'{self.partner_base_url}/v1/products/accommodation/region-autocomplete',
+                    headers={'Authorization': f'Bearer {self.partner_api_key}'},
+                    json={'keyword': keyword, 'isDomestic': request.country_code == 'KR'}, timeout=self.timeout_seconds)
+                response.raise_for_status()
+                payload = response.json()
+                if (not isinstance(payload, dict) or not isinstance(payload.get('result'), dict)
+                        or payload['result'].get('status') != 200 or not isinstance(payload.get('data'), dict)
+                        or not isinstance(payload['data'].get('regions'), list)):
+                    raise QuoteUnavailable('invalid_response')
+                cities = {_normalized(value) for value in (request.city, request.verified_city_name) if value}
+                matches: set[tuple[int, str]] = set()
+                for region in payload['data']['regions']:
+                    if not isinstance(region, dict) or region.get('type') != 'CITY':
+                        continue
+                    identifier, local_name, parent = region.get('regionId'), region.get('name'), region.get('subName')
+                    if type(identifier) is not int or identifier <= 0 or not isinstance(local_name, str) or not local_name.strip():
+                        continue
+                    if not isinstance(parent, str) or _normalized(parent.rsplit(',', 1)[-1]) != key[0]:
+                        continue
+                    if not any(isinstance(value, str) and _normalized(value) in cities
+                               for value in (local_name, region.get('enName'))):
+                        continue
+                    matches.add((identifier, local_name))
+                if len(matches) == 1:
+                    name = next(iter(matches))[1]
+            except Exception:  # noqa: BLE001 - an optional name bridge cannot invalidate a matching quote
+                logger.warning('Optional MyRealTrip lodging region lookup unavailable')
+            self._region_cache[key] = name
+            return name
 
     async def _lodging(self, request: QuoteRequest, deadline: float | None = None) -> QuoteItem:
         if request.start_date == request.end_date:
@@ -452,7 +548,19 @@ class MyRealTripQuoteProvider:
                 'adultCount': self.adults, 'childCount': self.children,
             }
             response = await self._call_tool('getStayDetail', detail_arguments)
-            return QuoteItem('available', _lodging_amount(response, detail_arguments, request))
+            try:
+                amount = _lodging_amount(response, detail_arguments, request)
+            except QuoteUnavailable as error:
+                if str(error) != 'unverified_property_region':
+                    raise
+                # Already matching quotes need no additional REST request. A
+                # bridge changes accepted names only; revalidate every price,
+                # date, occupancy, property and domestic/overseas fact afterward.
+                region_name = await self._lodging_region_name(request)
+                if region_name is None:
+                    raise
+                amount = _lodging_amount(response, detail_arguments, replace(request, verified_city_name=region_name))
+            return QuoteItem('available', amount)
 
         results = await self._bounded_items([detail(gid) for gid in gids], deadline)
         prices = [item.amount_krw for item in results if item.status == 'available' and item.amount_krw is not None]

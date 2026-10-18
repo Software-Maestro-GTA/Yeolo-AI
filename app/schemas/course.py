@@ -81,7 +81,7 @@ class PlaceSchema(BaseModel):
     """Verified identity and map marker only; rich details stay in Google Maps."""
 
     placeId: str = Field(..., description="검증된 Google Maps Place ID")
-    placeName: str = Field(..., description="LLM이 제안한 검색 장소명; Google 공식 표시 이름은 조회하지 않음")
+    placeName: str = Field(..., description="요청 언어로 표기한 검증 장소명; Google 공식 표시 이름은 조회하지 않음")
     category: PlaceCategoryCode = Field(
         ...,
         description="앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트)",
@@ -113,12 +113,22 @@ class PlaceSchema(BaseModel):
 
 
 class TransportToNextSchema(BaseModel):
-    type: Literal["walking", "transit", "driving", "taxi", "none"] = Field(
-        ..., description="다음 장소까지 이동 수단"
+    type: Literal["walking", "transit", "driving", "taxi", "unknown", "none"] = Field(
+        ..., description="다음 장소까지 이동 수단; unknown은 조회 미확보, none은 다음 이동 없음"
     )
     distance: float | None = Field(None, description="실제 이동 거리 (미터)")
     minutes: int | None = Field(None, description="실제 이동 소요 시간 (분)")
     memo: str | None = Field(None, description="요청 언어로 작성된 이동 안내")
+
+    @model_validator(mode="after")
+    def check_unknown_metrics(self) -> Self:
+        """Unknown transfers cannot masquerade as measured or free travel."""
+        if self.type == "unknown" and (
+            self.distance is not None or self.minutes is not None
+            or getattr(self, "cost", None) is not None
+        ):
+            raise ValueError("unknown transport requires null distance, minutes and fare")
+        return self
 
 
 class StopSchema(BaseModel):

@@ -14,6 +14,7 @@ from itertools import pairwise
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
 from langgraph.config import get_stream_writer
 
 from app.agent.course_drafting import (
@@ -58,7 +59,11 @@ from app.services.course_diversity import (
     planning_overlap,
 )
 from app.services.course_history import CourseHistory, history_key
-from app.services.course_localization import localize_course, progress_message
+from app.services.course_localization import (
+    LOCALIZATION_TIMEOUT_SECONDS,
+    localize_course,
+    progress_message,
+)
 from app.services.course_planning import (
     MAX_DAY_PLANS,
     MEAL_WINDOWS,
@@ -81,6 +86,11 @@ from app.services.course_reasons import (
 )
 from app.services.course_routing import (
     distance_meters,
+    has_route_metrics,
+    is_unknown_route,
+    minimum_travel_minutes,
+    unavailable_route,
+    usable_route,
     valid_route,
 )
 from app.services.myrealtrip_quotes import (
@@ -201,6 +211,8 @@ class CourseGraphNodes:
                     city=trip.destinationCity,
                     start_date=start,
                     end_date=start + timedelta(days=trip.totalDays - 1),
+                    verified_country_name=state["destination"].verified_country_name or None,
+                    verified_city_name=state["destination"].verified_city_name or None,
                 )
             )
         except Exception:  # noqa: BLE001 - optional quotes must not discard a verified itinerary; cancellation propagates
@@ -349,6 +361,14 @@ class CourseGraphNodes:
                 "invalid",
             }:
                 raise venue
+            if isinstance(venue, MapsProviderError) and venue.kind in {
+                "not_found",
+                "place_data",
+            }:
+                # One stale or malformed place must not discard verified peers.
+                # Keep it out of the success cache; deferred venues can replace it.
+                logger.info("Course candidate unavailable: kind=%s", venue.kind)
+                continue
             if isinstance(venue, VerifiedPlace):
                 venue.place.placeId = (
                     ("places/" + _canonical_id(venue.place.placeId))
@@ -516,7 +536,7 @@ class CourseGraphNodes:
         }
 
     async def verify_routes(self, state: CourseState) -> dict:
-        """Check real travel and visit windows; retain feasible complete snapshots."""
+        """Check actual transfers or preserve venues with explicit unknown travel."""
         _progress(
             "verify_routes",
             language=state["request"].language,
@@ -539,6 +559,10 @@ class CourseGraphNodes:
         pass_failures: dict[tuple, MapsProviderError] = dict(
             state.get("route_pass_failures", {})
         )
+        mode_service_errors = {
+            key[2]: error for key, error in pass_failures.items() if error.transient
+        }
+        route_service_error: MapsProviderError | None = None
 
         def route_key(
             left: VerifiedPlace,
@@ -566,9 +590,14 @@ class CourseGraphNodes:
             mode: str,
         ) -> TransportToNextSchema:
             """Share successful and failed actual mode lookups within their bounds."""
+            nonlocal route_service_error
             key = route_key(left, right, departure, mode)
             if key in cache:
                 return cache[key]
+            if route_service_error is not None:
+                raise route_service_error
+            if mode in mode_service_errors:
+                raise mode_service_errors[mode]
             if key in pass_failures:
                 raise pass_failures[key]
             try:
@@ -580,7 +609,21 @@ class CourseGraphNodes:
                 )
             except MapsProviderError as error:
                 pass_failures[key] = error
+                if error.kind == 'unauthorized':
+                    route_service_error = error
+                elif error.transient:
+                    mode_service_errors[mode] = error
                 raise
+            except (ValueError, TimeoutError, httpx.HTTPError) as error:
+                failure = MapsProviderError('route_data' if isinstance(error, ValueError) else 'transient')
+                pass_failures[key] = failure
+                if failure.transient:
+                    mode_service_errors[mode] = failure
+                raise failure from None
+            if not has_route_metrics(route):
+                failure = MapsProviderError('route_data')
+                pass_failures[key] = failure
+                raise failure
             if valid_route(route):
                 cache[key] = route
             return route
@@ -588,33 +631,35 @@ class CourseGraphNodes:
         async def lookup(
             left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None
         ) -> TransportToNextSchema:
+            """Use real mode alternatives before returning unavailable travel.
+
+            The preferred mode still needs one request on success. Walking is
+            a fallback only within 3 km; a measured taxi route does not assume
+            the traveler has a car. Exhausted outages are isolated by mode so
+            one unavailable service cannot suppress another usable mode.
+            """
             key = route_key(left, right, departure)
-            mode = key[2]
+            preferred = key[2]
             if key in cache:
                 return cache[key]
-            try:
-                return await actual_route(left, right, departure, mode)
-            except MapsProviderError as error:
-                if error.kind not in {"no_route", "route_data", "transient"}:
-                    raise
-                alternative = None
-                if mode == "transit" and distance_meters(left, right) <= 3000:
-                    alternative = "walking"
-                elif mode == "walking" and error.kind in {"no_route", "route_data"}:
-                    alternative = "transit"
-                if alternative:
-                    try:
-                        # A valid but overlong route must remain a failed plan;
-                        # its successful response cannot become a short estimate.
-                        return await actual_route(left, right, departure, alternative)
-                    except MapsProviderError as alternative_error:
-                        if alternative_error.kind not in {
-                            "no_route",
-                            "route_data",
-                            "transient",
-                        }:
-                            raise
-                raise
+            modes = ["transit", "taxi"]
+            if preferred == "walking":
+                modes.insert(0, "walking")
+            elif distance_meters(left, right) <= 3000:
+                modes.insert(1, "walking")
+            last_error = None
+            for mode in modes:
+                try:
+                    # Keep actual overlong metrics for the existing plan check;
+                    # never replace them with unknown or an estimated duration.
+                    return await actual_route(left, right, departure, mode)
+                except MapsProviderError as error:
+                    last_error = error
+                    if error.kind not in {"no_route", "route_data", "transient"}:
+                        break
+            if last_error is not None:
+                logger.warning("Course transfer unavailable: kind=%s status=%s", last_error.kind, last_error.status_code)
+            return unavailable_route()
 
         async def verify_one(item: tuple[int, list[Visit]]) -> tuple:
             index, selected = item
@@ -623,6 +668,7 @@ class CourseGraphNodes:
             ) + timedelta(days=index)
             routes = []
             current = 540
+            timing_confirmed = True
             temporary_failure = False
             try:
                 for left, right in pairwise(selected):
@@ -640,17 +686,18 @@ class CourseGraphNodes:
                             f"{candidate.name}: 방문/식사 시간 안에 방문할 수 없습니다."
                         )
                     departure = None
-                    if state["destination"].country_code == "KR":
+                    if timing_confirmed and state["destination"].country_code == "KR":
                         departure = datetime.combine(
                             day_date, time(), tzinfo=ZoneInfo("Asia/Seoul")
                         ) + timedelta(minutes=arrival + candidate.stay_minutes)
                     route = await lookup(venue, right[1], departure)
-                    if not valid_route(route):
+                    if not usable_route(route):
                         raise CourseGenerationError(
                             f"{candidate.name} → {right[0].name}: 경로 정보가 불완전하거나 이동 시간이 90분을 초과합니다."
                         )
                     routes.append(route)
-                    current = arrival + candidate.stay_minutes + route.minutes + 10
+                    timing_confirmed = timing_confirmed and not is_unknown_route(route)
+                    current = arrival + candidate.stay_minutes + minimum_travel_minutes(route) + 10
                 day = _schedule_day(
                     selected,
                     routes,
@@ -684,6 +731,7 @@ class CourseGraphNodes:
             if index not in validated and plans
         }
         last_errors: dict[int, str] = {}
+        unknown_days: dict[int, list[dict]] = {}
         while remaining:
             assignments = _choose_disjoint_plans(remaining, used)
             if not assignments:
@@ -693,23 +741,26 @@ class CourseGraphNodes:
                 if isinstance(outcome, BaseException):
                     raise outcome
                 record, error, temporary = outcome
-                if record is not None:
+                if record is not None and not any(is_unknown_route(route) for route in record['routes']):
                     validated[index] = record
                     used.update(
                         _canonical_id(venue.place.placeId) for _, venue in selected
                     )
                     remaining.pop(index, None)
                 else:
-                    last_errors[index] = error
+                    if record is not None:
+                        unknown_days.setdefault(index, []).append(record)
+                    else:
+                        last_errors[index] = error
                     remaining[index].remove(selected)
-                    if not temporary:
+                    if record is None and not temporary:
                         rejected_plans.setdefault(index, set()).add(
                             _plan_signature(selected)
                         )
                     if not remaining[index]:
                         remaining.pop(index)
         # Preserve the model's verified five-stop order when a small optimistic
-        # shortlist misses it. It still needs actual routes and full-stay checks;
+        # shortlist misses it. It still needs route-state and full-stay checks;
         # this bounded local attempt precedes further venue/model requests.
         if not state.get("repairing"):
             local = {}
@@ -738,17 +789,36 @@ class CourseGraphNodes:
                 if isinstance(outcome, BaseException):
                     raise outcome
                 record, error, temporary = outcome
-                if record is not None:
+                if record is not None and not any(is_unknown_route(route) for route in record['routes']):
                     validated[index] = record
                     used.update(
                         _canonical_id(venue.place.placeId) for _, venue in selected
                     )
                 else:
-                    last_errors[index] = error
-                    if not temporary:
+                    if record is not None:
+                        unknown_days.setdefault(index, []).append(record)
+                    else:
+                        last_errors[index] = error
+                    if record is None and not temporary:
                         rejected_plans.setdefault(index, set()).add(
                             _plan_signature(selected)
                         )
+        # Prefer fully measured alternatives, then retain the best disjoint
+        # venue itineraries instead of redrafting solely for missing travel.
+        pending = {
+            index: [record['selected'] for record in sorted(records, key=lambda record: sum(is_unknown_route(route) for route in record['routes']))]
+            for index, records in unknown_days.items() if index not in validated
+        }
+        unknown_counts = {
+            (index, _plan_signature(record['selected'])): sum(is_unknown_route(route) for route in record['routes'])
+            for index, records in unknown_days.items() for record in records
+        }
+        for index, selected in _choose_disjoint_plans(
+            pending, used, plan_cost=lambda index, plan: unknown_counts[index, _plan_signature(plan)]
+        ).items():
+            record = next(record for record in unknown_days[index] if record['selected'] == selected)
+            validated[index] = record
+            used.update(_canonical_id(venue.place.placeId) for _, venue in selected)
         for index in range(len(state["day_plans"])):
             if index not in validated and state["day_plans"][index]:
                 failures.append(
@@ -800,6 +870,7 @@ class CourseGraphNodes:
         rank = (
             sum(value[0] for value in shortages),
             sum(value[1] for value in shortages),
+            sum(is_unknown_route(route) for day in routes for route in day),
             max(scores.values()),
             area_overlap,
         )
@@ -942,10 +1013,10 @@ class CourseGraphNodes:
             zip(state["selected"], state["routes"])
         ):
             if len(routes) != len(selected) - 1 or any(
-                not valid_route(route) for route in routes
+                not usable_route(route) for route in routes
             ):
                 raise CourseGenerationError(
-                    "실제로 확인되지 않은 이동 경로가 있습니다."
+                    "이동 정보의 확인·미확보 상태가 올바르지 않습니다."
                 )
             record = state["validated_days"].get(index, {})
             day = record.get("day")
@@ -961,8 +1032,8 @@ class CourseGraphNodes:
                 raise CourseGenerationError(
                     "검증된 일정과 최종 장소·경로가 일치하지 않습니다."
                 )
-            # Real routes, opening/meal windows and full stays were checked by
-            # verify_one. Copy that accepted day instead of formatting it twice.
+            # Venue windows and full stays were checked by verify_one. Unknown
+            # transfers retain provisional internal clocks, not verified timing.
             days.append(day.model_copy(deep=True))
         return {"days": days, "feedback": ""}
 
@@ -1034,14 +1105,23 @@ class CourseGraphNodes:
             _progress("repeated_supplemental", language=request.language)
         return {"course": course, "feedback": ""}
 
-    async def finalize_course(self, state: CourseState) -> dict:
-        """Localize verified copy and disclose partial quotes without inventing prices."""
+    async def localize_display(self, state: CourseState) -> dict:
+        """Translate display text within the existing optional request budget.
+
+        The service preserves verified facts and original guidance on failure.
+        No new provider, model call or retry budget is introduced by this node.
+        """
         request = state["request"]
-        if request.language.split("-")[0] != "ko":
-            _progress("localize", language=request.language)
+        _progress("localize", language=request.language)
         course = await localize_course(
-            request, state["course"], timeout_seconds=min(15.0, _optional_budget(state))
+            request, state["course"],
+            timeout_seconds=min(LOCALIZATION_TIMEOUT_SECONDS, max(0.0, state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.0)),
         )
+        return {"course": course}
+
+    async def finalize_course(self, state: CourseState) -> dict:
+        """Disclose partial quotes and return the course after display localization."""
+        request, course = state["request"], state["course"]
         quotes = state.get("trip_quotes")
         if quotes and not quotes.complete:
             get_stream_writer()(

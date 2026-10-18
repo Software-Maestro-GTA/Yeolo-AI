@@ -12,6 +12,23 @@ from app.agent.tools.verified_maps import VerifiedPlace
 from app.services.course_routing import distance_meters, valid_route
 
 
+def test_unknown_route_has_no_metrics_or_fare_and_is_not_verified_travel():
+    from app.services.course_routing import unavailable_route, usable_route
+
+    route = unavailable_route()
+    assert usable_route(route) and not valid_route(route)
+    assert route.model_dump(exclude={'cost'}) == {'type': 'unknown', 'distance': None, 'minutes': None, 'memo': None}
+    assert route.cost is None
+
+
+@pytest.mark.parametrize('field,value', [('distance', 0), ('distance', 100), ('minutes', 0), ('minutes', 10), ('cost', 0)])
+def test_unknown_route_cannot_claim_measured_metrics_or_free_travel(field, value):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        TransportToNextSchema(type='unknown', **{field: value})
+
+
 def venue(identifier, latitude, longitude):
     return VerifiedPlace(PlaceSchema(placeId=identifier, placeName=identifier, category='museum', latitude=latitude, longitude=longitude))
 

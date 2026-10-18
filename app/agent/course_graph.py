@@ -37,7 +37,7 @@ def build_course_graph(
 
     Normal flow:
         prepare → draft → verify_places → verify_routes → schedule → finalize
-        → finalize_course. Travel quotes run alongside daily drafts. Deferred
+        → localize_display → finalize_course. Travel quotes run alongside daily drafts. Deferred
         venues are queried before further model calls. Failed proposals can
         refill missing days, repair verified candidates or restore a snapshot.
 
@@ -63,6 +63,7 @@ def build_course_graph(
     graph.add_node("verify_routes", nodes.bounded(nodes.verify_routes))
     graph.add_node("schedule", nodes.schedule)
     graph.add_node("finalize", nodes.finalize)
+    graph.add_node("localize_display", nodes.localize_display)
     graph.add_node("finalize_course", nodes.finalize_course)
     graph.add_node("quote_trip", nodes.quote_trip)
     graph.add_node("expand_places", nodes.bounded(nodes.expand_places))
@@ -78,6 +79,7 @@ def build_course_graph(
     graph.add_edge("expand_places", "verify_places")
     graph.add_edge("repair", "verify_routes")
     graph.add_edge("restore", "schedule")
+    graph.add_edge("localize_display", "finalize_course")
     graph.add_edge("finalize_course", END)
 
     # Every main stage shares the same bounded retry and snapshot decision.
@@ -87,7 +89,7 @@ def build_course_graph(
         ("verify_places", "verify_routes"),
         ("verify_routes", "schedule"),
         ("schedule", "finalize"),
-        ("finalize", "finalize_course"),
+        ("finalize", "localize_display"),
     ):
         graph.add_conditional_edges(
             source,

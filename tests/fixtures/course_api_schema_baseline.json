@@ -621,7 +621,7 @@
             "type": "string"
           },
           "placeName": {
-            "description": "LLM이 제안한 검색 장소명; Google 공식 표시 이름은 조회하지 않음",
+            "description": "요청 언어로 표기한 검증 장소명; Google 공식 표시 이름은 조회하지 않음",
             "title": "Placename",
             "type": "string"
           },
@@ -714,12 +714,13 @@
       "TransportToNextSchema": {
         "properties": {
           "type": {
-            "description": "다음 장소까지 이동 수단",
+            "description": "다음 장소까지 이동 수단; unknown은 조회 미확보, none은 다음 이동 없음",
             "enum": [
               "walking",
               "transit",
               "driving",
               "taxi",
+              "unknown",
               "none"
             ],
             "title": "Type",

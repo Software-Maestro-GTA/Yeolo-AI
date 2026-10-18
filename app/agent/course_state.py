@@ -69,7 +69,7 @@ type Visit = tuple[Candidate, VerifiedPlace]
 
 
 class ValidatedDay(TypedDict):
-    """Keep accepted venues, actual routes and their checked schedule together."""
+    """Keep verified venues and measured/unknown transfers with internal ordering."""
 
     selected: list[Visit]
     routes: list[TransportToNextSchema]
