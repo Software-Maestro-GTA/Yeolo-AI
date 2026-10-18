@@ -621,7 +621,7 @@
             "type": "string"
           },
           "placeName": {
-            "description": "LLM이 제안한 검색 장소명; Google 공식 표시 이름은 조회하지 않음",
+            "description": "요청 언어로 표기한 검증 장소명; Google 공식 표시 이름은 조회하지 않음",
             "title": "Placename",
             "type": "string"
           },

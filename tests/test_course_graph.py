@@ -65,7 +65,7 @@ async def test_actual_graph_verifies_and_schedules_before_complete(request_data,
     graph = build_course_graph(provider, history)
     updates = [update async for update in graph.astream({'request': request_data, 'attempt': 0}, stream_mode='updates')]
     names = [name for update in updates for name in update]
-    assert [name for name in names if name != 'quote_trip'] == ['prepare', 'draft', 'verify_places', 'verify_routes', 'schedule', 'finalize', 'finalize_course']
+    assert [name for name in names if name != 'quote_trip'] == ['prepare', 'draft', 'verify_places', 'verify_routes', 'schedule', 'finalize', 'localize_display', 'finalize_course']
     assert names.count('quote_trip') == 1
     assert names.index('prepare') < names.index('quote_trip') < names.index('finalize_course')
     result = updates[-1]['finalize_course']['course']
@@ -97,6 +97,21 @@ async def test_actual_graph_verifies_and_schedules_before_complete(request_data,
             assert set(stop['transportToNext']) == {'type', 'distance', 'minutes', 'memo'}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('remaining', [10, 180])
+async def test_final_copy_uses_remaining_generation_time_instead_of_short_optional_budget(request_data, graph_dependencies, mocker, remaining):
+    from app.agent.course_graph import build_course_graph
+
+    provider, history, _, _, _ = graph_dependencies
+    localize = mocker.patch('app.agent.course_nodes.localize_course', side_effect=lambda request, course, **kwargs: course)
+    deadline = asyncio.get_running_loop().time() + remaining
+    result = await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0, 'deadline': deadline})
+    assert len(result['course'].itinerary.days[0].stops) == 5
+    localize.assert_awaited_once()
+    budget = localize.await_args.kwargs['timeout_seconds']
+    assert 0 < budget <= min(60, remaining - 1)
+    if remaining == 180:
+        assert budget == 60
 
 
 @pytest.mark.asyncio

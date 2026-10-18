@@ -59,7 +59,11 @@ from app.services.course_diversity import (
     planning_overlap,
 )
 from app.services.course_history import CourseHistory, history_key
-from app.services.course_localization import localize_course, progress_message
+from app.services.course_localization import (
+    LOCALIZATION_TIMEOUT_SECONDS,
+    localize_course,
+    progress_message,
+)
 from app.services.course_planning import (
     MAX_DAY_PLANS,
     MEAL_WINDOWS,
@@ -1101,15 +1105,23 @@ class CourseGraphNodes:
             _progress("repeated_supplemental", language=request.language)
         return {"course": course, "feedback": ""}
 
+    async def localize_display(self, state: CourseState) -> dict:
+        """Translate display text within the existing optional request budget.
+
+        The service preserves verified facts and original guidance on failure.
+        No new provider, model call or retry budget is introduced by this node.
+        """
+        request = state["request"]
+        _progress("localize", language=request.language)
+        course = await localize_course(
+            request, state["course"],
+            timeout_seconds=min(LOCALIZATION_TIMEOUT_SECONDS, max(0.0, state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.0)),
+        )
+        return {"course": course}
 
     async def finalize_course(self, state: CourseState) -> dict:
-        """Localize verified copy and disclose partial quotes without inventing prices."""
-        request = state["request"]
-        if request.language.split("-")[0] != "ko":
-            _progress("localize", language=request.language)
-        course = await localize_course(
-            request, state["course"], timeout_seconds=min(15.0, _optional_budget(state))
-        )
+        """Disclose partial quotes and return the course after display localization."""
+        request, course = state["request"], state["course"]
         quotes = state.get("trip_quotes")
         if quotes and not quotes.complete:
             get_stream_writer()(
