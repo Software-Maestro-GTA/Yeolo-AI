@@ -36,8 +36,10 @@ def build_course_graph(
     """Compile the normal generation flow and its existing recovery branches.
 
     Normal flow:
-        prepare → draft → verify_places → verify_routes → schedule → finalize
-        → localize_display → finalize_course. Travel quotes run alongside daily drafts. Deferred
+        prepare → quote_trip → draft → resolve_anchors → verify_places → verify_routes → schedule
+        → finalize → attach_lodging → attach_airports → localize_display
+        → finalize_course. Travel costs are resolved
+        before daily proposals receive their remaining activity budget. Deferred
         venues are queried before further model calls. Failed proposals can
         refill missing days, repair verified candidates or restore a snapshot.
 
@@ -59,10 +61,13 @@ def build_course_graph(
     # Only proposals and verification use the existing fallback time budget.
     graph.add_node("prepare", nodes.prepare)
     graph.add_node("draft", nodes.bounded(nodes.draft))
+    graph.add_node("resolve_anchors", nodes.resolve_anchors)
     graph.add_node("verify_places", nodes.bounded(nodes.verify_places))
     graph.add_node("verify_routes", nodes.bounded(nodes.verify_routes))
     graph.add_node("schedule", nodes.schedule)
     graph.add_node("finalize", nodes.finalize)
+    graph.add_node("attach_lodging", nodes.attach_lodging)
+    graph.add_node("attach_airports", nodes.attach_airports)
     graph.add_node("localize_display", nodes.localize_display)
     graph.add_node("finalize_course", nodes.finalize_course)
     graph.add_node("quote_trip", nodes.quote_trip)
@@ -73,23 +78,25 @@ def build_course_graph(
 
     # Entry and recovery paths have unconditional successors.
     graph.add_edge(START, "prepare")
-    graph.add_edge("prepare", "draft")
     graph.add_edge("prepare", "quote_trip")
-    graph.add_edge("quote_trip", END)
+    graph.add_edge("quote_trip", "draft")
+    graph.add_edge("resolve_anchors", "verify_places")
     graph.add_edge("expand_places", "verify_places")
     graph.add_edge("repair", "verify_routes")
     graph.add_edge("restore", "schedule")
+    graph.add_edge("attach_lodging", "attach_airports")
+    graph.add_edge("attach_airports", "localize_display")
     graph.add_edge("localize_display", "finalize_course")
     graph.add_edge("finalize_course", END)
 
     # Every main stage shares the same bounded retry and snapshot decision.
     for source, successor in (
-        ("draft", "verify_places"),
-        ("refill", "verify_places"),
+        ("draft", "resolve_anchors"),
+        ("refill", "resolve_anchors"),
         ("verify_places", "verify_routes"),
         ("verify_routes", "schedule"),
         ("schedule", "finalize"),
-        ("finalize", "localize_display"),
+        ("finalize", "attach_lodging"),
     ):
         graph.add_conditional_edges(
             source,

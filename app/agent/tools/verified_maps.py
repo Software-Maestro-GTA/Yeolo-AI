@@ -1,11 +1,12 @@
 """Strict provider boundary for course generation; failures never invent facts."""
 
 import asyncio
+import logging
 import math
 import re
 import unicodedata
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Literal, Self
 
@@ -17,7 +18,10 @@ from app.schemas.course import (
     PlaceSchema,
     TransportToNextSchema,
 )
+from app.schemas.course_anchors import AirportCandidate
 from app.services.maps_cost import MapsCostMetrics, classify_maps_sku
+from app.services.myrealtrip_quotes import AirportIdentity
+from app.services.place_categories import AIRPORT_TYPES, LODGING_TYPES
 from app.services.route_guidance import (
     MAX_MEMO_LENGTH,
     ROUTE_FIELD_MASK,
@@ -32,6 +36,8 @@ PLACE_SEARCH_MASK = 'places.id'
 PLACE_DETAIL_FIELDS = 'id,formattedAddress,addressComponents,location,types'
 DESTINATION_DETAIL_FIELDS = 'id,addressComponents,types,viewport'
 MAX_SEARCH_IDS = 5
+MAX_PROPOSED_AIRPORT_DISTANCE_METERS = 200_000
+logger = logging.getLogger(__name__)
 
 
 class MapsProviderError(ValueError):
@@ -124,6 +130,32 @@ class Destination:
         """Check a point, including viewports that cross the date line."""
         longitude_ok = self.west <= longitude <= self.east if self.west <= self.east else longitude >= self.west or longitude <= self.east
         return self.south <= latitude <= self.north and longitude_ok
+
+
+def _distance_to_destination(latitude: float, longitude: float, destination: Destination) -> float:
+    """Measure airport proximity to a city viewport, including date-line crossings.
+
+    This geographic bound checks candidate plausibility only. It cannot establish
+    road access, an airport's service area or available flights.
+    """
+    if destination.contains(latitude, longitude):
+        return 0.0
+    longitude_inside = (destination.west <= longitude <= destination.east if destination.west <= destination.east
+                        else longitude >= destination.west or longitude <= destination.east)
+    delta = 0.0 if longitude_inside else min(abs((longitude - edge + 180) % 360 - 180)
+                                            for edge in (destination.west, destination.east))
+    latitude_radians, delta_radians = math.radians(latitude), math.radians(delta)
+    # Project onto the nearest bounding meridian on the sphere, then restrict
+    # latitude to the viewport. Both corners cover a projection beyond a pole.
+    projected = math.degrees(math.atan2(math.sin(latitude_radians), math.cos(latitude_radians) * math.cos(delta_radians)))
+    nearest = min(max(projected, destination.south), destination.north)
+    distances = []
+    for boundary_latitude in (destination.south, destination.north, nearest):
+        boundary_radians = math.radians(boundary_latitude)
+        haversine = (math.sin((latitude_radians - boundary_radians) / 2) ** 2
+                     + math.cos(latitude_radians) * math.cos(boundary_radians) * math.sin(delta_radians / 2) ** 2)
+        distances.append(6_371_000 * 2 * math.asin(math.sqrt(max(0.0, min(1.0, haversine)))))
+    return min(distances)
 
 
 class InternalPlaceSchema(PlaceSchema):
@@ -338,7 +370,7 @@ def _place_category(raw: dict) -> str:
     return next((kind for kind in types if kind and kind not in {'point_of_interest', 'establishment', 'food', 'store'}), '')
 
 
-def _verified_place(raw: dict, destination: Destination, meal: str, candidate: Any) -> VerifiedPlace | None:
+def _verified_place(raw: dict, destination: Destination, meal: str, candidate: Any, *, lodging: bool = False, airport: bool = False) -> VerifiedPlace | None:
     """Validate Essentials facts and preserve the model's proposed display names.
 
     Args:
@@ -346,6 +378,9 @@ def _verified_place(raw: dict, destination: Destination, meal: str, candidate: A
         destination: Verified country and finite destination viewport.
         meal: Proposed visit role checked against the supplied provider types.
         candidate: Named model proposal; its category is never used as evidence.
+        lodging: Require a concrete lodging type instead of a sightseeing visit.
+        airport: Require a concrete airport type without limiting its location to
+            the city viewport. Generated candidates need a separate proximity check.
     Returns:
         Actual ID, category, coordinates and address with the proposed name, or
         None when venue facts fail. Official name/status/hours are not verified.
@@ -354,11 +389,21 @@ def _verified_place(raw: dict, destination: Destination, meal: str, candidate: A
         types = raw.get('types', [])
         if not isinstance(types, list) or any(not isinstance(kind, str) for kind in types):
             return None
-        if _geographic_area(types) or _transit_node(types):
+        if _geographic_area(types) or (not airport and _transit_node(types)):
             return None
-        category = _place_category(raw)
-        if not category or not individual_travel_category_supported(category) or not meal_category_supported(category, meal):
-            return None
+        lodging_category = next((kind for kind in types if kind in LODGING_TYPES), '')
+        if airport:
+            category = next((kind for kind in types if kind in AIRPORT_TYPES), '')
+            if not category or meal != 'none' or lodging:
+                return None
+        elif lodging:
+            if not lodging_category or meal != 'none':
+                return None
+            category = lodging_category
+        else:
+            category = _place_category(raw)
+            if not category or not individual_travel_category_supported(category) or not meal_category_supported(category, meal):
+                return None
         name = candidate.name
         identifier, address = raw.get('id'), raw.get('formattedAddress')
         if not isinstance(name, str) or not name.strip() or not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', identifier) or not isinstance(address, str) or not address.strip():
@@ -369,12 +414,21 @@ def _verified_place(raw: dict, destination: Destination, meal: str, candidate: A
         latitude, longitude = map(float, coordinates)
         if not all(math.isfinite(value) for value in (latitude, longitude)) or not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
             return None
-        if not destination.contains(latitude, longitude) or _destination_country_code(raw) != destination.country_code:
+        if (not airport and not destination.contains(latitude, longitude)) or _destination_country_code(raw) != destination.country_code:
             return None
-        place = InternalPlaceSchema(placeId=identifier, placeName=name, placeEngName=candidate.english_name, category=category, providerTypes=types, address=address, latitude=latitude, longitude=longitude)
+        place = InternalPlaceSchema(placeId=identifier, placeName=name, placeEngName=candidate.english_name or '', category=category, providerTypes=types, address=address, latitude=latitude, longitude=longitude)
         return VerifiedPlace(place)
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
         return None
+
+
+def _airport_search_match(name_ids: list[str], code_ids: list[str]) -> str | None:
+    """Require matching leading hits; shared lower ranks cannot establish a name."""
+    if not name_ids or not code_ids:
+        return None
+    if name_ids[0] == code_ids[0]:
+        return code_ids[0]
+    return None
 
 
 class VerifiedMapsProvider:
@@ -596,47 +650,210 @@ class VerifiedMapsProvider:
         return matches[0]
 
     async def search(self, candidate: Any, destination: Destination) -> VerifiedPlace:
-        """Select the first geographically/type-valid hit with Essentials only.
+        """Bind named proposals to scoped, corroborated IDs using Essentials only.
 
         Args:
-            candidate: Model-proposed name, optional English name and meal role.
+            candidate: Model-proposed name, optional English alias and meal role.
             destination: Already verified country and city viewport.
         Returns:
-            Verified provider ID/types/coordinates/address with the proposed name.
+            Provider ID/types/coordinates/address with the proposed display name.
         Raises:
-            ValueError: At most five inspected IDs supplied no suitable venue,
-                including deleted IDs and unusable individual detail responses.
+            ValueError: Names resolve to different leading IDs or no suitable
+                venue remains. These candidate failures permit existing refills.
             MapsProviderError: Global request, authorization, or outage failure.
 
-        Multiple suitable results retain provider query order. Essentials cannot
-        compare official names or verify operating status, so no Pro lookup or
-        name-ambiguity claim is made. Generic nameless discovery is unsupported.
+        A distinct alias must resolve to the same leading ID before any paid
+        details lookup. Unmatched aliases are not fallbacks for each other. For
+        legacy proposals without an alias, bounded single-query validation stays
+        available. Agreement reduces fuzzy matches but cannot establish an
+        official display name, which Google does not supply in Essentials.
         """
-        queries = [(candidate.name, self.language)]
+        return await self._search_place(candidate, destination)
+
+    async def search_lodging(self, candidate: Any, destination: Destination) -> VerifiedPlace:
+        """Verify a named lodging using the same free IDs and Essentials facts.
+
+        Args:
+            candidate: Named lodging proposal with an optional English alias.
+                Legacy candidates must have ``meal='none'`` when they specify a
+                meal role. The caller establishes the name's provenance.
+            destination: Verified country and city viewport.
+        Returns:
+            Verified lodging ID, type, address and coordinates with its supplied
+            name. Reservation availability is not established by Maps.
+        Raises:
+            ValueError: The leading search hit is not a usable lodging in the
+                destination. Lower-ranked hotels cannot replace its identity.
+            MapsProviderError: Global request, authorization, or outage failure.
+        """
+        return await self._search_place(candidate, destination, lodging=True)
+
+    async def search_airport(self, identity: AirportIdentity, destination: Destination) -> VerifiedPlace | None:
+        """Bind a supplier airport name and IATA code to one Essentials record.
+
+        Args:
+            identity: Actual destination airport from the flight supplier, already
+                verified as serving this city. A generated name is not accepted.
+            destination: Verified destination country and city. Airports serving a
+                city may be outside its viewport, so no city bias is applied here.
+        Returns:
+            Same-country airport facts when a name search agrees with the leading
+            IATA result, otherwise None. One supplied English alias can recover a
+            localized-name mismatch. Neither flight times nor terminal numbers
+            are established. Official Google display names are not requested.
+        Raises:
+            MapsProviderError: Global request, authorization or provider outage.
+            asyncio.CancelledError: Caller cancellation remains observable.
+        """
+        if not isinstance(identity, AirportIdentity) or identity.country_code != destination.country_code:
+            if isinstance(identity, AirportIdentity):
+                logger.info('Course airport verification rejected: iata=%s reason=country_mismatch', identity.code)
+            return None
+        return await self._search_airport_record(identity, identity.code, destination)
+
+    async def search_airport_candidate(self, candidate: AirportCandidate, destination: Destination) -> VerifiedPlace | None:
+        """Verify a proposed nearby airport without requiring a supplier quote.
+
+        Args:
+            candidate: Model-proposed name and IATA code; neither is supplier
+                confirmation of connectivity or reservation availability.
+            destination: Verified country and city viewport. Candidates may lie
+                outside the city, within 200 km of its nearest viewport point.
+        Returns:
+            Same-country, nearby airport facts after the name and code searches
+            establish one airport identity, or None for a conflicting or distant
+            record. A supplied English alias may recover localized-name ranking.
+        Raises:
+            MapsProviderError: Global request, authorization or provider outage.
+            asyncio.CancelledError: Caller cancellation remains observable.
+        """
+        if not isinstance(candidate, AirportCandidate):
+            return None
+        verified = await self._search_airport_record(candidate, candidate.iata_code, destination)
+        if verified is None:
+            return None
+        if _distance_to_destination(verified.place.latitude, verified.place.longitude, destination) > MAX_PROPOSED_AIRPORT_DISTANCE_METERS:
+            logger.info('Course airport verification rejected: iata=%s reason=outside_destination_proximity', candidate.iata_code)
+            return None
+        return verified
+
+    async def _search_airport_record(self, proposal: AirportIdentity | AirportCandidate, code: str, destination: Destination) -> VerifiedPlace | None:
+        """Share airport ID correlation and Essentials retrieval across provenances."""
+        country = destination.verified_country_name or destination.country_code
+        queries = (
+            (f'{_destination_query(proposal.name)}, {_destination_query(country)}', self.language),
+            (f'{code} airport, {destination.country_code}', 'en'),
+        )
+        # Lower shared IDs can describe a terminal or another real airport. They
+        # never prove which name belongs to the IATA-leading record.
+        tasks = [asyncio.create_task(self._search_ids(query, language=language))
+                 for query, language in queries]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+        failures = [result for result in results if isinstance(result, MapsProviderError)]
+        if failures:
+            raise min(failures, key=lambda failure: failure.transient)
+        if any(isinstance(result, BaseException) for result in results):
+            raise MapsProviderError('invalid') from None
+        name_ids, code_ids = results
+        if not code_ids:
+            logger.info('Course airport verification rejected: iata=%s reason=empty_code_result', code)
+            return None
+        identifier = _airport_search_match(name_ids, code_ids)
+        ambiguous = len(set(name_ids).intersection(code_ids)) > 1
+        alias = proposal.english_name
+        if identifier is None and alias and _normalized(alias) != _normalized(proposal.name):
+            alias_ids = await self._search_ids(
+                f'{_destination_query(alias)}, {_destination_query(country)}', language='en',
+            )
+            identifier = _airport_search_match(alias_ids, code_ids)
+            ambiguous = ambiguous or len(set(alias_ids).intersection(code_ids)) > 1
+            if identifier is not None:
+                # The failed localized name is not evidence for this ID. Retain
+                # only the matched name; the existing display node translates it.
+                proposal = (proposal.model_copy(update={'name': alias})
+                            if isinstance(proposal, AirportCandidate) else replace(proposal, name=alias))
+                logger.info('Course airport verification recovered: iata=%s source=english_alias', code)
+        if identifier is None:
+            reason = 'ambiguous_ids' if ambiguous else 'empty_name_result' if not name_ids else 'name_code_mismatch'
+            logger.info('Course airport verification rejected: iata=%s reason=%s', code, reason)
+            return None
+        try:
+            raw = await self._details(identifier)
+        except MapsProviderError as error:
+            if error.kind in {'not_found', 'place_data'}:
+                logger.info('Course airport verification rejected: iata=%s reason=%s', code, error.kind)
+                return None
+            raise
+        verified = _verified_place(raw, destination, 'none', proposal, airport=True)
+        if verified is None:
+            logger.info('Course airport verification rejected: iata=%s reason=invalid_airport_facts', code)
+        return verified
+
+    async def _search_place(self, candidate: Any, destination: Destination, *, lodging: bool = False) -> VerifiedPlace:
+        """Share scoped retrieval and field masks while keeping venue roles distinct."""
+        names = [(candidate.name, self.language)]
         if candidate.english_name and _normalized(candidate.english_name) != _normalized(candidate.name):
-            queries.append((candidate.english_name, 'en'))
-        inspected: set[str] = set()
+            names.append((candidate.english_name, 'en'))
+        context = [destination.verified_city_name,
+                   destination.verified_country_name or destination.country_code]
         bias = {'rectangle': {'low': {'latitude': destination.south, 'longitude': destination.west},
                               'high': {'latitude': destination.north, 'longitude': destination.east}}}
-        for query, language in queries:
-            identifiers = await self._search_ids(query, language=language, location_bias=bias)
-            for identifier in identifiers:
-                if identifier in inspected:
-                    continue
-                if len(inspected) == MAX_SEARCH_IDS:
-                    break
-                inspected.add(identifier)
-                try:
-                    raw = await self._details(identifier, language=language)
-                except MapsProviderError as error:
-                    if error.kind not in {'not_found', 'place_data'}:
-                        raise
-                    continue
-                verified = _verified_place(raw, destination, candidate.meal, candidate)
-                if verified is not None:
-                    return verified
-            if len(inspected) == MAX_SEARCH_IDS:
-                break
+        queries = [(', '.join(_destination_query(part) for part in [name, *context] if part.strip()), language)
+                   for name, language in names]
+        # Both names are independent retrieval evidence; do not pay for details
+        # of a fuzzy hit until their first provider IDs agree.
+        if len(queries) == 1:
+            query, language = queries[0]
+            results = [await self._search_ids(query, language=language, location_bias=bias)]
+        else:
+            tasks = [asyncio.create_task(self._search_ids(query, language=language, location_bias=bias))
+                     for query, language in queries]
+            try:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+            failures = [result for result in results if isinstance(result, MapsProviderError)]
+            if failures:
+                raise min(failures, key=lambda failure: failure.transient)
+            if any(isinstance(result, BaseException) for result in results):
+                raise MapsProviderError('invalid') from None
+        identifiers = results[0]
+        if len(results) == 2:
+            if not identifiers or not results[1] or identifiers[0] != results[1][0]:
+                logger.info('Course venue identity rejected: reason=alias_disagreement')
+                raise ValueError('Proposed venue names do not resolve to the same leading place ID')
+            identifiers = identifiers[:1]
+        if lodging:
+            # A failed supplier property must not inherit another hotel's ID.
+            identifiers = identifiers[:1]
+        for identifier in identifiers:
+            try:
+                # One output language per ID maximizes request-local sharing.
+                raw = await self._details(identifier)
+            except MapsProviderError as error:
+                if error.kind not in {'not_found', 'place_data'}:
+                    raise
+                continue
+            meal = getattr(candidate, 'meal', 'none') if lodging else candidate.meal
+            verified = _verified_place(raw, destination, meal, candidate, lodging=lodging)
+            if verified is not None:
+                return verified
+        logger.info('Course venue identity rejected: reason=unusable_essentials')
         raise ValueError(f'No verified venue facts for query: {candidate.name}')
 
     async def route(self, origin: VerifiedPlace, destination: VerifiedPlace, mode: str = 'walking', departure_time: datetime | None = None) -> TransportToNextSchema:

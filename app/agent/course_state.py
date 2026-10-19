@@ -18,6 +18,7 @@ from app.schemas.course import (
     StopSchema,
     TransportToNextSchema,
 )
+from app.schemas.course_anchors import AnchorCandidates
 from app.services.course_diversity import (
     Experience,
 )
@@ -36,6 +37,10 @@ class Candidate(BaseModel):
     category: str = "attraction"
     stay_minutes: int = Field(default=60, ge=15, le=240)
     cost: int = Field(default=0, ge=0)
+    budget_tier: Literal["economy", "standard", "comfortable", "premium"] = Field(
+        default="standard",
+        description="Destination-relative spending level for the proposed use, independent of request budget; not a verified rating",
+    )
     reason: str = ""
     meal: Literal["none", "breakfast", "lunch", "dinner"] = "none"
     planned_area: str = Field(default="", max_length=100)
@@ -51,6 +56,7 @@ class CourseDraft(BaseModel):
     reason: str
     tags: list[str] = Field(default_factory=list)
     days: list[DraftDay]
+    anchor_candidates: AnchorCandidates = Field(default_factory=AnchorCandidates)
 
 
 class ScheduledStopSchema(StopSchema):
@@ -88,6 +94,8 @@ class CourseState(TypedDict, total=False):
     attempt: int
     draft_data: CourseDraft
     partial_drafts: dict[int, DraftDay]
+    anchor_candidates: AnchorCandidates
+    anchor_selection: Any
     feedback: str
 
     # Verified facts, retained candidates and possible daily combinations.
@@ -134,6 +142,12 @@ type CourseRouter = Callable[[CourseState], Awaitable[str]]
 class PartialDraftError(TimeoutError):
     """Retain completed day proposals when a subset of model calls failed."""
 
-    def __init__(self, days: dict[int, DraftDay], errors: dict[int, Exception]) -> None:
+    def __init__(
+        self,
+        days: dict[int, DraftDay],
+        errors: dict[int, Exception],
+        anchor_candidates: AnchorCandidates | None = None,
+    ) -> None:
         super().__init__("Some daily candidate calls did not complete")
         self.days, self.errors = days, errors
+        self.anchor_candidates = anchor_candidates or AnchorCandidates()

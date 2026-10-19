@@ -17,6 +17,34 @@ from app.services import course_localization
 USER_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('language,booking_word', [
+    ('ko', '예약'), ('en', 'booking'), ('ja', '予約'), ('zh', '预订'),
+    ('zh-TW', '預訂'), ('fr', 'réserver'), ('es', 'reservar'),
+    ('de', 'Buchung'), ('pt', 'reservar'),
+])
+async def test_lodging_copy_remains_about_accommodation_when_localization_unavailable(language, booking_word, mocker):
+    """An overnight stop cannot fall back to sightseeing copy or change its price."""
+    value = course()
+    hotel = value.itinerary.days[0].stops[-1]
+    hotel.place = InternalPlaceSchema(
+        placeId='verified-hotel', placeName='숙소', category='lodging',
+        latitude=37.501, longitude=127.101,
+    )
+    hotel.cost = 47501
+    hotel.reason = '未翻訳 숙소 recommendation'
+    hotel.memo = 'Untranslated mixed 방문 팁'
+    gateway = mocker.patch('app.services.course_localization.get_abto')
+    result = await course_localization.localize_course(request(language), value, timeout_seconds=0)
+    updated = result.itinerary.days[0].stops[-1]
+    assert booking_word in updated.memo
+    assert course_localization.guidance_matches_language(updated.memo, language)
+    assert course_localization.guidance_matches_language(updated.reason, language)
+    assert updated.place.placeId == 'verified-hotel' and updated.cost == 47501
+    assert updated.transportToNext.type == 'none' and result.totalCost == 95000
+    gateway.assert_not_called()
+
+
 def request(language="en", profile=None):
     return CourseRequestSchema.model_validate(
         {
@@ -462,7 +490,7 @@ def test_stage_keys_and_quote_budget_notices_are_localized(language):
     )
     refill = course_localization.progress_message(language, "refill")
     quote = course_localization.progress_message(
-        language, "quote_missing", items=("flight", "lodging")
+        language, "quote_estimated", items=("transport", "lodging")
     )
     budget = course_localization.progress_message(
         language, "budget_over", total=120000, budget=100000
@@ -472,6 +500,7 @@ def test_stage_keys_and_quote_budget_notices_are_localized(language):
     )
     assert "120,000" in budget and "100,000" in budget
     assert "{items}" not in quote
+    assert quote != 'quote_estimated'
 
 
 @pytest.mark.asyncio

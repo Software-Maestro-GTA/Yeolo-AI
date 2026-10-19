@@ -535,7 +535,7 @@
           },
           "totalCost": {
             "default": 0,
-            "description": "제공된 일정 비용 및 조회 가능한 항공·숙박 견적의 합계 (KRW)",
+            "description": "일정 비용과 왕복 교통·숙박 실조회 또는 기준 추정액의 합계 (KRW); 공항·숙소 stop 비용은 중복 합산하지 않음",
             "minimum": 0,
             "title": "Totalcost",
             "type": "integer"
@@ -626,7 +626,7 @@
             "type": "string"
           },
           "category": {
-            "description": "앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트)",
+            "description": "앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트), LODGING(숙소), AIRPORT(공항)",
             "enum": [
               "FOOD",
               "CAFE",
@@ -634,7 +634,9 @@
               "CULTURE",
               "NATURE",
               "ACTIVITY",
-              "NIGHTLIFE"
+              "NIGHTLIFE",
+              "LODGING",
+              "AIRPORT"
             ],
             "title": "Category",
             "type": "string"
@@ -686,7 +688,7 @@
           },
           "cost": {
             "default": 0,
-            "description": "예상 활동·식사·입장 비용 (KRW)",
+            "description": "예상 활동·식사·입장 비용 또는 해당 일차 숙박 비용 (KRW); 첫날·마지막 날 공항은 왕복 항공료를 나눈 편도 예상 배분액이며 실제 편도 견적은 아님. 항공·숙박 비용은 totalCost에 중복 합산하지 않음",
             "minimum": 0,
             "title": "Cost",
             "type": "integer"

@@ -3,18 +3,26 @@
 import asyncio
 import copy
 import json
+import time
 from dataclasses import replace
 from datetime import date
 
 import httpx
 import pytest
 
+from app.agent.course_nodes import CourseGraphNodes
+from app.agent.tools.verified_maps import Destination
+from app.core.config import settings
+from app.schemas.course import CourseRequestSchema
 from app.services.myrealtrip_quotes import (
     PARTNER_BASE_URL,
     PROTOCOL_VERSION,
+    AirportIdentity,
+    LodgingIdentity,
     MyRealTripQuoteProvider,
     QuoteItem,
     QuoteRequest,
+    TripQuotes,
 )
 
 
@@ -23,7 +31,12 @@ def trip(*, days: int = 3, country_code: str = 'JP', city: str = '도쿄', fligh
 
 
 def airport(*, code: str = 'NRT', city: str = '도쿄', country: str = 'JP', iso: str | None = None) -> dict:
-    return {'airport': {'code': code, 'koName': '나리타', 'enName': 'Narita'},
+    korean, english = {
+        'NRT': ('나리타 국제공항', 'Narita International Airport'),
+        'HND': ('하네다 공항', 'Haneda Airport'),
+        'CJU': ('제주국제공항', 'Jeju International Airport'),
+    }.get(code, ('테스트 공항', 'Test Airport'))
+    return {'airport': {'code': code, 'koName': korean, 'enName': english},
             'city': {'code': 'TYO', 'koName': city, 'enName': 'Tokyo' if city == '도쿄' else 'Other'},
             'country': {'code': country, 'koName': '일본', 'enName': 'Japan'}, 'isoCode': country if iso is None else iso}
 
@@ -56,6 +69,376 @@ def flight_result(amount: object = 375000, *, return_date='2027-01-10', destinat
 def test_quote_status_cannot_disguise_missing_amount_as_free(status, amount):
     with pytest.raises(ValueError):
         QuoteItem(status, amount)
+
+
+@pytest.mark.parametrize('gid,name', [(True, '호텔'), (0, '호텔'), (10, ''), (10, None)])
+def test_lodging_identity_rejects_unusable_supplier_values(gid, name):
+    with pytest.raises(ValueError, match='Invalid lodging identity'):
+        LodgingIdentity(gid, name)
+
+
+def test_lodging_identity_cannot_be_attached_to_inapplicable_or_malformed_quote():
+    with pytest.raises(ValueError, match='Invalid quote lodging identity'):
+        QuoteItem('not_applicable', lodging_identity=LodgingIdentity(10, '호텔'))
+    with pytest.raises(ValueError, match='Invalid quote lodging identity'):
+        QuoteItem('unavailable', lodging_identity={'gid': 10, 'name': '호텔'})
+
+
+@pytest.mark.parametrize('changes', [
+    {'code': 'nrt'}, {'code': 'TYOO'}, {'code': None}, {'name': ''}, {'name': None},
+    {'country_code': 'JPN'}, {'english_name': ''}, {'english_name': 123},
+])
+def test_airport_identity_requires_verified_code_and_supplied_names(changes):
+    with pytest.raises(ValueError, match='Invalid airport identity'):
+        AirportIdentity(**{'code': 'NRT', 'name': '나리타 국제공항', 'country_code': 'JP', **changes})
+
+
+def test_airport_identity_cannot_belong_to_inapplicable_or_ground_travel():
+    identity = AirportIdentity('NRT', '나리타 국제공항', 'JP')
+    with pytest.raises(ValueError, match='Invalid quote airport identity'):
+        QuoteItem('not_applicable', airport_identity=identity)
+    with pytest.raises(ValueError, match='Invalid quote airport identity'):
+        QuoteItem('unavailable', airport_identity={'code': 'NRT'})
+    with pytest.raises(ValueError, match='Non-air travel'):
+        TripQuotes(QuoteItem('available', 100000, airport_identity=identity), QuoteItem('not_applicable'), 'ground')
+
+
+def test_estimated_costs_are_included_but_never_counted_as_verified_quotes() -> None:
+    estimate = QuoteItem('estimated', 350000, 'no_options', source='service-baseline-v1', reference_date='2026-10-19')
+    quotes = TripQuotes(estimate, QuoteItem('available', 180000), transport_mode='air')
+    assert quotes.complete and quotes.missing_items == ()
+    assert quotes.total_krw == 530000 and quotes.verified_total_krw == 180000
+    assert quotes.estimated_items == ('flight',)
+    assert quotes.flight.source == 'service-baseline-v1' and quotes.flight.reference_date == '2026-10-19'
+    missing = replace(quotes, lodging=QuoteItem('unavailable', reason='timeout'))
+    assert not missing.complete and missing.missing_items == ('lodging',)
+    assert missing.total_krw == 350000 and missing.verified_total_krw == 0
+    both = replace(quotes, lodging=replace(estimate, amount_krw=100000), transport_mode='rail')
+    assert both.total_krw == 450000 and both.verified_total_krw == 0
+    assert both.estimated_items == ('flight', 'lodging') and both.transport_mode == 'rail'
+
+
+@pytest.mark.parametrize('changes', [
+    {'amount_krw': None}, {'amount_krw': 0}, {'amount_krw': True}, {'amount_krw': 100000.0},
+    {'source': ''}, {'source': '  '}, {'source': None},
+    {'reference_date': ''}, {'reference_date': '20261019'}, {'reference_date': '2026-02-30'},
+    {'reference_date': '2026-10-19T00:00:00'}, {'reference_date': None},
+])
+def test_estimates_require_positive_integer_amount_and_dated_source(changes: dict) -> None:
+    arguments = {'amount_krw': 100000, 'source': 'service-baseline-v1', 'reference_date': '2026-10-19', **changes}
+    with pytest.raises(ValueError):
+        QuoteItem('estimated', **arguments)
+
+
+def test_transport_mode_rejects_unsupported_value() -> None:
+    with pytest.raises(ValueError, match='Invalid trip transport mode'):
+        TripQuotes(QuoteItem('not_applicable'), QuoteItem('not_applicable'), transport_mode='car')
+
+
+@pytest.mark.parametrize('origin', ['gmp', 'GMP ', 'ICNN', '12A', True])
+def test_quote_request_requires_uppercase_iata_origin_override(origin: object) -> None:
+    with pytest.raises(ValueError, match='Invalid quote origin airport'):
+        replace(trip(), origin_airport=origin)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('preferred_cabin', 'FIRST'), ('preferred_cabin', None),
+    ('preferred_stay_star_rating', 'luxury'), ('preferred_stay_star_rating', True),
+])
+def test_quote_request_rejects_unsupported_product_preferences(field: str, value: object) -> None:
+    with pytest.raises(ValueError, match='Invalid preferred'):
+        replace(trip(), **{field: value})
+
+
+@pytest.mark.parametrize('field,value', [
+    ('flight_budget_krw', -1), ('flight_budget_krw', float('nan')),
+    ('lodging_budget_krw', float('inf')), ('lodging_budget_krw', True),
+    ('lodging_budget_krw', '300000'),
+])
+def test_quote_request_rejects_invalid_budget_allowance(field: str, value: object) -> None:
+    with pytest.raises(ValueError, match='Invalid quote budget allowance'):
+        replace(trip(), **{field: value})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cabin,stars', [('ECONOMY', None), ('ECONOMY', 'fourstar'), ('BUSINESS', 'fivestar')])
+async def test_budget_product_preferences_use_supplier_filters_and_lowest_matching_rate(cabin: str, stars: str | None) -> None:
+    calls: list[dict] = []
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.host == 'partner-ext-api.myrealtrip.com':
+            return partner_response([airport()])
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        params = payload['params']
+        calls.append(params)
+        if params['name'] == 'searchStays':
+            data = {'stays': [{'gid': 101}, {'gid': 102}]}
+        elif params['name'] == 'getStayDetail':
+            data = stay_detail(params['arguments'], 450000 if params['arguments']['gid'] == 101 else 430000)
+        else:
+            data = flight_result(975000, return_date='2027-01-12')
+            cheaper = copy.deepcopy(data['result']['items'][0])
+            cheaper['price']['total'] = 950000
+            data['result']['items'].append(cheaper)
+        return rpc_response(payload, {'structuredContent': data})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
+        result = await provider.quote(replace(trip(), preferred_cabin=cabin, preferred_stay_star_rating=stars))
+    flight_calls = [call for call in calls if call['name'] == 'searchInternationalFlights']
+    stay_calls = [call for call in calls if call['name'] == 'searchStays']
+    assert len(flight_calls) == len(stay_calls) == 1
+    assert flight_calls[0]['arguments']['cabinClass'] == cabin
+    assert stay_calls[0]['arguments'].get('starRating') == stars
+    if stars is None:
+        assert 'starRating' not in stay_calls[0]['arguments']
+    assert not {'sort', 'minPrice', 'maxPrice'} & stay_calls[0]['arguments'].keys()
+    assert result.flight.amount_krw == 950000 and result.lodging.amount_krw == 430000
+
+
+@pytest.mark.asyncio
+async def test_unavailable_business_flights_fall_back_to_economy_with_same_verified_airport() -> None:
+    cabins: list[str] = []
+    airport_calls = 0
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        nonlocal airport_calls
+        if request.url.host == 'partner-ext-api.myrealtrip.com':
+            airport_calls += 1
+            return partner_response([airport()])
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        arguments = payload['params']['arguments']
+        cabins.append(arguments['cabinClass'])
+        data = flight_result()
+        if arguments['cabinClass'] == 'BUSINESS':
+            data['result']['items'] = []
+        return rpc_response(payload, {'structuredContent': data})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
+        result = await provider.quote(replace(trip(days=1), preferred_cabin='BUSINESS'))
+    assert cabins == ['BUSINESS', 'ECONOMY'] and airport_calls == 1
+    assert result.flight.airport_identity.code == 'NRT'
+    assert result.flight.amount_krw == 375000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fallback_amount,expected', [(500000, 500000), (4500000, 4000000), (None, 4000000)])
+async def test_over_budget_business_quote_checks_economy_and_keeps_cheapest_real_amount(fallback_amount: int | None, expected: int) -> None:
+    cabins: list[str] = []
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.host == 'partner-ext-api.myrealtrip.com':
+            return partner_response([airport()])
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        cabin = payload['params']['arguments']['cabinClass']
+        cabins.append(cabin)
+        data = flight_result(4000000 if cabin == 'BUSINESS' else fallback_amount)
+        return rpc_response(payload, {'structuredContent': data})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
+        result = await provider.quote(replace(trip(days=1), preferred_cabin='BUSINESS', flight_budget_krw=3000000))
+    assert cabins == ['BUSINESS', 'ECONOMY']
+    assert result.flight.amount_krw == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fallback_amount,expected', [(500000, 500000), (4500000, 4000000), (None, 4000000)])
+async def test_over_budget_preferred_hotel_checks_default_and_preserves_verified_quote(fallback_amount: int | None, expected: int) -> None:
+    searches: list[dict] = []
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        params = payload['params']
+        if params['name'] == 'searchStays':
+            searches.append(params['arguments'])
+            data = {'stays': [{'gid': 101 if 'starRating' in params['arguments'] else 102}]}
+        else:
+            data = stay_detail(params['arguments'], 4000000 if params['arguments']['gid'] == 101 else fallback_amount)
+        return rpc_response(payload, {'structuredContent': data})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, MyRealTripQuoteProvider(client) as provider:
+        result = await provider.quote(replace(trip(flight_required=False), preferred_stay_star_rating='fivestar', lodging_budget_krw=3000000))
+    assert len(searches) == 2 and searches[0]['starRating'] == 'fivestar' and 'starRating' not in searches[1]
+    assert result.lodging.amount_krw == expected
+
+
+@pytest.mark.asyncio
+async def test_slow_budget_hotel_fallback_keeps_completed_preferred_quote() -> None:
+    searches: list[dict] = []
+    cancelled = asyncio.Event()
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        params = payload['params']
+        if params['name'] == 'searchStays':
+            searches.append(params['arguments'])
+            if 'starRating' not in params['arguments']:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+            data = {'stays': [{'gid': 101}]}
+        else:
+            data = stay_detail(params['arguments'], 4000000)
+        return rpc_response(payload, {'structuredContent': data})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, timeout_seconds=.05) as provider:
+        result = await provider.quote(replace(trip(flight_required=False), preferred_stay_star_rating='fivestar', lodging_budget_krw=3000000))
+    assert len(searches) == 2 and cancelled.is_set()
+    assert result.lodging.status == 'available' and result.lodging.amount_krw == 4000000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('preferred_failure', ['no_options', 'wrong_region'])
+async def test_unavailable_preferred_hotel_class_falls_back_and_revalidates_price(preferred_failure: str) -> None:
+    searches: list[dict] = []
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        params = payload['params']
+        if params['name'] == 'searchStays':
+            searches.append(params['arguments'])
+            preferred = 'starRating' in params['arguments']
+            data = {'stays': [] if preferred and preferred_failure == 'no_options' else [{'gid': 101 if preferred else 102}]}
+        else:
+            data = stay_detail(params['arguments'], 1 if params['arguments']['gid'] == 101 else 475374)
+            if params['arguments']['gid'] == 101:
+                data['property']['region']['city'] = '오사카'
+        return rpc_response(payload, {'structuredContent': data})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, MyRealTripQuoteProvider(client) as provider:
+        result = await provider.quote(replace(trip(flight_required=False), preferred_stay_star_rating='fivestar'))
+    assert searches[0]['starRating'] == 'fivestar'
+    assert 'starRating' not in searches[1] and len(searches) == 2
+    assert result.lodging.amount_krw == 475374 and result.complete
+
+
+@pytest.mark.asyncio
+async def test_preferred_hotel_timeout_never_restarts_quote_deadline_for_fallback() -> None:
+    searches: list[dict] = []
+    cancelled: list[dict] = []
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        searches.append(payload['params'])
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(payload['params'])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, timeout_seconds=.03) as provider:
+        result = await provider.quote(replace(trip(flight_required=False), preferred_stay_star_rating='fivestar'))
+    assert len(searches) == len(cancelled) == 2
+    assert searches[0]['arguments']['starRating'] == 'fivestar'
+    assert 'starRating' not in searches[1]['arguments']
+    assert result.lodging.status == 'unavailable' and result.lodging.reason == 'timeout'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('slow_stage', ['search', 'detail'])
+async def test_slow_preferred_hotel_reserves_time_for_default_and_retains_completed_prices(slow_stage: str) -> None:
+    searches: list[dict] = []
+    cancelled = asyncio.Event()
+
+    async def hang() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        params = payload['params']
+        if params['name'] == 'searchStays':
+            searches.append(params['arguments'])
+            preferred = 'starRating' in params['arguments']
+            if preferred and slow_stage == 'search':
+                await hang()
+            data = {'stays': [{'gid': 101}, {'gid': 102}] if preferred else [{'gid': 201}]}
+        else:
+            gid = params['arguments']['gid']
+            if gid == 102:
+                await hang()
+            amount = 4000000 if gid == 101 else (500000 if slow_stage == 'search' else 4500000)
+            data = stay_detail(params['arguments'], amount)
+        return rpc_response(payload, {'structuredContent': data})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, timeout_seconds=.08) as provider:
+        result = await provider.quote(replace(trip(flight_required=False), preferred_stay_star_rating='fivestar', lodging_budget_krw=3000000))
+    assert len(searches) == 2 and cancelled.is_set()
+    assert searches[0]['starRating'] == 'fivestar' and 'starRating' not in searches[1]
+    assert result.lodging.amount_krw == (500000 if slow_stage == 'search' else 4000000)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('completed_preferred_quote', [False, True])
+async def test_slow_business_flights_reserve_economy_time_and_retain_completed_prices(completed_preferred_quote: bool) -> None:
+    searches: list[dict] = []
+    cancelled = asyncio.Event()
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.host == 'partner-ext-api.myrealtrip.com':
+            return partner_response([airport(), airport(code='HND')] if completed_preferred_quote else [airport()])
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        arguments = payload['params']['arguments']
+        searches.append(arguments)
+        preferred = arguments['cabinClass'] == 'BUSINESS'
+        if preferred and (not completed_preferred_quote or arguments['destination'] == 'HND'):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        amount = 4000000 if preferred else (4500000 if completed_preferred_quote else 500000)
+        data = flight_result(amount, destination=arguments['destination'])
+        return rpc_response(payload, {'structuredContent': data})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN', timeout_seconds=.08) as provider:
+        result = await provider.quote(replace(trip(days=1), preferred_cabin='BUSINESS', flight_budget_krw=3000000))
+    assert cancelled.is_set()
+    assert [call['cabinClass'] for call in searches] == (['BUSINESS', 'BUSINESS', 'ECONOMY', 'ECONOMY'] if completed_preferred_quote else ['BUSINESS', 'ECONOMY'])
+    assert result.flight.amount_krw == (4000000 if completed_preferred_quote else 500000)
 
 
 @pytest.mark.asyncio
@@ -92,8 +475,9 @@ async def test_real_http_contract_dates_guests_session_and_unknown_whole_stay_pr
         assert not client.is_closed
 
     assert result.flight.amount_krw == 365000 and result.flight.status == 'available'
+    assert result.flight.airport_identity == AirportIdentity('HND', '하네다 공항', 'JP', 'Haneda Airport')
     assert result.lodging.amount_krw is None and result.lodging.reason == 'price_not_verifiable'
-    assert result.known_total_krw == 365000 and not result.complete and result.missing_items == ('lodging',)
+    assert result.total_krw == result.verified_total_krw == 365000 and not result.complete and result.missing_items == ('lodging',)
     rest = calls[0]
     assert str(rest.url) == PARTNER_BASE_URL + '/v1/products/flight/airport-autocomplete'
     assert json.loads(rest.content) == {'keyword': '도쿄', 'size': 20}
@@ -158,7 +542,7 @@ async def test_explicit_no_flight_and_single_day_are_inapplicable_and_owned_clie
     mocker.patch('app.services.myrealtrip_quotes.httpx.AsyncClient', return_value=client)
     async with MyRealTripQuoteProvider() as provider:
         result = await provider.quote(trip(days=1, flight_required=False))
-    assert result.complete and result.known_total_krw == 0 and result.missing_items == ()
+    assert result.complete and result.total_krw == result.verified_total_krw == 0 and result.missing_items == ()
     assert result.flight.amount_krw is None and result.lodging.amount_krw is None
     assert client.is_closed
 
@@ -227,6 +611,34 @@ async def test_domestic_search_uses_explicit_origin_passengers_and_only_krw_pric
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('provider_origin', ['ICN', None])
+async def test_request_origin_override_is_used_in_http_search_and_excluded_from_destinations(provider_origin: str | None) -> None:
+    calls: list[dict] = []
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.host == 'partner-ext-api.myrealtrip.com':
+            # Even an unexpected same-city origin record must never trigger a
+            # self-route when the request overrides the provider's departure.
+            return partner_response([airport(code='GMP', city='제주', country='KR'), airport(code='CJU', city='제주', country='KR')])
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        calls.append(payload['params'])
+        return rpc_response(payload, {'structuredContent': flight_result(95000, destination='CJU', origin='GMP')})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport=provider_origin) as provider:
+        result = await provider.quote(replace(trip(days=1, country_code='KR', city='제주'), origin_airport='GMP'))
+        assert provider.origin_airport == provider_origin
+    assert len(calls) == 1 and calls[0]['name'] == 'searchDomesticFlights'
+    assert calls[0]['arguments']['origin'] == 'GMP' and calls[0]['arguments']['destination'] == 'CJU'
+    assert result.flight.status == 'available' and result.flight.amount_krw == 95000
+    assert result.estimated_items == () and result.total_krw == result.verified_total_krw == 95000
+
+
+@pytest.mark.asyncio
 async def test_slow_stay_lookup_keeps_completed_flight_quote_and_joins_cancelled_requests():
     stay_cancelled = asyncio.Event()
 
@@ -251,6 +663,165 @@ async def test_slow_stay_lookup_keeps_completed_flight_quote_and_joins_cancelled
     assert result.flight.status == 'available' and result.flight.amount_krw == 375000
     assert result.lodging.status == 'unavailable' and result.lodging.reason == 'timeout'
     assert stay_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('provider_timeout,shortened_deadline,starve_loop', [(.05, False, False), (1., True, False), (1., True, True)])
+async def test_node_timeout_keeps_completed_hotel_while_airport_lookup_hangs(mocker, provider_timeout, shortened_deadline, starve_loop):
+    """Preserve completed quotes before configured and caller-shortened deadlines."""
+    request_data = CourseRequestSchema.model_validate({
+        'userId': '550e8400-e29b-41d4-a716-446655440000', 'language': 'ko', 'mbti': 'INTJ',
+        'tripCondition': {'destinationCountry': '일본', 'destinationCity': '도쿄',
+                          'startDate': '2027-01-10', 'totalDays': 3, 'budget': 900000},
+    })
+    cancelled = asyncio.Event()
+    calls: list[str] = []
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.host == 'partner-ext-api.myrealtrip.com':
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        params = payload['params']
+        calls.append(params['name'])
+        data = ({'stays': [{'gid': 101, 'name': '확인한 호텔'}]} if params['name'] == 'searchStays'
+                else stay_detail(params['arguments'], 123456))
+        if params['name'] == 'getStayDetail' and starve_loop:
+            # Let the completed detail record its price, then hold the event
+            # loop past both deadlines before either timer can collect it.
+            asyncio.get_running_loop().call_soon(time.sleep, .07)
+        return rpc_response(payload, {'structuredContent': data})
+
+    mocker.patch.object(settings, 'MYREALTRIP_QUOTE_TIMEOUT_SECONDS', provider_timeout)
+    mocker.patch('app.agent.course_nodes._progress')
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN', timeout_seconds=provider_timeout) as quotes:
+        recover = mocker.spy(quotes, 'completed_quotes')
+        nodes = CourseGraphNodes(mocker.Mock(), mocker.Mock(), quotes)
+        state = {
+            'request': request_data,
+            'destination': Destination('JP', 35, 139, 36, 140, verified_city_name='Tokyo'),
+        }
+        if shortened_deadline:
+            state['deadline'] = asyncio.get_running_loop().time() + 28.05
+        update = await nodes.quote_trip(state)
+
+    resolved = update['trip_quotes']
+    assert calls == ['searchStays', 'getStayDetail'] and cancelled.is_set()
+    assert resolved.lodging.status == 'available' and resolved.lodging.amount_krw == 123456
+    assert resolved.lodging.lodging_identity == LodgingIdentity(101, '확인한 호텔')
+    assert resolved.flight.status == 'estimated' and resolved.flight.amount_krw == 350000
+    assert resolved.total_krw == 473456 and resolved.verified_total_krw == 123456
+    assert resolved.estimated_items == ('flight',)
+    if starve_loop:
+        assert recover.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('days,flight_required,expected', [
+    (3, True, ('unavailable', 'unavailable')),
+    (1, False, ('not_applicable', 'not_applicable')),
+])
+async def test_expired_caller_deadline_never_starts_provider_http(days, flight_required, expected):
+    def transport(request: httpx.Request) -> httpx.Response:
+        pytest.fail('An expired quote deadline must not start provider HTTP requests')
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
+        result = await provider.quote(
+            trip(days=days, flight_required=flight_required), deadline=asyncio.get_running_loop().time() - 1,
+        )
+    assert (result.flight.status, result.lodging.status) == expected
+    assert result.total_krw == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reuse_request_object', [False, True])
+async def test_reused_provider_resets_snapshot_before_a_cancelled_new_quote(reuse_request_object):
+    phase = 0
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def detail(arguments):
+        if phase:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return stay_detail(arguments, 123456)
+
+    async with httpx.AsyncClient(transport=lodging_transport(detail, names={5008360: '이전 요청 호텔'})) as client, \
+            MyRealTripQuoteProvider(client) as provider:
+        first_request = trip(flight_required=False)
+        first = await provider.quote(first_request)
+        assert first.lodging.amount_krw == 123456
+        assert provider.completed_quotes(first_request) == first
+        phase = 1
+        next_request = first_request if reuse_request_object else replace(first_request, city='오사카')
+        task = asyncio.create_task(provider.quote(next_request))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        snapshot = provider.completed_quotes(next_request)
+        assert snapshot.lodging.status == 'unavailable' and snapshot.lodging.amount_krw is None
+        assert snapshot.lodging.lodging_identity is None and cancelled.is_set()
+        assert provider.completed_quotes(replace(next_request)) is None
+        if not reuse_request_object:
+            assert provider.completed_quotes(first_request) is None
+        assert first.lodging.amount_krw == 123456
+
+
+@pytest.mark.asyncio
+async def test_node_user_cancellation_is_not_recovered_as_a_completed_course(mocker):
+    request_data = CourseRequestSchema.model_validate({
+        'userId': '550e8400-e29b-41d4-a716-446655440000', 'language': 'ko', 'mbti': 'INTJ',
+        'tripCondition': {'destinationCountry': '일본', 'destinationCity': '도쿄',
+                          'startDate': '2027-01-10', 'totalDays': 3, 'budget': 900000},
+    })
+    hotel_ready = asyncio.Event()
+    flight_cancelled = asyncio.Event()
+
+    async def transport(request):
+        if request.url.host == 'partner-ext-api.myrealtrip.com':
+            try:
+                await asyncio.Event().wait()
+            finally:
+                flight_cancelled.set()
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        params = payload['params']
+        if params['name'] == 'searchStays':
+            data = {'stays': [{'gid': 101, 'name': '확인한 호텔'}]}
+        else:
+            data = stay_detail(params['arguments'], 123456)
+            asyncio.get_running_loop().call_soon(hotel_ready.set)
+        return rpc_response(payload, {'structuredContent': data})
+
+    mocker.patch('app.agent.course_nodes._progress')
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as quotes:
+        recover = mocker.spy(quotes, 'completed_quotes')
+        nodes = CourseGraphNodes(mocker.Mock(), mocker.Mock(), quotes)
+        task = asyncio.create_task(nodes.quote_trip({
+            'request': request_data,
+            'destination': Destination('JP', 35, 139, 36, 140, verified_city_name='Tokyo'),
+        }))
+        await asyncio.wait_for(hotel_ready.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert recover.call_count == 0 and flight_cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -313,7 +884,7 @@ def stay_detail(arguments, amount=475374):
     }
 
 
-def lodging_transport(make_detail, gids=(5008360,), calls=None):
+def lodging_transport(make_detail, gids=(5008360,), calls=None, names=None):
     async def transport(request):
         payload = json.loads(request.content)
         if payload['method'] == 'initialize':
@@ -324,7 +895,7 @@ def lodging_transport(make_detail, gids=(5008360,), calls=None):
         if calls is not None:
             calls.append(params)
         if params['name'] == 'searchStays':
-            data = {'stays': [{'gid': gid} for gid in gids]}
+            data = {'stays': [{'gid': gid, **({'name': names.get(gid)} if names is not None else {})} for gid in gids]}
         else:
             data = await make_detail(params['arguments'])
         return rpc_response(payload, {'structuredContent': data, 'content': [], 'isError': False})
@@ -339,12 +910,13 @@ async def test_verified_whole_stay_total_is_not_average_price_times_nights():
         assert arguments == {'gid': 5008360, 'checkIn': '2027-01-10', 'checkOut': '2027-01-12', 'adultCount': 2, 'childCount': 1}
         return stay_detail(arguments)
 
-    async with httpx.AsyncClient(transport=lodging_transport(detail, calls=calls)) as client, \
+    async with httpx.AsyncClient(transport=lodging_transport(detail, calls=calls, names={5008360: '공급자 도쿄 호텔'})) as client, \
             MyRealTripQuoteProvider(client, adults=2, children=1) as provider:
         result = await provider.quote(trip(flight_required=False))
     assert result.lodging.status == 'available' and result.lodging.amount_krw == 475374
-    assert result.known_total_krw == 475374 and result.complete
+    assert result.total_krw == result.verified_total_krw == 475374 and result.complete
     assert result.lodging.amount_krw != 194155 * 2
+    assert result.lodging.lodging_identity == LodgingIdentity(5008360, '공급자 도쿄 호텔')
     assert [call['name'] for call in calls] == ['searchStays', 'getStayDetail']
 
 
@@ -394,11 +966,16 @@ async def test_unverified_lodging_details_remain_unknown_instead_of_inventing_to
             }[mutation]
         return data
 
-    async with httpx.AsyncClient(transport=lodging_transport(detail)) as client, \
+    async with httpx.AsyncClient(transport=lodging_transport(detail, names={5008360: '공급자 도쿄 호텔'})) as client, \
             MyRealTripQuoteProvider(client) as provider:
         result = await provider.quote(trip(flight_required=False))
     assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
     assert not result.complete and result.missing_items == ('lodging',)
+    price_only_failure = mutation in {
+        'missing_room_name', 'missing_pricing', 'foreign_currency', 'no_krw_unit', 'missing_total',
+        'negative_total', 'bool_total', 'fractional_total', 'nightly_string',
+    }
+    assert result.lodging.lodging_identity == (LodgingIdentity(5008360, '공급자 도쿄 호텔') if price_only_failure else None)
 
 
 @pytest.mark.asyncio
@@ -415,11 +992,57 @@ async def test_lodging_compares_two_hotels_and_available_rooms_with_one_bounded_
             data['rooms'] += [cheap_room, sold_out]
         return data
 
-    async with httpx.AsyncClient(transport=lodging_transport(detail, gids=(5008360, 5008361, 5008362), calls=calls)) as client, \
+    names = {5008360: '비싼 호텔', 5008361: '선택한 호텔', 5008362: '조회하지 않는 호텔'}
+    async with httpx.AsyncClient(transport=lodging_transport(detail, gids=(5008360, 5008361, 5008362), calls=calls, names=names)) as client, \
             MyRealTripQuoteProvider(client) as provider:
         result = await provider.quote(trip(flight_required=False))
     assert result.lodging.amount_krw == 430000
+    assert result.lodging.lodging_identity == LodgingIdentity(5008361, '선택한 호텔')
     assert sum(call['name'] == 'getStayDetail' for call in calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_price_less_second_hotel_keeps_verified_identity_after_first_detail_fails():
+    calls = []
+
+    async def detail(arguments):
+        data = stay_detail(arguments, None)
+        if arguments['gid'] == 101:
+            data['property']['region']['country'] = '미국'
+        return data
+
+    names = {101: '다른 국가 호텔', 102: '목적지 호텔'}
+    async with httpx.AsyncClient(transport=lodging_transport(detail, gids=(101, 102), calls=calls, names=names)) as client, \
+            MyRealTripQuoteProvider(client) as provider:
+        result = await provider.quote(trip(flight_required=False))
+    assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
+    assert result.lodging.lodging_identity == LodgingIdentity(102, '목적지 호텔')
+    assert [call['name'] for call in calls] == ['searchStays', 'getStayDetail', 'getStayDetail']
+
+
+@pytest.mark.asyncio
+async def test_price_less_preferred_hotel_identity_survives_failed_default_search():
+    searches = []
+
+    async def transport(request):
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        params = payload['params']
+        if params['name'] == 'searchStays':
+            searches.append(params['arguments'])
+            data = {'stays': [{'gid': 101, 'name': '추천 호텔'}] if 'starRating' in params['arguments'] else []}
+        else:
+            data = stay_detail(params['arguments'], None)
+        return rpc_response(payload, {'structuredContent': data})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, MyRealTripQuoteProvider(client) as provider:
+        result = await provider.quote(replace(trip(flight_required=False), preferred_stay_star_rating='fivestar'))
+    assert len(searches) == 2
+    assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
+    assert result.lodging.lodging_identity == LodgingIdentity(101, '추천 호텔')
 
 
 @pytest.mark.asyncio
@@ -676,3 +1299,118 @@ async def test_verified_name_bridge_cannot_override_domestic_or_overseas_identit
         result = await provider.quote(request)
     assert result.lodging.status == 'unavailable' and result.lodging.amount_krw is None
     assert result.lodging.reason == 'unverified_property_region'
+
+
+def airport_fare_transport(records, make_result, calls):
+    """Exercise real provider serialization using recorded airport/fare contracts."""
+    async def transport(request):
+        if request.url.host == 'partner-ext-api.myrealtrip.com':
+            calls.append('airport-autocomplete')
+            return partner_response(records)
+        payload = json.loads(request.content)
+        if payload['method'] == 'initialize':
+            return rpc_response(payload, {'protocolVersion': PROTOCOL_VERSION})
+        if payload['method'] == 'notifications/initialized':
+            return httpx.Response(202)
+        arguments = payload['params']['arguments']
+        calls.append(arguments)
+        return rpc_response(payload, {'structuredContent': await make_result(arguments)})
+    return httpx.MockTransport(transport)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('codes', [('NRT',), ('NRT', 'HND'), ('NRT', 'HND', 'IBR', 'FSZ')])
+async def test_no_fares_preserve_only_unambiguous_airport_and_do_not_add_lookup_calls(codes):
+    calls = []
+
+    async def no_fare(arguments):
+        data = flight_result(destination=arguments['destination'])
+        data['result']['items'] = []
+        return data
+
+    request = trip(days=1)
+    async with httpx.AsyncClient(transport=airport_fare_transport([airport(code=code) for code in codes], no_fare, calls)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
+        quotes = await provider.quote(request)
+        assert provider.completed_quotes(request) == quotes
+    assert quotes.flight.status == 'unavailable' and quotes.flight.amount_krw is None
+    assert (quotes.flight.airport_identity.code if quotes.flight.airport_identity else None) == ('NRT' if len(codes) == 1 else None)
+    assert calls[0] == 'airport-autocomplete' and len(calls) == 1 + min(len(codes), 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('names_mode', ['missing', 'english_only', 'conflicting'])
+async def test_fare_remains_usable_without_an_unambiguous_airport_name(names_mode):
+    calls = []
+    records = [airport()]
+    if names_mode == 'missing':
+        records[0]['airport'] = {'code': 'NRT'}
+    elif names_mode == 'english_only':
+        records[0]['airport'].pop('koName')
+    else:
+        other = airport()
+        other['airport']['koName'] = '상충하는 다른 공항'
+        records.append(other)
+
+    async def priced(arguments):
+        return flight_result(234567)
+
+    async with httpx.AsyncClient(transport=airport_fare_transport(records, priced, calls)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
+        quotes = await provider.quote(trip(days=1))
+    assert quotes.flight.amount_krw == 234567 and quotes.flight.status == 'available'
+    if names_mode == 'english_only':
+        assert quotes.flight.airport_identity == AirportIdentity('NRT', 'Narita International Airport', 'JP', 'Narita International Airport')
+    else:
+        assert quotes.flight.airport_identity is None
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cabin_fallback_keeps_the_airport_of_selected_fare_in_the_result_and_snapshot():
+    calls = []
+
+    async def priced(arguments):
+        amount = {('NRT', 'BUSINESS'): 600000, ('HND', 'BUSINESS'): 700000,
+                  ('NRT', 'ECONOMY'): 400000, ('HND', 'ECONOMY'): 300000}[arguments['destination'], arguments['cabinClass']]
+        return flight_result(amount, destination=arguments['destination'])
+
+    request = replace(trip(days=1), preferred_cabin='BUSINESS', flight_budget_krw=350000)
+    async with httpx.AsyncClient(transport=airport_fare_transport([airport(), airport(code='HND')], priced, calls)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
+        quotes = await provider.quote(request)
+        assert provider.completed_quotes(request) == quotes
+    assert quotes.flight.amount_krw == 300000
+    assert quotes.flight.airport_identity == AirportIdentity('HND', '하네다 공항', 'JP', 'Haneda Airport')
+    assert len(calls) == 5
+
+
+@pytest.mark.asyncio
+async def test_cancelled_price_lookup_recovers_sole_airport_but_never_a_previous_invocation():
+    calls = []
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def stalled(arguments):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    request = trip(days=1)
+    async with httpx.AsyncClient(transport=airport_fare_transport([airport()], stalled, calls)) as client, \
+            MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
+        task = asyncio.create_task(provider.quote(request))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        snapshot = provider.completed_quotes(request)
+        assert snapshot.flight.status == 'unavailable' and snapshot.flight.amount_krw is None
+        assert snapshot.flight.airport_identity.code == 'NRT' and cancelled.is_set()
+        assert provider.completed_quotes(replace(request)) is None
+        restarted = await provider.quote(request, deadline=asyncio.get_running_loop().time() - 1)
+        assert restarted.flight.airport_identity is None and provider.completed_quotes(request) == restarted
+        assert snapshot.flight.airport_identity.code == 'NRT'
+    assert len(calls) == 2
