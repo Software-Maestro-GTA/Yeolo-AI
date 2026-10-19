@@ -535,7 +535,7 @@
           },
           "totalCost": {
             "default": 0,
-            "description": "제공된 일정 비용 및 조회 가능한 항공·숙박 견적의 합계 (KRW)",
+            "description": "일정 비용과 왕복 교통·숙박 실조회 또는 기준 추정액의 합계 (KRW)",
             "minimum": 0,
             "title": "Totalcost",
             "type": "integer"

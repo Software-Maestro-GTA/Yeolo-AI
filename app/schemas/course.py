@@ -162,7 +162,7 @@ class CourseSchema(BaseModel):
     totalCost: int = Field(
         default=0,
         ge=0,
-        description="제공된 일정 비용 및 조회 가능한 항공·숙박 견적의 합계 (KRW)",
+        description="일정 비용과 왕복 교통·숙박 실조회 또는 기준 추정액의 합계 (KRW)",
     )
     tags: list[str] = Field(
         default_factory=list, description="요청 언어로 작성된 여행 태그"

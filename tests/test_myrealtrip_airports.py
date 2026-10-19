@@ -8,7 +8,11 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from app.services.myrealtrip_quotes import PROTOCOL_VERSION, MyRealTripQuoteProvider
+from app.services.myrealtrip_quotes import (
+    PROTOCOL_VERSION,
+    AirportIdentity,
+    MyRealTripQuoteProvider,
+)
 from tests.test_myrealtrip_quotes import (
     airport,
     flight_result,
@@ -50,7 +54,10 @@ async def test_concurrent_airport_requests_reuse_keyword_lookups():
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
             MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
         first, second = await asyncio.gather(provider._airports(trip()), provider._airports(trip()))
-    assert first == second == ['NRT', 'HND']
+    assert first == second == {
+        'NRT': AirportIdentity('NRT', '나리타 국제공항', 'JP', 'Narita International Airport'),
+        'HND': AirportIdentity('HND', '하네다 공항', 'JP', 'Haneda Airport'),
+    }
     assert calls == Counter({'도쿄': 1})
 
 
@@ -94,6 +101,6 @@ async def test_airport_lookup_uses_verified_english_city_for_other_input_scripts
     request = replace(trip(city='東京'), verified_country_name='일본', verified_city_name='Tokyo')
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client, \
             MyRealTripQuoteProvider(client, partner_api_key='offline-key', origin_airport='ICN') as provider:
-        codes = await provider._airports(request)
-    assert codes == ['NRT']
+        identities = await provider._airports(request)
+    assert identities == {'NRT': AirportIdentity('NRT', '나리타 국제공항', 'JP', 'Narita International Airport')}
     assert calls == [{'keyword': 'Tokyo', 'size': 20}]

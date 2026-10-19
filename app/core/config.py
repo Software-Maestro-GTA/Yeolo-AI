@@ -27,6 +27,9 @@ class Settings:
     # Server-side quote conditions: one adult, one room, prices in KRW.
     MYREALTRIP_PARTNER_API_KEY: str = os.getenv("MYREALTRIP_PARTNER_API_KEY", "")
     MYREALTRIP_ORIGIN_AIRPORT: str = os.getenv("MYREALTRIP_ORIGIN_AIRPORT", "ICN")
+    MYREALTRIP_DOMESTIC_ORIGIN_AIRPORT: str = os.getenv(
+        "MYREALTRIP_DOMESTIC_ORIGIN_AIRPORT", "GMP"
+    )
     MYREALTRIP_ADULTS: int = int(os.getenv("MYREALTRIP_ADULTS", "1"))
     MYREALTRIP_QUOTE_TIMEOUT_SECONDS: float = float(
         os.getenv("MYREALTRIP_QUOTE_TIMEOUT_SECONDS", "8")

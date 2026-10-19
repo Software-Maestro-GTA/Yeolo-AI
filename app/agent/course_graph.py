@@ -36,8 +36,9 @@ def build_course_graph(
     """Compile the normal generation flow and its existing recovery branches.
 
     Normal flow:
-        prepare → draft → verify_places → verify_routes → schedule → finalize
-        → localize_display → finalize_course. Travel quotes run alongside daily drafts. Deferred
+        prepare → quote_trip → draft → verify_places → verify_routes → schedule
+        → finalize → localize_display → finalize_course. Travel costs are resolved
+        before daily proposals receive their remaining activity budget. Deferred
         venues are queried before further model calls. Failed proposals can
         refill missing days, repair verified candidates or restore a snapshot.
 
@@ -73,9 +74,8 @@ def build_course_graph(
 
     # Entry and recovery paths have unconditional successors.
     graph.add_edge(START, "prepare")
-    graph.add_edge("prepare", "draft")
     graph.add_edge("prepare", "quote_trip")
-    graph.add_edge("quote_trip", END)
+    graph.add_edge("quote_trip", "draft")
     graph.add_edge("expand_places", "verify_places")
     graph.add_edge("repair", "verify_routes")
     graph.add_edge("restore", "schedule")

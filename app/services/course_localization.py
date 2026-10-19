@@ -106,8 +106,7 @@ def _localized(options: tuple[str, ...], language: str) -> str:
     return options[LANGUAGES.index(_language(language))]
 
 
-# All strings describe work actually performed; new optional quote notices state
-# the displayed estimate's scope rather than implying a verified full-trip fare.
+# Progress separates live quotes from service benchmarks in the displayed total.
 PROGRESS_MESSAGES = {
     "prepare": (
         "여행 조건과 최근 코스 이력을 확인하고 있습니다.",
@@ -220,26 +219,26 @@ PROGRESS_MESSAGES = {
         "Preparando recomendações e dicas no seu idioma.",
     ),
     "quote": (
-        "항공·숙박 견적과 일정 비용을 확인하고 있습니다.",
-        "Checking flight, accommodation and itinerary costs.",
-        "航空券・宿泊の見積もりと旅程の費用を確認しています。",
-        "正在查询机票、住宿和行程费用。",
-        "正在查詢機票、住宿和行程費用。",
-        "Vérification des coûts des vols, de l’hébergement et du programme.",
-        "Comprobando los costes de vuelos, alojamiento e itinerario.",
-        "Kosten für Flüge, Unterkunft und Reiseplan werden geprüft.",
-        "Verificando os custos de voos, hospedagem e roteiro.",
+        "왕복 이동·숙박 비용을 확인하고 여행 예산을 배분하고 있습니다.",
+        "Checking round-trip travel and accommodation costs to allocate your budget.",
+        "往復交通費と宿泊費を確認し、旅行予算を配分しています。",
+        "正在核算往返交通与住宿费用，分配旅行预算。",
+        "正在核算往返交通與住宿費用，分配旅行預算。",
+        "Vérification des frais de transport aller-retour et d’hébergement pour répartir votre budget.",
+        "Comprobando el transporte de ida y vuelta y el alojamiento para distribuir tu presupuesto.",
+        "Kosten für Hin- und Rückreise sowie Unterkunft werden zur Budgetplanung geprüft.",
+        "Verificando transporte de ida e volta e hospedagem para distribuir seu orçamento.",
     ),
-    "quote_missing": (
-        "표시된 예상 경비에는 확인 가능한 비용을 합산했습니다. {items} 견적은 포함되지 않았습니다.",
-        "The estimate includes the costs currently available. {items} quotes are not included.",
-        "表示額には確認できた費用を合算しています。{items}の見積もりは含まれていません。",
-        "显示的预计费用已汇总目前可查询的项目，未包含{items}报价。",
-        "顯示的預計費用已彙總目前可查詢的項目，未包含{items}報價。",
-        "L’estimation regroupe les coûts disponibles. Les devis pour {items} ne sont pas inclus.",
-        "La estimación suma los costes disponibles. No incluye las cotizaciones de {items}.",
-        "Die Schätzung umfasst die verfügbaren Kosten. Angebote für {items} sind nicht enthalten.",
-        "A estimativa soma os custos disponíveis. As cotações de {items} não estão incluídas.",
+    "quote_estimated": (
+        "예상 경비에 {items} 기준 추정액을 포함했습니다.",
+        "Your total includes service benchmark estimates for {items}.",
+        "合計には{items}のサービス基準による推定額が含まれています。",
+        "总费用包含按服务基准估算的{items}费用。",
+        "總費用包含按服務基準估算的{items}費用。",
+        "Le total inclut des estimations de référence du service pour {items}.",
+        "El total incluye estimaciones de referencia del servicio para {items}.",
+        "Die Gesamtkosten enthalten Richtwertschätzungen des Dienstes für {items}.",
+        "O total inclui estimativas de referência do serviço para {items}.",
     ),
     "budget_over": (
         "현재 예상 경비 {total:,.0f}원은 입력하신 예산 {budget:,.0f}원보다 높습니다. 확인된 코스는 유지했습니다.",
@@ -288,6 +287,11 @@ PROGRESS_MESSAGES = {
 }
 
 QUOTE_NAMES = {
+    "transport": (
+        "왕복 이동", "round-trip travel", "往復交通", "往返交通", "往返交通",
+        "le transport aller-retour", "el transporte de ida y vuelta",
+        "Hin- und Rückreise", "o transporte de ida e volta",
+    ),
     "flight": (
         "항공",
         "flights",
@@ -319,7 +323,7 @@ def progress_message(language: str, key: str, **values: Any) -> str:
     Args:
         language: Normalized request locale; unsupported fallback locales use en.
         key: Stage key shared by course nodes and the SSE service.
-        values: quote_missing uses items, budget_over uses total/budget.
+        values: quote_estimated uses items, budget_over uses total/budget.
     Returns:
         Progress text only; the existing GENERATING_ROUTE contract is unchanged.
     """
@@ -331,8 +335,8 @@ def progress_message(language: str, key: str, **values: Any) -> str:
             else _localized(PROGRESS_MESSAGES["draft"], language)
         )
     values = dict(values)
-    if key == "quote_missing":
-        items = values.get("items", ("flight", "lodging"))
+    if key == "quote_estimated":
+        items = values.get("items", ("transport", "lodging"))
         if isinstance(items, str):
             items = re.split(r"[,·/\s]+", items)
         aliases = {
@@ -340,6 +344,7 @@ def progress_message(language: str, key: str, **values: Any) -> str:
             "항공권": "flight",
             "숙소": "lodging",
             "숙박": "lodging",
+            "교통": "transport",
         }
         names = (
             [aliases.get(item, item) for item in items]
@@ -349,7 +354,7 @@ def progress_message(language: str, key: str, **values: Any) -> str:
         recognized = [name for name in names if name in QUOTE_NAMES]
         values["items"] = " / ".join(
             _localized(QUOTE_NAMES[name], language)
-            for name in (recognized or ["flight", "lodging"])
+            for name in (recognized or ["transport", "lodging"])
         )
     if key == "budget_over":
         values.setdefault("total", 0)

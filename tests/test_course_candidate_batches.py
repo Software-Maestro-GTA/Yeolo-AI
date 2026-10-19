@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from app.services.course_budget import BudgetTier
 from app.services.course_candidate_batches import (
     candidate_batch,
     candidate_query_key,
@@ -15,6 +16,8 @@ class Proposal:
     name: str
     english_name: str = ''
     meal: str = 'none'
+    cost: int = 0
+    budget_tier: BudgetTier = 'standard'
 
 
 def proposals() -> list[Proposal]:
@@ -93,3 +96,53 @@ def test_all_known_proposals_do_not_trigger_new_queries():
     source = proposals()
     known = {candidate_query_key(candidate) for candidate in source}
     assert candidate_batch(source, known, 6) == []
+
+
+@pytest.mark.parametrize(('allowance', 'expected_meals'), [
+    (50000, {'Local lunch', 'Local dinner'}),
+    (500000, {'Premium lunch', 'Premium dinner'}),
+])
+def test_budget_fit_is_applied_before_bounded_place_queries(allowance, expected_meals):
+    source = [
+        Proposal('Park'), Proposal('Beach'), Proposal('Landmark'),
+        Proposal('Local lunch', meal='lunch', cost=10000, budget_tier='economy'),
+        Proposal('Local dinner', meal='dinner', cost=15000, budget_tier='economy'),
+        Proposal('Experience', cost=60000, budget_tier='premium'),
+        Proposal('Premium lunch', meal='lunch', cost=80000, budget_tier='premium'),
+        Proposal('Premium dinner', meal='dinner', cost=100000, budget_tier='premium'),
+    ]
+    selected = candidate_batch(source, set(), 5, daily_budget=allowance)
+    assert len(selected) == 5
+    assert {item.name for item in selected if item.meal != 'none'} == expected_meals
+    assert {'Park', 'Beach'} <= {item.name for item in selected}
+    assert ('Experience' in {item.name for item in selected}) == (allowance == 500000)
+    assert selected == [item for item in source if item in selected]
+
+
+def test_initial_batch_compares_meals_together_to_avoid_avoidable_over_budget():
+    """Each premium meal fits alone, but two together must not displace an affordable pair."""
+    source = [
+        Proposal('Park'), Proposal('Beach'), Proposal('Landmark'),
+        Proposal('Premium lunch', meal='lunch', cost=40000, budget_tier='premium'),
+        Proposal('Premium dinner', meal='dinner', cost=40000, budget_tier='premium'),
+        Proposal('Value lunch', meal='lunch', cost=10000, budget_tier='economy'),
+        Proposal('Value dinner', meal='dinner', cost=10000, budget_tier='economy'),
+    ]
+    selected = candidate_batch(source, set(), 5, daily_budget=50000)
+    assert sum(item.cost for item in selected) == 50000
+    assert sum(item.budget_tier == 'premium' for item in selected) == 1
+    assert {item.meal for item in selected} == {'none', 'lunch', 'dinner'}
+
+
+@pytest.mark.parametrize(('local_price_scale', 'expected'), [(1, 'premium'), (10, 'economy')])
+def test_same_budget_buys_different_levels_at_different_local_prices(local_price_scale, expected):
+    source = [
+        Proposal('Park'), Proposal('Beach'), Proposal('Landmark'),
+        Proposal('Value lunch', meal='lunch', cost=3000 * local_price_scale, budget_tier='economy'),
+        Proposal('Value dinner', meal='dinner', cost=3000 * local_price_scale, budget_tier='economy'),
+        Proposal('Fine dining lunch', meal='lunch', cost=20000 * local_price_scale, budget_tier='premium'),
+        Proposal('Fine dining dinner', meal='dinner', cost=20000 * local_price_scale, budget_tier='premium'),
+    ]
+    selected = candidate_batch(source, set(), 5, daily_budget=100000)
+    assert {item.budget_tier for item in selected if item.meal != 'none'} == {expected}
+    assert len(selected) == 5

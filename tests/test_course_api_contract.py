@@ -211,7 +211,7 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
         assert isinstance(data["message"], str) and data["message"]
     assert_complete_contract(frames[-1][1])
     course = frames[-1][1]["course"]
-    assert course["totalCost"] == 135000
+    assert course["totalCost"] == 35000
     assert course["startDate"] == course["itinerary"]["days"][0]["date"] == api_request["tripCondition"]["startDate"]
     assert course["totalDays"] == len(course["itinerary"]["days"]) == 1
     stops = course["itinerary"]["days"][0]["stops"]
@@ -231,9 +231,7 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
             assert all(stop['transportToNext']['type'] == 'taxi' for stop in stops[:-1])
     assert stops[-1]["transportToNext"] == {"type": "none", "distance": 0.0, "minutes": 0, "memo": None}
     llm.assert_awaited_once()
-    quote.assert_awaited_once()
-    quoted = quote.await_args.args[0]
-    assert (quoted.verified_country_name, quoted.verified_city_name) == ('대한민국', 'Seoul')
+    quote.assert_not_awaited()
     factory.assert_called_once()
     if not route_failure and not place_failure:
         assert len(calls) == 18  # 7 ID searches + 7 Essentials lookups + 4 routes.

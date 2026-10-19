@@ -53,7 +53,9 @@ async def test_three_days_complete_with_only_failed_day_transfers_unknown(reques
     assert all(stop.transportToNext.minutes == 12 and stop.transportToNext.distance == 700
                for day in (days[0], days[2]) for stop in day.stops[:-1])
     assert all(day.stops[-1].transportToNext.type == 'none' for day in days)
-    assert course.totalCost == 3 * 35000 + 8 * 1800
+    # Missing stop-to-stop fares stay unknown; two hotel nights are independent.
+    assert state['trip_quotes'].lodging.status == 'estimated'
+    assert course.totalCost == 3 * 35000 + 8 * 1800 + 2 * 100000
     assert all(route.type != 'unknown' for route in state['route_cache'].values())
     assert state['route_pass_failures']
     llm.assert_awaited_once()

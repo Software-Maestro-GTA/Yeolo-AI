@@ -51,7 +51,13 @@ from app.schemas.course import (
     ItinerarySchema,
     TransportToNextSchema,
 )
-from app.services.course_budget import course_cost, daily_place_budget
+from app.services.course_budget import (
+    FLIGHT_BUDGET_SHARE,
+    LODGING_BUDGET_SHARE,
+    budget_guidance,
+    course_cost,
+    daily_place_budget,
+)
 from app.services.course_candidate_batches import candidate_batch, candidate_query_key
 from app.services.course_diversity import (
     MAX_OVERLAP,
@@ -95,10 +101,9 @@ from app.services.course_routing import (
 )
 from app.services.myrealtrip_quotes import (
     MyRealTripQuoteProvider,
-    QuoteItem,
     QuoteRequest,
-    TripQuotes,
 )
+from app.services.travel_cost_baselines import baseline_trip_quotes, merge_trip_quotes
 
 logger = logging.getLogger(__name__)
 
@@ -197,34 +202,65 @@ class CourseGraphNodes:
         }
 
     async def quote_trip(self, state: CourseState) -> dict:
-        """Fetch independent travel quotes while the model proposes daily venues."""
+        """Resolve return travel and all nights before allocating the venue budget.
+
+        Available provider amounts replace explicit planning estimates. Optional
+        lookup errors keep the estimates; request cancellation still propagates.
+        """
         _progress("quote", language=state["request"].language)
         trip = state["request"].tripCondition
         start = date.fromisoformat(trip.startDate)
+        baseline = baseline_trip_quotes(
+            state["request"], state["destination"], adults=settings.MYREALTRIP_ADULTS
+        )
+        # No supplier rail/bus quote exists. A day trip without flying has no
+        # flight or hotel lookup to perform, but still includes ground travel.
+        if baseline.transport_mode != "air" and trip.totalDays == 1:
+            return {"trip_quotes": baseline}
+        # Compare real local product prices against each allowance. A universal
+        # KRW activity band cannot establish what hotel/cabin the city affords.
+        live = None
+        quote_request = None
         try:
             if self.quotes is None:
                 raise ValueError("Quote provider unavailable")
-            quotes = await self.quotes.quote(
-                QuoteRequest(
-                    country_code=state["destination"].country_code,
-                    country=trip.destinationCountry,
-                    city=trip.destinationCity,
-                    start_date=start,
-                    end_date=start + timedelta(days=trip.totalDays - 1),
-                    verified_country_name=state["destination"].verified_country_name or None,
-                    verified_city_name=state["destination"].verified_city_name or None,
-                )
+            configured_timeout = settings.MYREALTRIP_QUOTE_TIMEOUT_SECONDS
+            quote_timeout = (
+                configured_timeout
+                if math.isfinite(configured_timeout) and configured_timeout > 0 else 8.0
             )
-        except Exception:  # noqa: BLE001 - optional quotes must not discard a verified itinerary; cancellation propagates
-            logger.warning("Travel quote lookup unavailable")
-            quotes = TripQuotes(
-                flight=QuoteItem(status="unavailable", reason="lookup_unavailable"),
-                lodging=QuoteItem(
-                    status="not_applicable" if trip.totalDays == 1 else "unavailable",
-                    reason="lookup_unavailable",
+            quote_deadline = min(
+                asyncio.get_running_loop().time() + quote_timeout,
+                state.get("deadline", float("inf")) - 28.0,
+            )
+            quote_request = QuoteRequest(
+                country_code=state["destination"].country_code,
+                country=trip.destinationCountry,
+                city=trip.destinationCity,
+                start_date=start,
+                end_date=start + timedelta(days=trip.totalDays - 1),
+                flight_required=baseline.transport_mode == "air",
+                origin_airport=(
+                    settings.MYREALTRIP_DOMESTIC_ORIGIN_AIRPORT
+                    if state["destination"].country_code == "KR" and baseline.transport_mode == "air"
+                    else None
                 ),
+                verified_country_name=state["destination"].verified_country_name or None,
+                verified_city_name=state["destination"].verified_city_name or None,
+                preferred_cabin="BUSINESS" if trip.budget > 0 else "ECONOMY",
+                preferred_stay_star_rating="fivestar" if trip.budget > 0 else None,
+                flight_budget_krw=trip.budget * FLIGHT_BUDGET_SHARE,
+                lodging_budget_krw=trip.budget * LODGING_BUDGET_SHARE,
             )
-        return {"trip_quotes": quotes}
+            async with asyncio.timeout_at(quote_deadline):
+                live = await self.quotes.quote(quote_request, deadline=quote_deadline)
+        except TimeoutError:
+            if isinstance(self.quotes, MyRealTripQuoteProvider) and quote_request is not None:
+                live = self.quotes.completed_quotes(quote_request)
+            logger.warning("Travel quote deadline reached; keeping completed prices and planning benchmarks")
+        except Exception:  # noqa: BLE001 - optional quotes must not discard a verified itinerary; cancellation propagates
+            logger.warning("Travel quote lookup unavailable; using planning benchmarks")
+        return {"trip_quotes": merge_trip_quotes(baseline, live)}
 
     async def expand_places(self, state: CourseState) -> dict:
         """Query deferred real candidates before spending another model request."""
@@ -341,6 +377,9 @@ class CourseGraphNodes:
                 queried,
                 limit,
                 prefer_meal_balance=not state.get("expanding_places", False),
+                daily_budget=daily_place_budget(
+                    state["request"], state.get("trip_quotes")
+                ),
             ):
                 unique.setdefault(key(candidate), candidate)
         queried.update(unique)
@@ -1053,7 +1092,7 @@ class CourseGraphNodes:
             startDate=trip.startDate,
             totalDays=trip.totalDays,
             totalCost=course_cost(state["days"])
-            + (state["trip_quotes"].known_total_krw if state.get("trip_quotes") else 0),
+            + (state["trip_quotes"].total_krw if state.get("trip_quotes") else 0),
             tags=verified_course_tags(state["days"]),
             itinerary=ItinerarySchema(days=state["days"]),
         )
@@ -1120,15 +1159,19 @@ class CourseGraphNodes:
         return {"course": course}
 
     async def finalize_course(self, state: CourseState) -> dict:
-        """Disclose partial quotes and return the course after display localization."""
+        """Disclose benchmark amounts and return the localized course."""
         request, course = state["request"], state["course"]
         quotes = state.get("trip_quotes")
-        if quotes and not quotes.complete:
+        if quotes and quotes.estimated_items:
             get_stream_writer()(
                 {
                     "step": "GENERATING_ROUTE",
                     "message": progress_message(
-                        request.language, "quote_missing", items=quotes.missing_items
+                        request.language, "quote_estimated",
+                        items=tuple(
+                            "transport" if item == "flight" else item
+                            for item in quotes.estimated_items
+                        ),
                     ),
                 }
             )
@@ -1145,9 +1188,10 @@ class CourseGraphNodes:
                 }
             )
         logger.info(
-            "Travel quote summary: flight=%s lodging=%s total_cost_krw=%d budget_krw=%s",
-            quotes.flight.status if quotes else "unavailable",
-            quotes.lodging.status if quotes else "unavailable",
+            "Travel cost summary: mode=%s transport=%s lodging=%s total_cost_krw=%d budget_krw=%s",
+            quotes.transport_mode if quotes else "unknown",
+            quotes.flight if quotes else None,
+            quotes.lodging if quotes else None,
             course.totalCost,
             request.tripCondition.budget,
         )
@@ -1385,7 +1429,7 @@ class CourseGraphNodes:
             {value for item in profiles for value in item.get("experiences", [])}
         )
         return (
-            f"일정의 일별 장소 예산 목표(KRW): {daily_place_budget(state['request'], state.get('trip_quotes')):.0f}. 확인된 항공·숙박 비용을 제외한 금액이며 미조회 항목이 있으면 전체 예산 충족을 보장하지 마세요. 예산 초과가 불가피하면 명소와 필수 식사를 유지하세요.\n"
+            budget_guidance(state["request"], state.get("trip_quotes")) + "\n"
             + (
                 (
                     "최근 계획 권역: "

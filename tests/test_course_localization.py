@@ -462,7 +462,7 @@ def test_stage_keys_and_quote_budget_notices_are_localized(language):
     )
     refill = course_localization.progress_message(language, "refill")
     quote = course_localization.progress_message(
-        language, "quote_missing", items=("flight", "lodging")
+        language, "quote_estimated", items=("transport", "lodging")
     )
     budget = course_localization.progress_message(
         language, "budget_over", total=120000, budget=100000
@@ -472,6 +472,7 @@ def test_stage_keys_and_quote_budget_notices_are_localized(language):
     )
     assert "120,000" in budget and "100,000" in budget
     assert "{items}" not in quote
+    assert quote != 'quote_estimated'
 
 
 @pytest.mark.asyncio

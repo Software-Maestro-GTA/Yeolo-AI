@@ -36,6 +36,10 @@ class Candidate(BaseModel):
     category: str = "attraction"
     stay_minutes: int = Field(default=60, ge=15, le=240)
     cost: int = Field(default=0, ge=0)
+    budget_tier: Literal["economy", "standard", "comfortable", "premium"] = Field(
+        default="standard",
+        description="Destination-relative spending level for the proposed use, independent of request budget; not a verified rating",
+    )
     reason: str = ""
     meal: Literal["none", "breakfast", "lunch", "dinner"] = "none"
     planned_area: str = Field(default="", max_length=100)

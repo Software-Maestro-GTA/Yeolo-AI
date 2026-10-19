@@ -106,7 +106,10 @@ async def test_two_day_course_uses_only_ids_details_essentials_and_actual_routes
     assert {stop.place.category for stop in stops} == {'museum', 'restaurant', 'park', 'art_gallery'}
     assert all(stop.place.category != 'unverified_llm_category' for stop in stops)
     assert all(stop.transportToNext.minutes == 5 for day in course.itinerary.days for stop in day.stops[:-1])
-    assert course.totalCost == 60000
+    # Two days retain their venue costs and include one benchmark hotel night.
+    assert state['trip_quotes'].lodging.status == 'estimated'
+    assert state['trip_quotes'].flight.status == 'not_applicable'
+    assert course.totalCost == 60000 + 60000
     wire = course.model_dump(context={'public_response': True})
     public = CourseSchema.model_validate(wire)
     assert {stop.place.placeId for day in public.itinerary.days for stop in day.stops} == {
