@@ -84,7 +84,7 @@ class PlaceSchema(BaseModel):
     placeName: str = Field(..., description="요청 언어로 표기한 검증 장소명; Google 공식 표시 이름은 조회하지 않음")
     category: PlaceCategoryCode = Field(
         ...,
-        description="앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트)",
+        description="앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트), LODGING(숙소), AIRPORT(공항)",
         json_schema_extra={"enum": list(PLACE_CATEGORY_LABELS)},
     )
     latitude: float = Field(..., description="위도")

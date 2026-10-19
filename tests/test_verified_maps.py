@@ -65,6 +65,70 @@ async def test_provider_uses_place_facts_from_http_response(place_payload):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('secondary_ids', [[], ['monkey-observation-point'], ['monkey-observation-point', 'ChIJZ1X6XgARQjERE3WD4_wqlYw']])
+async def test_monkey_description_cannot_bind_cave_id_when_aliases_disagree(secondary_ids, caplog):
+    """A shared lower-ranked fuzzy hit is not independent identity evidence."""
+    from app.agent.course_state import Candidate
+    from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
+
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        assert request.method == 'POST'
+        assert request.headers['X-Goog-FieldMask'] == 'places.id'
+        body = json.loads(request.content)
+        assert body['textQuery'].endswith(', Da Nang, 베트남')
+        identifiers = secondary_ids if body['languageCode'] == 'en' else ['ChIJZ1X6XgARQjERE3WD4_wqlYw', 'monkey-observation-point']
+        return httpx.Response(200, json={'places': [{'id': identifier} for identifier in identifiers]})
+
+    candidate = Candidate(name='손짜 야생 원숭이 서식지 관람대', english_name='Son Tra Monkey Observation Point')
+    destination = Destination('VN', 15.8, 107.9, 16.3, 108.5, verified_country_name='베트남', verified_city_name='Da Nang')
+    with caplog.at_level('INFO', logger='app.agent.tools.verified_maps'):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            provider = VerifiedMapsProvider(client=client, api_key='private-test-key')
+            with pytest.raises(ValueError, match='same leading place ID'):
+                await provider.search(candidate, destination)
+            metrics = provider.metrics.snapshot()
+    assert len(calls) == 2
+    assert set(metrics['skus']) == {'text_search_ids'}
+    assert metrics['estimated_list_cost_usd'] == 0
+    assert 'reason=alias_disagreement' in caplog.text
+    assert 'private-test-key' not in caplog.text and candidate.name not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_scoped_bilingual_names_agree_before_one_essentials_detail(place_payload):
+    """Keep exact alias intent while detail facts remain independent evidence."""
+    from app.agent.course_state import Candidate
+    from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
+
+    calls = []
+    payload = {**place_payload, 'id': 'ChIJZ1X6XgARQjERE3WD4_wqlYw',
+               'formattedAddress': 'Hoa Hai, Ngu Hanh Son, Da Nang, Vietnam',
+               'addressComponents': [{'longText': '베트남', 'shortText': 'VN', 'types': ['country']}],
+               'location': {'latitude': 16.002809, 'longitude': 108.264329},
+               'types': ['tourist_attraction']}
+
+    def respond(request):
+        calls.append(request)
+        return place_response(request, payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = VerifiedMapsProvider(client=client, api_key='offline')
+        place = await provider.search(Candidate(name='후옌콩 동굴', english_name='Huyen Khong Cave'),
+                                      Destination('VN', 15.8, 107.9, 16.3, 108.5, verified_country_name='베트남', verified_city_name='Da Nang'))
+        metrics = provider.metrics.snapshot()
+    assert [json.loads(call.content)['textQuery'] for call in calls if call.method == 'POST'] == [
+        '후옌콩 동굴, Da Nang, 베트남', 'Huyen Khong Cave, Da Nang, 베트남',
+    ]
+    assert [call.method for call in calls] == ['POST', 'POST', 'GET']
+    assert place.place.placeId == payload['id'] and place.place.placeName == '후옌콩 동굴'
+    assert metrics['skus']['place_details_essentials']['requests'] == 1
+    assert metrics['estimated_list_cost_usd'] == pytest.approx(.005)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('failure', [404, 410, 'malformed_json', 'non_object', 'wrong_id'])
 async def test_unusable_individual_detail_skips_to_next_verified_id_with_essentials(place_payload, failure):
     from app.agent.course_state import Candidate
@@ -96,7 +160,7 @@ async def test_unusable_individual_detail_skips_to_next_verified_id_with_essenti
 
 
 @pytest.mark.asyncio
-async def test_deleted_localized_hit_allows_existing_english_name_fallback(place_payload):
+async def test_deleted_agreed_hit_does_not_bind_an_unmatched_english_alternative(place_payload):
     from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
@@ -106,7 +170,7 @@ async def test_deleted_localized_hit_allows_existing_english_name_fallback(place
         if request.method == 'POST':
             query = json.loads(request.content)['textQuery']
             queries.append(query)
-            identifiers = ['deleted-hit'] if query == '서울 미술관' else ['deleted-hit', place_payload['id']]
+            identifiers = ['deleted-hit'] if query == '서울 미술관, KR' else ['deleted-hit', place_payload['id']]
             return httpx.Response(200, json={'places': [{'id': identifier} for identifier in identifiers]})
         identifier = request.url.path.rsplit('/', 1)[-1]
         detail_ids.append(identifier)
@@ -114,10 +178,10 @@ async def test_deleted_localized_hit_allows_existing_english_name_fallback(place
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         provider = VerifiedMapsProvider(client=client, api_key='offline')
-        result = await provider.search(Candidate(name='서울 미술관', english_name='Seoul Museum'), Destination('KR', 37.3, 126.7, 37.8, 127.3))
-    assert result.place.placeId == place_payload['id']
-    assert queries == ['서울 미술관', 'Seoul Museum']
-    assert detail_ids == ['deleted-hit', place_payload['id']]
+        with pytest.raises(ValueError, match='No verified venue facts'):
+            await provider.search(Candidate(name='서울 미술관', english_name='Seoul Museum'), Destination('KR', 37.3, 126.7, 37.8, 127.3))
+    assert queries == ['서울 미술관, KR', 'Seoul Museum, KR']
+    assert detail_ids == ['deleted-hit']
 
 
 @pytest.mark.asyncio
@@ -143,8 +207,8 @@ async def test_global_detail_failure_is_not_hidden_by_other_hit_or_language(plac
         with pytest.raises(MapsProviderError) as error:
             await provider.search(Candidate(name='서울 미술관', english_name='Seoul Museum'), Destination('KR', 37.3, 126.7, 37.8, 127.3))
     assert error.value.kind == kind and error.value.status_code == status
-    assert len(calls) == 1 + detail_requests
-    assert all(request.url.path.endswith('/first-hit') for request in calls[1:])
+    assert len(calls) == 2 + detail_requests
+    assert all(request.url.path.endswith('/first-hit') for request in calls if request.method == 'GET')
     assert 'private' not in str(error.value)
 
 
@@ -239,7 +303,7 @@ async def test_provider_bounds_concurrent_searches_and_deduplicates(place_payloa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('case', ['candidate_label', 'english_fallback', 'nonfood_meal'])
+@pytest.mark.parametrize('case', ['candidate_label', 'missing_local_alias', 'nonfood_meal'])
 async def test_named_candidate_uses_verified_essential_identity_and_preserves_search_label(place_payload, case):
     from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
@@ -254,14 +318,14 @@ async def test_named_candidate_uses_verified_essential_identity_and_preserves_se
         if request.method == 'POST':
             query = json.loads(request.content)['textQuery']
             queries.append(query)
-            if case == 'english_fallback' and query == candidate.name:
+            if case == 'missing_local_alias' and query == f'{candidate.name}, KR':
                 return httpx.Response(200, json={'places': []})
         return place_response(request, payload)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         provider = VerifiedMapsProvider(client=client, api_key='offline')
         destination = Destination('KR', 37.3, 126.7, 37.8, 127.3)
-        if case == 'nonfood_meal':
+        if case in {'nonfood_meal', 'missing_local_alias'}:
             with pytest.raises(ValueError):
                 await provider.search(candidate, destination)
         else:
@@ -270,7 +334,7 @@ async def test_named_candidate_uses_verified_essential_identity_and_preserves_se
             assert verified.place.placeName == candidate.name
             assert verified.place.placeEngName == candidate.english_name
             assert verified.periods is None
-            assert queries == ([candidate.name, candidate.english_name] if case == 'english_fallback' else [candidate.name])
+            assert queries == [f'{candidate.name}, KR', f'{candidate.english_name}, KR']
             assert methods[-1] == 'GET'
 
 
@@ -409,7 +473,7 @@ async def test_id_search_and_essential_details_supply_place_without_pro_fields_o
         if request.method == 'POST':
             body = json.loads(request.content)
             assert body['pageSize'] == 5 and body['languageCode'] == language
-            assert body['textQuery'] == '서울 미술관'
+            assert body['textQuery'] == '서울 미술관, KR'
             assert body['locationBias']['rectangle']['low'] == {'latitude': 37.3, 'longitude': 126.7}
         else:
             assert set(request.headers['X-Goog-FieldMask'].split(',')) == {'id', 'formattedAddress', 'addressComponents', 'location', 'types'}
@@ -514,7 +578,7 @@ async def test_same_place_search_singleflight_is_shared_across_meal_roles(place_
 
 
 @pytest.mark.asyncio
-async def test_empty_local_search_falls_back_to_english_without_inventing_official_display_name(place_payload):
+async def test_empty_local_search_cannot_be_replaced_by_unmatched_english_id(place_payload):
     from app.agent.course_state import Candidate
     from app.agent.tools.verified_maps import Destination, VerifiedMapsProvider
 
@@ -524,13 +588,15 @@ async def test_empty_local_search_falls_back_to_english_without_inventing_offici
         if request.method == 'POST':
             body = json.loads(request.content)
             languages.append(body['languageCode'])
-            if body['textQuery'] == '서울 미술관':
+            if body['textQuery'] == '서울 미술관, KR':
                 return httpx.Response(200, json={'places': []})
+        else:
+            pytest.fail('An unmatched alias must not trigger a paid details request')
         return place_response(request, place_payload)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        place = await VerifiedMapsProvider(client=client, api_key='offline').search(Candidate(name='서울 미술관', english_name='Seoul Museum'), Destination('KR', 37.3, 126.7, 37.8, 127.3))
-    assert place.place.placeName == '서울 미술관' and place.place.placeEngName == 'Seoul Museum'
+        with pytest.raises(ValueError, match='same leading place ID'):
+            await VerifiedMapsProvider(client=client, api_key='offline').search(Candidate(name='서울 미술관', english_name='Seoul Museum'), Destination('KR', 37.3, 126.7, 37.8, 127.3))
     assert languages == ['ko', 'en']
 
 

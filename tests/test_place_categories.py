@@ -1,4 +1,4 @@
-"""Verify the seven app groups without changing internal provider evidence."""
+"""Verify display groups without changing internal provider evidence."""
 
 import pytest
 from pydantic import ValidationError
@@ -25,6 +25,8 @@ from app.services.place_categories import (
     ('park', 'NATURE'), ('hiking_area', 'NATURE'),
     ('theme_park', 'ACTIVITY'), ('spa', 'ACTIVITY'),
     ('pub', 'NIGHTLIFE'), ('night_club', 'NIGHTLIFE'),
+    ('hotel', 'LODGING'), ('lodging', 'LODGING'), ('guest_house', 'LODGING'),
+    ('airport', 'AIRPORT'), ('international_airport', 'AIRPORT'),
     ('unmapped_provider_type', 'SPOT'),
 ])
 def test_actual_provider_types_map_to_requested_app_groups(actual, expected):
@@ -47,7 +49,7 @@ def test_public_contract_rejects_raw_provider_types_and_unknown_codes(raw_type):
                     latitude=37.5, longitude=127.)
 
 
-@pytest.mark.parametrize('category', ['museum', 'market', 'brunch_restaurant', 'dessert_restaurant', 'hospital'])
+@pytest.mark.parametrize('category', ['museum', 'market', 'brunch_restaurant', 'dessert_restaurant', 'hospital', 'hotel', 'airport'])
 def test_public_serialization_preserves_internal_meal_and_tourism_evidence(category):
     """Public FOOD/SPOT groups must never replace raw safety or copy inputs."""
     raw = InternalPlaceSchema(placeId='places/id', placeName='장소', category=category,
@@ -72,10 +74,10 @@ def test_public_serialization_preserves_internal_meal_and_tourism_evidence(categ
 
 
 @pytest.mark.parametrize('mode', ['validation', 'serialization'])
-def test_public_response_schema_exposes_exactly_seven_groups(mode):
+def test_public_response_schema_exposes_visit_groups_lodging_and_airport(mode):
     schema = CourseResponseSchema.model_json_schema(mode=mode)
     values = schema['$defs']['PlaceSchema']['properties']['category']['enum']
-    assert values == ['FOOD', 'CAFE', 'SPOT', 'CULTURE', 'NATURE', 'ACTIVITY', 'NIGHTLIFE']
+    assert values == ['FOOD', 'CAFE', 'SPOT', 'CULTURE', 'NATURE', 'ACTIVITY', 'NIGHTLIFE', 'LODGING', 'AIRPORT']
 
 
 @pytest.mark.parametrize(('types', 'expected'), [

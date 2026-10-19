@@ -55,7 +55,7 @@ async def test_two_day_course_uses_only_ids_details_essentials_and_actual_routes
         ]):
             name = f'제안한 개별 장소 {day_index}-{index}'
             identifier = f'venue-{day_index}-{index}'
-            search_ids[name] = identifier
+            search_ids[f'{name}, KR'] = identifier
             records[identifier] = {
                 'id': identifier, 'types': [category, 'point_of_interest', 'establishment'],
                 'formattedAddress': '대한민국 서울',

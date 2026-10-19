@@ -626,7 +626,7 @@
             "type": "string"
           },
           "category": {
-            "description": "앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트)",
+            "description": "앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트), LODGING(숙소), AIRPORT(공항)",
             "enum": [
               "FOOD",
               "CAFE",
@@ -634,7 +634,9 @@
               "CULTURE",
               "NATURE",
               "ACTIVITY",
-              "NIGHTLIFE"
+              "NIGHTLIFE",
+              "LODGING",
+              "AIRPORT"
             ],
             "title": "Category",
             "type": "string"
