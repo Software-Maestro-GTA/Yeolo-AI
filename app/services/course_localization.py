@@ -31,6 +31,7 @@ from app.services.course_reasons import (
     SHOPPING,
     WELLNESS,
 )
+from app.services.place_categories import map_actual_place_category
 from app.services.route_copy import (
     NAVIGATION_RULES,
     NavigationCopy,
@@ -108,6 +109,61 @@ def _localized(options: tuple[str, ...], language: str) -> str:
 
 # Progress separates live quotes from service benchmarks in the displayed total.
 PROGRESS_MESSAGES = {
+    "anchors": (
+        "여행에 함께할 공항과 숙소 후보를 확인하고 있어요.",
+        "Verifying airport and accommodation candidates for your trip.",
+        "旅行に利用する空港と宿泊先の候補を確認しています。",
+        "正在确认旅程的机场和住宿候选地点。",
+        "正在確認旅程的機場和住宿候選地點。",
+        "Vérification des aéroports et hébergements proposés pour votre voyage.",
+        "Verificando los aeropuertos y alojamientos propuestos para el viaje.",
+        "Vorgeschlagene Flughäfen und Unterkünfte für Ihre Reise werden geprüft.",
+        "Verificando os aeroportos e hospedagens propostos para a viagem.",
+    ),
+    "airports": (
+        "첫날과 마지막 날에 공항과 이동을 연결하고 있어요.",
+        "Connecting airport transfers on your first and last days.",
+        "初日と最終日に空港と移動を追加しています。",
+        "正在为首日和末日添加机场及接送路线。",
+        "正在為首日和末日加入機場及接送路線。",
+        "Ajout de l’aéroport et des trajets le premier et le dernier jour.",
+        "Añadiendo el aeropuerto y los traslados del primer y último día.",
+        "Flughafen und Transfers werden für den ersten und letzten Tag ergänzt.",
+        "Adicionando o aeroporto e os traslados do primeiro e último dia.",
+    ),
+    "airports_unavailable": (
+        "이용 공항을 확인하지 못해 공항 구간을 제외한 일정으로 완성했어요.",
+        "The airport could not be verified; your itinerary is ready without airport segments.",
+        "利用空港を確認できなかったため、空港区間を除いた旅程を完成しました。",
+        "未能确认使用的机场，已完成不含机场路段的行程。",
+        "未能確認使用的機場，已完成不含機場路段的行程。",
+        "L’aéroport n’a pas pu être vérifié ; votre itinéraire est prêt sans les trajets aéroport.",
+        "No se pudo verificar el aeropuerto; el itinerario está listo sin los tramos de aeropuerto.",
+        "Der Flughafen konnte nicht bestätigt werden; die Reiseplanung ohne Flughafenabschnitte ist fertig.",
+        "Não foi possível confirmar o aeroporto; o roteiro está pronto sem os trechos de aeroporto.",
+    ),
+    "lodging": (
+        "숙박하는 날의 마지막에 숙소와 이동을 연결하고 있어요.",
+        "Adding your accommodation and return transfers on overnight days.",
+        "宿泊する日の最後に宿泊先と移動を追加しています。",
+        "正在为需要住宿的日期添加住宿地点和返回路线。",
+        "正在為需要住宿的日期加入住宿地點和返回路線。",
+        "Ajout de l’hébergement et des trajets de retour pour les nuits sur place.",
+        "Añadiendo el alojamiento y los traslados de regreso para las noches de estancia.",
+        "Die Unterkunft und Rückwege werden für die Übernachtungstage ergänzt.",
+        "Adicionando a hospedagem e os trajetos de volta nos dias com pernoite.",
+    ),
+    "lodging_unavailable": (
+        "숙소 위치를 확인하지 못해 관광·식사 일정으로 완성했어요.",
+        "The accommodation location could not be verified; your sightseeing and dining itinerary is ready.",
+        "宿泊先の位置を確認できなかったため、観光と食事の旅程を完成しました。",
+        "未能确认住宿地点，已完成观光和用餐行程。",
+        "未能確認住宿地點，已完成觀光和用餐行程。",
+        "L’emplacement de l’hébergement n’a pas pu être vérifié ; les visites et repas sont prêts.",
+        "No se pudo verificar la ubicación del alojamiento; el itinerario de visitas y comidas está listo.",
+        "Der Standort der Unterkunft konnte nicht bestätigt werden; Besichtigungen und Mahlzeiten sind geplant.",
+        "Não foi possível verificar o local da hospedagem; o roteiro de passeios e refeições está pronto.",
+    ),
     "prepare": (
         "여행 조건과 최근 코스 이력을 확인하고 있습니다.",
         "Checking your trip details and recent itineraries.",
@@ -568,6 +624,95 @@ VISIT_TIPS = {
 }
 
 
+def airport_copy(language: str, *, arrival: bool) -> tuple[str, str]:
+    """Describe an airport endpoint without inventing a flight or terminal.
+
+    Args:
+        language: Requested BCP 47 locale, using the existing locale fallback.
+        arrival: True for the first day's arrival, False for final departure.
+    Returns:
+        Localized endpoint purpose and practical tip. The flight timetable must
+        determine actual first/last-day timing; allowances are not guarantees.
+    """
+    if arrival:
+        return _localized((
+            "여행지에 도착하는 공항을 첫날의 출발점으로 연결했어요.",
+            "This arrival airport is the starting point for your first day.",
+            "到着する空港を初日の出発点にしました。",
+            "将抵达目的地的机场作为第一天行程的起点。",
+            "將抵達目的地的機場作為第一天行程的起點。",
+            "Cet aéroport d’arrivée est le point de départ de votre première journée.",
+            "Este aeropuerto de llegada es el punto de partida del primer día.",
+            "Dieser Ankunftsflughafen ist der Ausgangspunkt Ihres ersten Tages.",
+            "Este aeroporto de chegada é o ponto de partida do primeiro dia.",
+        ), language), _localized((
+            "항공편 도착 시각에 맞춰 첫날 일정의 시작 시간을 정하세요. 수하물을 받은 뒤 시내로 이동하세요.",
+            "Set your first day's start time around your flight arrival. Collect your luggage before heading into the city.",
+            "便の到着時刻に合わせて初日の開始時刻を決めましょう。荷物を受け取ってから市内へ移動しましょう。",
+            "根据航班抵达时间安排首日行程的开始时间。领取行李后再前往市区。",
+            "根據航班抵達時間安排首日行程的開始時間。領取行李後再前往市區。",
+            "Fixez le début de votre première journée selon l’arrivée du vol. Récupérez vos bagages avant de rejoindre la ville.",
+            "Ajusta el inicio del primer día a la llegada del vuelo. Recoge el equipaje antes de ir a la ciudad.",
+            "Richten Sie den Beginn des ersten Tages nach der Flugankunft. Holen Sie Ihr Gepäck ab, bevor Sie in die Stadt fahren.",
+            "Ajuste o início do primeiro dia ao horário de chegada do voo. Retire a bagagem antes de seguir para a cidade.",
+        ), language)
+    return _localized((
+        "마지막 일정을 마친 뒤 출국·출발 준비를 할 수 있도록 공항을 연결했어요.",
+        "The airport follows your final visit so you can prepare for departure.",
+        "最後の訪問後に出発準備ができるよう、空港をつなぎました。",
+        "在最后一站之后连接机场，方便准备返程。",
+        "在最後一站之後連接機場，方便準備返程。",
+        "L’aéroport suit votre dernière visite pour préparer votre départ.",
+        "El aeropuerto va después de la última visita para preparar la salida.",
+        "Nach dem letzten Besuch geht es zum Flughafen, um die Abreise vorzubereiten.",
+        "O aeroporto vem após a última visita para preparar a partida.",
+    ), language), _localized((
+        "항공사가 안내하는 수속 마감에 맞춰 공항 도착 시간을 정하고, 예약 내역에서 터미널을 확인하세요.",
+        "Plan your airport arrival around the airline's check-in deadline and find your terminal in the booking details.",
+        "航空会社の手続き締切に合わせて空港到着時刻を決め、予約内容でターミナルを確認しましょう。",
+        "根据航空公司的值机截止时间安排抵达机场的时间，并在预订信息中确认航站楼。",
+        "根據航空公司的報到截止時間安排抵達機場的時間，並在預訂資訊中確認航廈。",
+        "Prévoyez votre arrivée selon la limite d’enregistrement de la compagnie et consultez le terminal sur votre réservation.",
+        "Planifica la llegada según el cierre de facturación de la aerolínea y consulta la terminal en la reserva.",
+        "Planen Sie die Flughafenankunft nach dem Check-in-Schluss der Airline und prüfen Sie das Terminal in Ihrer Buchung.",
+        "Planeje a chegada ao aeroporto conforme o prazo de check-in da companhia e confira o terminal na reserva.",
+    ), language)
+
+
+def lodging_copy(language: str) -> tuple[str, str]:
+    """Describe a suggested stay without asserting a booking, room or facilities.
+
+    Args:
+        language: Requested BCP 47 locale, using the existing locale fallback.
+    Returns:
+        Recommendation reason and practical booking/arrival tip. Overnight
+        duration and check-in hours are not implied by the short settling-in stop.
+    """
+    reason = _localized((
+        "여행 중 머물 숙박 후보로, 매일 숙소를 옮기지 않고 하루 일정을 마무리할 수 있어요.",
+        "This suggested accommodation gives you one base to return to throughout your stay.",
+        "毎日宿を移動せず、一日の終わりに戻れる滞在先の候補です。",
+        "这处住宿可作为旅行期间的固定落脚点，每天游玩后返回，无需频繁更换住宿。",
+        "這處住宿可作為旅行期間的固定落腳點，每天遊玩後返回，無需頻繁更換住宿。",
+        "Cet hébergement proposé vous permet de retrouver le même point de chute chaque soir.",
+        "Este alojamiento propuesto te permite volver a una misma base durante la estancia.",
+        "Diese vorgeschlagene Unterkunft bietet Ihnen während der Reise einen festen Rückzugsort.",
+        "Esta hospedagem sugerida oferece uma base fixa para voltar ao fim de cada dia.",
+    ), language)
+    memo = _localized((
+        "예약 전 객실 구성과 체크인 조건을 살펴보고, 도착할 때 예약 내역과 신분증을 준비해 두세요.",
+        "Before booking, review the room setup and check-in conditions. Have your booking details and ID ready on arrival.",
+        "予約前に客室構成とチェックイン条件を確認し、到着時には予約内容と身分証明書を用意しましょう。",
+        "预订前了解房型和入住条件，到达时准备好预订信息和身份证件。",
+        "預訂前了解房型和入住條件，到達時準備好預訂資訊和身分證件。",
+        "Avant de réserver, consultez la configuration de la chambre et les conditions d’arrivée. Préparez votre réservation et une pièce d’identité.",
+        "Antes de reservar, revisa la distribución de la habitación y las condiciones de entrada. Prepara la reserva y tu identificación para la llegada.",
+        "Prüfen Sie vor der Buchung die Zimmeraufteilung und die Check-in-Bedingungen. Halten Sie bei der Ankunft Buchungsdaten und Ausweis bereit.",
+        "Antes de reservar, confira a configuração do quarto e as condições de check-in. Tenha a reserva e um documento em mãos na chegada.",
+    ), language)
+    return reason, memo
+
+
 def _experience_group(category: str) -> str:
     if category in CULTURE or category == "library":
         return "culture"
@@ -629,6 +774,12 @@ def _finish_display(request: CourseRequestSchema, course: CourseSchema) -> Cours
             route = stop.transportToNext
             if route.type in {'none', 'unknown'}:
                 route.memo = None
+            if map_actual_place_category(stop.place.category) == 'LODGING':
+                stop.reason, stop.memo = lodging_copy(language)
+                continue
+            if map_actual_place_category(stop.place.category) == 'AIRPORT':
+                stop.reason, stop.memo = airport_copy(language, arrival=day.day == 1 and stop.sequence == 1)
+                continue
             group = _experience_group(stop.place.category)
             if not guidance_matches_language(stop.memo, request.language):
                 tip_group = 'food' if group == 'cafe' else group if group in VISIT_TIPS else 'visit'
@@ -649,6 +800,12 @@ def _fallback(request: CourseRequestSchema, course: CourseSchema) -> CourseSchem
     groups = []
     for day in course.itinerary.days:
         for stop in day.stops:
+            if map_actual_place_category(stop.place.category) == 'LODGING':
+                stop.reason, stop.memo = lodging_copy(language)
+                continue
+            if map_actual_place_category(stop.place.category) == 'AIRPORT':
+                stop.reason, stop.memo = airport_copy(language, arrival=day.day == 1 and stop.sequence == 1)
+                continue
             group = _experience_group(stop.place.category)
             if group not in groups:
                 groups.append(group)

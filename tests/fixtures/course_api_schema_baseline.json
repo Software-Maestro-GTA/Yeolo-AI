@@ -535,7 +535,7 @@
           },
           "totalCost": {
             "default": 0,
-            "description": "일정 비용과 왕복 교통·숙박 실조회 또는 기준 추정액의 합계 (KRW)",
+            "description": "일정 비용과 왕복 교통·숙박 실조회 또는 기준 추정액의 합계 (KRW); 숙소 stop 비용은 중복 합산하지 않음",
             "minimum": 0,
             "title": "Totalcost",
             "type": "integer"
@@ -688,7 +688,7 @@
           },
           "cost": {
             "default": 0,
-            "description": "예상 활동·식사·입장 비용 (KRW)",
+            "description": "예상 활동·식사·입장 비용 또는 해당 일차 숙박 비용 (KRW); 공항 stop은 0이며 왕복 항공료는 totalCost에 별도 1회 합산",
             "minimum": 0,
             "title": "Cost",
             "type": "integer"

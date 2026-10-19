@@ -51,6 +51,13 @@ from app.schemas.course import (
     ItinerarySchema,
     TransportToNextSchema,
 )
+from app.schemas.course_anchors import AnchorCandidates
+from app.services.course_airports import attach_airports as attach_course_airports
+from app.services.course_anchor_selection import (
+    MAX_ANCHOR_LOOKUPS,
+    ResolvedCourseAnchors,
+    resolve_course_anchors,
+)
 from app.services.course_budget import (
     FLIGHT_BUDGET_SHARE,
     LODGING_BUDGET_SHARE,
@@ -70,6 +77,7 @@ from app.services.course_localization import (
     localize_course,
     progress_message,
 )
+from app.services.course_lodging import attach_lodging as attach_course_lodging
 from app.services.course_planning import (
     MAX_DAY_PLANS,
     MEAL_WINDOWS,
@@ -295,10 +303,13 @@ class CourseGraphNodes:
                 pending_days=pending,
                 existing_days=existing,
                 deadline=draft_deadline,
+                existing_anchors=state.get("anchor_candidates"),
+                airports_required=state.get("trip_quotes") is not None and state["trip_quotes"].transport_mode == "air",
             )
         except PartialDraftError as error:
             return {
                 "partial_drafts": error.days,
+                "anchor_candidates": self._keep_anchor_candidates(state, error.anchor_candidates),
                 "attempt": state["attempt"] + 1,
                 "feedback": "일부 일자 후보 응답이 지연되었습니다. 완료한 일자는 유지하고 누락한 일자만 보충하세요.",
             }
@@ -333,6 +344,7 @@ class CourseGraphNodes:
             )
         return {
             "draft_data": result,
+            "anchor_candidates": self._keep_anchor_candidates(state, result.anchor_candidates),
             "partial_drafts": {},
             "attempt": state["attempt"] + 1,
             "feedback": "",
@@ -340,6 +352,33 @@ class CourseGraphNodes:
             "route_pass_failures": {},
             "expanding_places": False,
         }
+
+    async def resolve_anchors(self, state: CourseState) -> dict:
+        """Verify shared airport/hotel names before ranking daytime costs.
+
+        Reservation availability is not a prerequisite. Resolved request-local
+        locations survive daily repairs and are reused during final attachment.
+        """
+        previous = state.get("anchor_selection")
+        if not isinstance(previous, ResolvedCourseAnchors):
+            previous = None
+        candidates = state.get("anchor_candidates", AnchorCandidates())
+        if previous is not None:
+            new_codes = {candidate.iata_code for candidate in candidates.airports} - set(previous.airport_attempts)
+            if (previous.airport is not None or previous.quotes.transport_mode != 'air'
+                    or len(previous.airport_attempts) >= MAX_ANCHOR_LOOKUPS or not new_codes):
+                return {}
+        _progress("anchors", language=state["request"].language)
+        quotes = state.get("trip_quotes") or baseline_trip_quotes(
+            state["request"], state["destination"], adults=settings.MYREALTRIP_ADULTS,
+        )
+        selected = await resolve_course_anchors(
+            state["request"], state["destination"], quotes,
+            candidates, self.provider,
+            deadline=state.get("deadline", float("inf")) - 28.0,
+            previous=previous,
+        )
+        return {"anchor_selection": selected, "trip_quotes": selected.quotes}
 
     async def verify_places(self, state: CourseState) -> dict:
         """Verify venue facts, supplement nearby candidates and form day plans."""
@@ -1144,6 +1183,51 @@ class CourseGraphNodes:
             _progress("repeated_supplemental", language=request.language)
         return {"course": course, "feedback": ""}
 
+    async def attach_lodging(self, state: CourseState) -> dict:
+        """Append a verified shared hotel after history has recorded daytime visits.
+
+        Accommodation may repeat on overnight dates without weakening the
+        distinct tourism/meal guarantees. Unknown hotel identity keeps the
+        daytime course; failed return routes remain explicitly unknown.
+        """
+        request = state["request"]
+        if request.tripCondition.totalDays <= 1:
+            return {"course": state["course"]}
+        _progress("lodging", language=request.language)
+        selection = state.get("anchor_selection")
+        resolved = isinstance(selection, ResolvedCourseAnchors)
+        course = await attach_course_lodging(
+            request, state["course"], state["destination"], state.get("trip_quotes"), self.provider,
+            deadline=state.get("deadline", float("inf")) - 5.0,
+            verified_lodging=selection.lodging if resolved else None,
+            lookup=not resolved,
+        )
+        if course is state["course"]:
+            _progress("lodging_unavailable", language=request.language)
+        return {"course": course}
+
+    async def attach_airports(self, state: CourseState) -> dict:
+        """Connect flight endpoints without adding them to tourism/history checks.
+
+        Only an identified destination airport is eligible. Airport failures
+        preserve the verified course; unknown transfers keep null metrics.
+        """
+        request, quotes = state["request"], state.get("trip_quotes")
+        if quotes is None or quotes.transport_mode != 'air':
+            return {"course": state["course"]}
+        _progress("airports", language=request.language)
+        selection = state.get("anchor_selection")
+        resolved = isinstance(selection, ResolvedCourseAnchors)
+        course = await attach_course_airports(
+            request, state["course"], state["destination"], quotes, self.provider,
+            deadline=state.get("deadline", float("inf")) - 5.0,
+            verified_airport=selection.airport if resolved else None,
+            lookup=not resolved,
+        )
+        if course is state["course"]:
+            _progress("airports_unavailable", language=request.language)
+        return {"course": course}
+
     async def localize_display(self, state: CourseState) -> dict:
         """Translate display text within the existing optional request budget.
 
@@ -1263,8 +1347,11 @@ class CourseGraphNodes:
                 pending_days=pending,
                 existing_days=existing,
                 deadline=deadline,
+                existing_anchors=state.get("anchor_candidates"),
+                airports_required=state.get("trip_quotes") is not None and state["trip_quotes"].transport_mode == "air",
             )
         except PartialDraftError as error:
+            updates["anchor_candidates"] = self._keep_anchor_candidates(state, error.anchor_candidates)
             if state.get("draft_data"):
                 result = state["draft_data"].model_copy(deep=True)
                 for index, day in error.days.items():
@@ -1294,6 +1381,9 @@ class CourseGraphNodes:
         updates.update(
             {
                 "draft_data": result,
+                "anchor_candidates": self._keep_anchor_candidates(
+                    state, updates.get("anchor_candidates", result.anchor_candidates),
+                ),
                 "partial_drafts": {},
                 "queried_place_keys": set(state["place_cache"]),
                 "expanding_places": False,
@@ -1422,6 +1512,15 @@ class CourseGraphNodes:
         profiles = await self.history.recent_profiles(history_key(request))
         return [set(item["place_ids"]) for item in profiles], profiles
 
+    @staticmethod
+    def _keep_anchor_candidates(state: CourseState, proposed: AnchorCandidates) -> AnchorCandidates:
+        """Preserve trip-wide names when only incomplete tourist days are retried."""
+        retained = state.get("anchor_candidates", AnchorCandidates())
+        return AnchorCandidates(
+            airports=proposed.airports or retained.airports,
+            lodgings=proposed.lodgings or retained.lodgings,
+        )
+
     def _history_feedback(self, state: CourseState) -> str:
         profiles = state.get("recent_profiles", [])
         areas = sorted({value for item in profiles for value in item.get("areas", [])})
@@ -1430,6 +1529,7 @@ class CourseGraphNodes:
         )
         return (
             budget_guidance(state["request"], state.get("trip_quotes")) + "\n"
+            + self._anchor_budget_feedback(state) + "\n"
             + (
                 (
                     "최근 계획 권역: "
@@ -1443,6 +1543,20 @@ class CourseGraphNodes:
                 if profiles
                 else ""
             )
+        )
+
+    @staticmethod
+    def _anchor_budget_feedback(state: CourseState) -> str:
+        """Give shared hotel proposals a budget target without asserting a price."""
+        quotes = state.get("trip_quotes")
+        nights = state["request"].tripCondition.totalDays - 1
+        if quotes is None or nights <= 0 or quotes.lodging.amount_krw is None:
+            return ""
+        nightly = quotes.lodging.amount_krw // nights
+        return (
+            f"공유 숙소 후보의 1박 계획 금액은 {nightly}원입니다. 이는 후보 호텔의 실제 판매가가 아닙니다. "
+            "요청한 도시의 물가와 전체 관광 권역을 고려하여 이 수준에 맞는 실제 호텔을 제안하세요. "
+            "예약 가능 여부나 확정 요금을 생성하지 마세요."
         )
 
     async def _run_with_fallback(self, node: CourseNode, state: CourseState) -> dict:

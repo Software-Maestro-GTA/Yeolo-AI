@@ -65,7 +65,7 @@ async def test_actual_graph_verifies_and_schedules_before_complete(request_data,
     graph = build_course_graph(provider, history)
     updates = [update async for update in graph.astream({'request': request_data, 'attempt': 0}, stream_mode='updates')]
     names = [name for update in updates for name in update]
-    assert [name for name in names if name != 'quote_trip'] == ['prepare', 'draft', 'verify_places', 'verify_routes', 'schedule', 'finalize', 'localize_display', 'finalize_course']
+    assert [name for name in names if name != 'quote_trip'] == ['prepare', 'draft', 'resolve_anchors', 'verify_places', 'verify_routes', 'schedule', 'finalize', 'attach_lodging', 'attach_airports', 'localize_display', 'finalize_course']
     assert names.count('quote_trip') == 1
     assert names.index('prepare') < names.index('quote_trip') < names.index('finalize_course')
     result = updates[-1]['finalize_course']['course']

@@ -136,7 +136,7 @@ class StopSchema(BaseModel):
     stayMinutes: int = Field(..., ge=1, description="체류 시간 (분)")
     memo: str = Field(..., description="요청 언어로 작성된 방문 팁")
     reason: str = Field(..., description="취향과 검증된 장소에 근거한 추천 이유")
-    cost: int = Field(default=0, ge=0, description="예상 활동·식사·입장 비용 (KRW)")
+    cost: int = Field(default=0, ge=0, description="예상 활동·식사·입장 비용 또는 해당 일차 숙박 비용 (KRW); 공항 stop은 0이며 왕복 항공료는 totalCost에 별도 1회 합산")
     place: PlaceSchema = Field(..., description="지도 연결용 장소 정보")
     transportToNext: TransportToNextSchema = Field(
         ..., description="다음 장소까지 실제 이동 정보"
@@ -162,7 +162,7 @@ class CourseSchema(BaseModel):
     totalCost: int = Field(
         default=0,
         ge=0,
-        description="일정 비용과 왕복 교통·숙박 실조회 또는 기준 추정액의 합계 (KRW)",
+        description="일정 비용과 왕복 교통·숙박 실조회 또는 기준 추정액의 합계 (KRW); 숙소 stop 비용은 중복 합산하지 않음",
     )
     tags: list[str] = Field(
         default_factory=list, description="요청 언어로 작성된 여행 태그"
