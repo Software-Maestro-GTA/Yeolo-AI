@@ -26,7 +26,7 @@ from tests.test_course_graph import graph_dependencies as _graph_dependencies
 
 graph_dependencies = _graph_dependencies
 API_KEY = "offline-internal-key"
-CATEGORIES = {"FOOD", "CAFE", "SPOT", "CULTURE", "NATURE", "ACTIVITY", "NIGHTLIFE"}
+CATEGORIES = {"FOOD", "CAFE", "SPOT", "CULTURE", "NATURE", "ACTIVITY", "NIGHTLIFE", "LODGING", "AIRPORT"}
 
 
 @pytest.fixture(autouse=True)
@@ -136,7 +136,8 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
     for name, venue in venues.items():
         place = venue.place
         identifier = place.placeId.removeprefix("places/")
-        search_ids[name] = identifier
+        search_ids[f'{name}, Seoul, 대한민국'] = identifier
+        search_ids[f'{place.placeEngName}, Seoul, 대한민국'] = identifier
         records[identifier] = {
             "id": identifier, "types": [place.category, "point_of_interest", "establishment"],
             "formattedAddress": place.address,
@@ -145,7 +146,7 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
         }
     if place_failure and place_failure.endswith('_candidate'):
         draft.days[0].candidates.append(Candidate(name='조회불가명소', stay_minutes=60))
-        search_ids['조회불가명소'] = 'unavailable-venue'
+        search_ids['조회불가명소, Seoul, 대한민국'] = 'unavailable-venue'
     calls = []
 
     def respond(outgoing):
@@ -211,7 +212,9 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
         assert isinstance(data["message"], str) and data["message"]
     assert_complete_contract(frames[-1][1])
     course = frames[-1][1]["course"]
-    assert course["totalCost"] == 135000
+    # Seoul is the default departure city; a same-city day trip needs neither
+    # intercity transport nor a hotel, even if a supplier could return a price.
+    assert course["totalCost"] == 35000
     assert course["startDate"] == course["itinerary"]["days"][0]["date"] == api_request["tripCondition"]["startDate"]
     assert course["totalDays"] == len(course["itinerary"]["days"]) == 1
     stops = course["itinerary"]["days"][0]["stops"]
@@ -231,12 +234,10 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
             assert all(stop['transportToNext']['type'] == 'taxi' for stop in stops[:-1])
     assert stops[-1]["transportToNext"] == {"type": "none", "distance": 0.0, "minutes": 0, "memo": None}
     llm.assert_awaited_once()
-    quote.assert_awaited_once()
-    quoted = quote.await_args.args[0]
-    assert (quoted.verified_country_name, quoted.verified_city_name) == ('대한민국', 'Seoul')
+    quote.assert_not_awaited()
     factory.assert_called_once()
     if not route_failure and not place_failure:
-        assert len(calls) == 18  # 7 ID searches + 7 Essentials lookups + 4 routes.
+        assert len(calls) == 23  # 12 ID searches + 7 Essentials lookups + 4 routes.
     assert any(call.url.path.endswith(':computeRoutes') for call in calls)
     if route_failure in {'503', 'timeout'}:
         # One exhausted provider lookup per mode, two HTTP attempts each.

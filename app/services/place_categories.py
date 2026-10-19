@@ -1,4 +1,4 @@
-"""Map verified provider place types to the app's seven display categories.
+"""Map verified provider place types to visit, lodging and airport categories.
 
 This presentation mapping makes no provider or model calls. Planning and meal
 validation keep using the original verified type; display groups do not establish
@@ -10,6 +10,7 @@ from typing import Literal, cast
 
 PlaceCategoryCode = Literal[
     'FOOD', 'CAFE', 'SPOT', 'CULTURE', 'NATURE', 'ACTIVITY', 'NIGHTLIFE',
+    'LODGING', 'AIRPORT',
 ]
 
 PLACE_CATEGORY_LABELS: dict[PlaceCategoryCode, str] = {
@@ -20,7 +21,16 @@ PLACE_CATEGORY_LABELS: dict[PlaceCategoryCode, str] = {
     'NATURE': '자연·산책',
     'ACTIVITY': '액티비티·체험',
     'NIGHTLIFE': '야경·나이트',
+    'LODGING': '숙소',
+    'AIRPORT': '공항',
 }
+
+LODGING_TYPES = frozenset({
+    'lodging', 'hotel', 'resort_hotel', 'motel', 'hostel', 'guest_house',
+    'bed_and_breakfast', 'extended_stay_hotel', 'inn',
+})
+
+AIRPORT_TYPES = frozenset({'airport', 'international_airport'})
 
 _CATEGORY_TYPES: dict[PlaceCategoryCode, frozenset[str]] = {
     'FOOD': frozenset({
@@ -55,6 +65,8 @@ _CATEGORY_TYPES: dict[PlaceCategoryCode, frozenset[str]] = {
     'NIGHTLIFE': frozenset({
         'night_club', 'bar', 'pub', 'wine_bar', 'dance_club',
     }),
+    'LODGING': LODGING_TYPES,
+    'AIRPORT': AIRPORT_TYPES,
 }
 
 _TYPE_TO_CATEGORY: dict[str, PlaceCategoryCode] = {

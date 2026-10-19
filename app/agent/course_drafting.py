@@ -20,6 +20,7 @@ from app.core.llm import get_abto
 from app.schemas.course import (
     CourseRequestSchema,
 )
+from app.schemas.course_anchors import AnchorCandidates
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,8 @@ async def _draft_day_candidates(
     seed: str,
     deadline: float | None = None,
     day_hints: list[str] | None = None,
+    generate_airports: bool = False,
+    generate_lodgings: bool = False,
 ) -> CourseDraft:
     """Generate exactly one assigned day, keeping whole-trip planning context.
 
@@ -61,7 +64,14 @@ async def _draft_day_candidates(
     assigned = date.fromisoformat(request.tripCondition.startDate) + timedelta(
         days=day_index
     )
-    context = f"이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. reason은 25자 이내 한 문장만 작성하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{feedback}"
+    anchor_assignment = (
+        "이번 호출은 전체 여행의 anchor_candidates도 함께 제안합니다. "
+        f"airports는 {'도착 도시를 실제로 서비스하는 공항 1~2개' if generate_airports else '빈 배열'}이며 "
+        f"lodgings는 {'전체 여행 예산과 일자별 권역을 고려한 개별 숙소 1~2개' if generate_lodgings else '빈 배열'}입니다."
+        if generate_airports or generate_lodgings
+        else "이번 호출은 anchor_candidates의 airports와 lodgings를 모두 빈 배열로 반환하세요."
+    )
+    context = f"이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. reason은 25자 이내 한 문장만 작성하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{anchor_assignment}\n{feedback}"
     # The provider deadline stays valid even when the local request expires sooner.
     abto = get_abto()
     sync_options = abto.openai_options()
@@ -122,6 +132,8 @@ async def draft_candidates(
     pending_days: list[int] | None = None,
     existing_days: dict[int, DraftDay] | None = None,
     deadline: float | None = None,
+    existing_anchors: AnchorCandidates | None = None,
+    airports_required: bool = False,
 ) -> CourseDraft:
     """Generate days concurrently; retry only failed calls and retain every success.
 
@@ -135,6 +147,8 @@ async def draft_candidates(
         pending_days: Zero-based dates still requiring candidate proposals.
         existing_days: Successful proposals retained from previous calls.
         deadline: Shared absolute event-loop deadline, when supplied.
+        existing_anchors: Trip-wide proposals retained through daily repairs.
+        airports_required: Whether the verified travel mode includes flights.
 
     Returns:
         Complete candidate draft ordered by the requested dates.
@@ -149,6 +163,14 @@ async def draft_candidates(
         if pending_days is None
         else pending_days
     )
+    retained = existing_anchors or AnchorCandidates()
+    anchors = AnchorCandidates(
+        airports=retained.airports if airports_required else [],
+        lodgings=retained.lodgings if request.tripCondition.totalDays > 1 else [],
+    )
+    anchor_day = pending[0] if pending else None
+    need_airports = airports_required and not anchors.airports
+    need_lodgings = request.tripCondition.totalDays > 1 and not anchors.lodgings
     seed = uuid.uuid4().hex[:12]
     directions = (
         "도심 중심 권역",
@@ -173,6 +195,7 @@ async def draft_candidates(
     errors: dict[int, Exception] = {}
 
     async def one(index: int) -> None:
+        nonlocal anchors
         async with semaphore:
             for attempt in range(2):
                 started = asyncio.get_running_loop().time()
@@ -185,8 +208,17 @@ async def draft_candidates(
                         seed=seed,
                         deadline=deadline,
                         day_hints=hints,
+                        generate_airports=index == anchor_day and need_airports,
+                        generate_lodgings=index == anchor_day and need_lodgings,
                     )
                     days[index] = result.days[0]
+                    if index == anchor_day:
+                        anchors = AnchorCandidates(
+                            airports=result.anchor_candidates.airports
+                            if need_airports else anchors.airports,
+                            lodgings=result.anchor_candidates.lodgings
+                            if need_lodgings else anchors.lodgings,
+                        )
                     errors.pop(index, None)
                     return
                 except Exception as error:
@@ -219,12 +251,13 @@ async def draft_candidates(
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     if errors or len(days) != request.tripCondition.totalDays:
-        raise PartialDraftError(days, errors)
+        raise PartialDraftError(days, errors, anchor_candidates=anchors)
     return CourseDraft(
         title=f"{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행",
         reason="",
         tags=[],
         days=[days[index] for index in range(request.tripCondition.totalDays)],
+        anchor_candidates=anchors,
     )
 
 

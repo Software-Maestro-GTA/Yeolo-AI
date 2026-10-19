@@ -1,4 +1,4 @@
-"""Exercise compact API output, optional quote totals and bounded lazy lookups."""
+"""Exercise compact output, required travel costs and bounded lazy lookups."""
 
 from dataclasses import replace
 from datetime import date
@@ -14,6 +14,7 @@ from app.agent.tools.verified_maps import (
     VerifiedPlace,
 )
 from app.core.config import settings
+from app.services.course_localization import progress_message
 from app.services.myrealtrip_quotes import (
     MyRealTripQuoteProvider,
     QuoteItem,
@@ -25,6 +26,16 @@ from tests.test_course_graph import request_data as _request_data
 # Export only the shared fixture objects into this module, without collecting its tests.
 graph_dependencies = _graph_dependencies
 request_data = _request_data
+
+
+def use_overseas_destination(request, provider):
+    """Keep verified fixture coordinates while making transport applicable."""
+    request.tripCondition.destinationCountry = '일본'
+    request.tripCondition.destinationCity = '도쿄'
+    provider.resolve_destination.return_value = replace(
+        provider.resolve_destination.return_value,
+        country_code='JP', verified_country_name='日本', verified_city_name='Tokyo',
+    )
 
 
 def add_second_day(request, draft, places):
@@ -63,13 +74,15 @@ async def test_real_graph_includes_known_travel_prices_and_keeps_over_budget_cou
     request_data, graph_dependencies, mocker, lodging_available,
 ):
     provider, history, llm, draft, places = graph_dependencies
-    provider.resolve_destination.return_value = replace(
-        provider.resolve_destination.return_value,
-        verified_country_name='대한민국', verified_city_name='Seoul',
-    )
+    use_overseas_destination(request_data, provider)
     add_second_day(request_data, draft, places)
     request_data.tripCondition.budget = 20000
     provider.route.return_value.cost = 1800
+    baseline_lodging = QuoteItem('estimated', 120000, source='offline-baseline', reference_date='2026-10-19')
+    mocker.patch('app.agent.course_nodes.baseline_trip_quotes', return_value=TripQuotes(
+        QuoteItem('estimated', 300000, source='offline-baseline', reference_date='2026-10-19'),
+        baseline_lodging,
+    ))
     quotes = mocker.Mock(spec=MyRealTripQuoteProvider)
     quotes.quote = AsyncMock(return_value=TripQuotes(
         QuoteItem('available', 365000),
@@ -87,7 +100,7 @@ async def test_real_graph_includes_known_travel_prices_and_keeps_over_budget_cou
             course = value['finalize_course']['course']
     assert course is not None
     # Two days of 35,000 KRW activities, eight actual 1,800 KRW fares, and known quotes.
-    assert course.totalCost == 70000 + 8 * 1800 + 365000 + (200000 if lodging_available else 0)
+    assert course.totalCost == 70000 + 8 * 1800 + 365000 + (200000 if lodging_available else 120000)
     assert course.totalCost > request_data.tripCondition.budget
     assert len(course.itinerary.days) == 2
     assert all(len(day.stops) >= 5 for day in course.itinerary.days)
@@ -100,11 +113,12 @@ async def test_real_graph_includes_known_travel_prices_and_keeps_over_budget_cou
         assert any('숙박' in message['message'] and ('포함' in message['message'] or '합계' in message['message']) for message in progress)
     quotes.quote.assert_awaited_once()
     quoted = quotes.quote.await_args.args[0]
-    assert (quoted.country_code, quoted.city) == ('KR', '서울')
-    assert (quoted.verified_country_name, quoted.verified_city_name) == ('대한민국', 'Seoul')
+    assert (quoted.country_code, quoted.city) == ('JP', '도쿄')
+    assert (quoted.verified_country_name, quoted.verified_city_name) == ('日本', 'Tokyo')
     assert (quoted.start_date, quoted.end_date) == (date(2026, 10, 5), date(2026, 10, 6))
     assert provider.route.await_count == 8
     llm.assert_awaited_once()
+    assert '일별 장소·식사 예산 상한 목표(KRW): 0' in llm.await_args.args[2]
 
 
 @pytest.mark.asyncio
@@ -123,6 +137,36 @@ async def test_nine_candidates_use_one_small_initial_lookup_batch(
     searched = {call.args[0].name for call in provider.search.await_args_list}
     assert {stop.place.placeName for stop in course.itinerary.days[0].stops} <= searched
     llm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('budget', [500000, 10000000])
+async def test_budget_policy_reaches_initial_draft_and_travel_quotes(
+    request_data, graph_dependencies, mocker, budget,
+):
+    """The graph sends one consistent budget policy without inflating returned prices."""
+    provider, history, llm, draft, places = graph_dependencies
+    use_overseas_destination(request_data, provider)
+    add_second_day(request_data, draft, places)
+    request_data.tripCondition.budget = budget
+    quotes = mocker.Mock(spec=MyRealTripQuoteProvider)
+    quotes.quote = AsyncMock(return_value=TripQuotes(
+        QuoteItem('available', 100000), QuoteItem('available', 80000),
+    ))
+    result = await build_course_graph(provider, history, quotes=quotes).ainvoke(
+        {'request': request_data, 'attempt': 0},
+    )
+    quoted = quotes.quote.await_args.args[0]
+    # Affordability comes from destination/date-specific quotes, not a global
+    # KRW band. A cheap upper-class product can also be good value locally.
+    assert quoted.preferred_cabin == 'BUSINESS'
+    assert quoted.preferred_stay_star_rating == 'fivestar'
+    assert quoted.flight_budget_krw == pytest.approx(budget * .35)
+    assert quoted.lodging_budget_krw == pytest.approx(budget * .25)
+    assert request_data.tripCondition.destinationCity in llm.await_args.args[2]
+    assert '현지' in llm.await_args.args[2]
+    assert f'일별 장소·식사 예산 상한 목표(KRW): {(budget - 180000) / 2:.0f}' in llm.await_args.args[2]
+    assert result['course'].totalCost == 70000 + 100000 + 80000
 
 
 @pytest.mark.asyncio
@@ -186,6 +230,7 @@ async def test_stream_passes_explicit_origin_occupancy_and_language_to_providers
     request_data, graph_dependencies, mocker,
 ):
     provider, history, llm, _, _ = graph_dependencies
+    use_overseas_destination(request_data, provider)
     provider.__aenter__ = AsyncMock(return_value=provider)
     provider.__aexit__ = AsyncMock(return_value=False)
     quotes = mocker.Mock(spec=MyRealTripQuoteProvider)
@@ -217,6 +262,11 @@ async def test_optional_quote_configuration_error_keeps_verified_course(
 ):
     """An invalid quote-only setting cannot discard verified places and routes."""
     provider, history, llm, _, _ = graph_dependencies
+    use_overseas_destination(request_data, provider)
+    mocker.patch('app.agent.course_nodes.baseline_trip_quotes', return_value=TripQuotes(
+        QuoteItem('estimated', 300000, source='offline-baseline', reference_date='2026-10-19'),
+        QuoteItem('not_applicable'),
+    ))
     provider.__aenter__ = AsyncMock(return_value=provider)
     provider.__aexit__ = AsyncMock(return_value=False)
     mocker.patch('app.agent.course_graph.VerifiedMapsProvider', return_value=provider)
@@ -225,8 +275,9 @@ async def test_optional_quote_configuration_error_keeps_verified_course(
     events = [event async for event in stream_course_generation(request_data)]
     complete = [payload for event, payload in events if event == 'complete']
     assert len(complete) == 1 and events[-1][0] == 'complete'
-    assert complete[0]['course']['totalCost'] == 35000
+    assert complete[0]['course']['totalCost'] == 335000
     assert len(complete[0]['course']['itinerary']['days'][0]['stops']) == 5
-    assert any(event == 'progress' and '항공' in payload['message'] and '견적은 포함되지 않았습니다' in payload['message'] for event, payload in events)
+    assert any(event == 'progress' and payload['message'] == progress_message('ko', 'quote_estimated', items=('transport',))
+               for event, payload in events)
     provider.__aexit__.assert_awaited_once()
     llm.assert_awaited_once()

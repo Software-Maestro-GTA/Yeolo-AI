@@ -329,6 +329,60 @@ def _diversity_rank(path: list[Visit], profiles: list[dict]) -> tuple:
     )
 
 
+def _meal_window_slack(path: list[Visit], day_date: date) -> int:
+    """Prefer equal-quality orderings with room for later measured travel time."""
+    current = 540
+    margins = []
+    for candidate, venue in path:
+        earliest, latest = MEAL_WINDOWS[candidate.meal]
+        arrival = _opening_start(
+            venue.periods, day_date, max(current, earliest), candidate.stay_minutes, latest
+        )
+        if arrival is None:
+            return -1
+        end = arrival + candidate.stay_minutes
+        if candidate.meal in {'lunch', 'dinner'}:
+            margins.append(latest - end)
+        current = end + 10
+    return min(margins, default=0)
+
+
+def _budget_diverse_beam(
+    states: list[tuple[list[Visit], int, float]], daily_budget: float
+) -> list[tuple[list[Visit], int, float]]:
+    """Keep longer local meal/experience choices inside the 48-state search cap.
+
+    Half the slots retain the ordinary affordability/diversity/time ordering.
+    The remainder preserves representatives of distinct meal and paid-experience
+    destination-relative tiers. Uniform-tier pools bypass this function, so an unfinished
+    path is never required to have already filled every meal/experience slot.
+    """
+    if len(states) <= 48:
+        return states
+    profiles = {}
+    for state in states:
+        meal_tiers = tuple(sorted(
+            (candidate.meal, candidate.budget_tier)
+            for candidate, _ in state[0]
+            if candidate.meal in {'lunch', 'dinner'}
+        ))
+        signature = meal_tiers, budget_rank(state[0], daily_budget)[3]
+        # states already uses affordability, diversity, earliest time, distance.
+        profiles.setdefault(signature, state)
+    representatives = sorted(
+        profiles.values(), key=lambda state: budget_rank(state[0], daily_budget)
+    )[:24]
+    result = []
+    seen = set()
+    for state in [*states[:24], *representatives, *states]:
+        if id(state) not in seen:
+            result.append(state)
+            seen.add(id(state))
+        if len(result) == 48:
+            break
+    return result
+
+
 def _day_plans(
     available: list[Visit],
     day_date: date,
@@ -346,8 +400,10 @@ def _day_plans(
 
     The beam is capped at 48 states per depth, with at most 30 retained proposals.
     Zero travel is used only to discard impossible orderings, never as a route.
-    Budget ranks feasible alternatives after the common visit floor; it is never
-    a hard rejection and unknown transport fares are not estimated here.
+    Budget and destination-relative meal/experience tiers rank alternatives
+    after the common visit floor. No global price band determines the chosen
+    tier; higher prices alone earn no preference. Unknown
+    transport fares are not estimated and budget remains a soft constraint.
     """
     options = [
         item
@@ -380,6 +436,7 @@ def _day_plans(
         for candidate, venue in reversed(options)
     }
     options = list(reversed(unique.values()))
+    mixed_budget_tiers = len({candidate.budget_tier for candidate, _ in options}) > 1
     completed: list[tuple[list[Visit], int, float]] = []
     beam: list[tuple[list[Visit], int, float]] = [([], 540, 0.0)]
     for depth in range(max_stops):
@@ -433,14 +490,20 @@ def _day_plans(
                     completed.append(new_state)
         following.sort(
             key=lambda state: (
-                budget_rank(state[0], daily_budget),
+                # An unfinished path has not selected every meal/experience yet.
+                # Ranking its tier coverage would prune compatible completions.
+                budget_rank(state[0], daily_budget)[:2],
                 (_diversity_rank(state[0], recent_profiles) if recent_profiles else ()),
                 state[1],
                 sum(venue.place.placeId in recent_ids for _, venue in state[0]),
                 state[2],
             )
         )
-        beam = following[:48]
+        beam = (
+            _budget_diverse_beam(following, daily_budget)
+            if daily_budget is not None and mixed_budget_tiers
+            else following[:48]
+        )
         if not beam:
             break
     completed.sort(
@@ -451,6 +514,7 @@ def _day_plans(
             len(state[0]) if compact else -len(state[0]),
             not any(candidate.meal == "breakfast" for candidate, _ in state[0]),
             sum(venue.place.placeId in recent_ids for _, venue in state[0]),
+            -_meal_window_slack(state[0], day_date) if mixed_budget_tiers else 0,
             state[2],
             state[1],
         )
@@ -503,6 +567,11 @@ def _day_plans(
         and _visit_shortage(preferred[0]) == _visit_shortage(completed[0][0])
         and budget_rank(preferred[0], daily_budget)
         == budget_rank(completed[0][0], daily_budget)
+        and (
+            not mixed_budget_tiers
+            or _meal_window_slack(preferred[0], day_date)
+            >= _meal_window_slack(completed[0][0], day_date)
+        )
         and valid_meals in (["lunch", "dinner"], ["breakfast", "lunch", "dinner"])
     ):
         completed.remove(preferred)

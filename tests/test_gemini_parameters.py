@@ -131,11 +131,57 @@ async def test_gemini_gateway_request_preserves_schema_parameters_and_identity(o
     if operation == 'candidates':
         assert body['reasoning_effort'] == 'low'
         assert body['max_completion_tokens'] == 5000
+        candidate_schema = body['response_format']['json_schema']['schema']
+        anchor_schema = candidate_schema['$defs']['AnchorCandidates']
+        assert set(anchor_schema['properties']) == {'airports', 'lodgings'}
+        assert all(field['maxItems'] == 2 for field in anchor_schema['properties'].values())
+        assert set(candidate_schema['$defs']['AirportCandidate']['properties']) == {
+            'name', 'english_name', 'iata_code',
+        }
+        assert set(candidate_schema['$defs']['NamedLodgingCandidate']['properties']) == {
+            'name', 'english_name',
+        }
     else:
         assert 'reasoning_effort' not in body
         assert 'max_completion_tokens' not in body
     assert get_abto().get_headers() == {}
     assert len(clients) == 2 and all(client.is_closed for client in clients)
+
+
+@pytest.mark.asyncio
+async def test_airport_and_lodging_proposals_share_the_existing_candidate_wire_request(offline_wire):
+    requests = []
+    output = output_for('candidates')
+    output['anchor_candidates'] = {
+        'airports': [{'name': '하네다 공항', 'english_name': 'Haneda Airport', 'iata_code': 'HND'}],
+        'lodgings': [{'name': '검증할 숙소', 'english_name': 'Unverified Property'}],
+    }
+
+    def respond(request):
+        requests.append(request)
+        return completion(output)
+
+    clients = offline_wire(respond)
+    request = CourseRequestSchema.model_validate({
+        'userId': str(USER_ID), 'language': 'ko', 'mbti': 'INTJ',
+        'tripCondition': {'destinationCountry': '일본', 'destinationCity': '도쿄',
+                          'startDate': '2026-10-17', 'totalDays': 3, 'budget': 900000},
+    })
+    result = await course_drafting._draft_day_candidates(
+        request, [], day_index=0, seed='offline',
+        generate_airports=True, generate_lodgings=True,
+        day_hints=['1일차 동쪽', '2일차 서쪽', '3일차 도심'],
+    )
+    assert len(requests) == 1
+    body = json.loads(requests[0].content)
+    prompt = '\n'.join(message['content'] for message in body['messages'])
+    assert '전체 여행의 anchor_candidates도 함께 제안' in prompt
+    assert '3일차 도심' in prompt and '900000' in prompt and '도쿄' in prompt
+    assert '관광·식사 후보 9~10개와 최소 방문 5곳' in prompt
+    assert result.anchor_candidates.airports[0].iata_code == 'HND'
+    assert result.anchor_candidates.lodgings[0].name == '검증할 숙소'
+    assert body['max_completion_tokens'] == 5000
+    assert all(client.is_closed for client in clients)
 
 
 @pytest.mark.asyncio

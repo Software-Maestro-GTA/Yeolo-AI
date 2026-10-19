@@ -51,7 +51,20 @@ from app.schemas.course import (
     ItinerarySchema,
     TransportToNextSchema,
 )
-from app.services.course_budget import course_cost, daily_place_budget
+from app.schemas.course_anchors import AnchorCandidates
+from app.services.course_airports import attach_airports as attach_course_airports
+from app.services.course_anchor_selection import (
+    MAX_ANCHOR_LOOKUPS,
+    ResolvedCourseAnchors,
+    resolve_course_anchors,
+)
+from app.services.course_budget import (
+    FLIGHT_BUDGET_SHARE,
+    LODGING_BUDGET_SHARE,
+    budget_guidance,
+    course_cost,
+    daily_place_budget,
+)
 from app.services.course_candidate_batches import candidate_batch, candidate_query_key
 from app.services.course_diversity import (
     MAX_OVERLAP,
@@ -64,6 +77,7 @@ from app.services.course_localization import (
     localize_course,
     progress_message,
 )
+from app.services.course_lodging import attach_lodging as attach_course_lodging
 from app.services.course_planning import (
     MAX_DAY_PLANS,
     MEAL_WINDOWS,
@@ -95,10 +109,9 @@ from app.services.course_routing import (
 )
 from app.services.myrealtrip_quotes import (
     MyRealTripQuoteProvider,
-    QuoteItem,
     QuoteRequest,
-    TripQuotes,
 )
+from app.services.travel_cost_baselines import baseline_trip_quotes, merge_trip_quotes
 
 logger = logging.getLogger(__name__)
 
@@ -197,34 +210,65 @@ class CourseGraphNodes:
         }
 
     async def quote_trip(self, state: CourseState) -> dict:
-        """Fetch independent travel quotes while the model proposes daily venues."""
+        """Resolve return travel and all nights before allocating the venue budget.
+
+        Available provider amounts replace explicit planning estimates. Optional
+        lookup errors keep the estimates; request cancellation still propagates.
+        """
         _progress("quote", language=state["request"].language)
         trip = state["request"].tripCondition
         start = date.fromisoformat(trip.startDate)
+        baseline = baseline_trip_quotes(
+            state["request"], state["destination"], adults=settings.MYREALTRIP_ADULTS
+        )
+        # No supplier rail/bus quote exists. A day trip without flying has no
+        # flight or hotel lookup to perform, but still includes ground travel.
+        if baseline.transport_mode != "air" and trip.totalDays == 1:
+            return {"trip_quotes": baseline}
+        # Compare real local product prices against each allowance. A universal
+        # KRW activity band cannot establish what hotel/cabin the city affords.
+        live = None
+        quote_request = None
         try:
             if self.quotes is None:
                 raise ValueError("Quote provider unavailable")
-            quotes = await self.quotes.quote(
-                QuoteRequest(
-                    country_code=state["destination"].country_code,
-                    country=trip.destinationCountry,
-                    city=trip.destinationCity,
-                    start_date=start,
-                    end_date=start + timedelta(days=trip.totalDays - 1),
-                    verified_country_name=state["destination"].verified_country_name or None,
-                    verified_city_name=state["destination"].verified_city_name or None,
-                )
+            configured_timeout = settings.MYREALTRIP_QUOTE_TIMEOUT_SECONDS
+            quote_timeout = (
+                configured_timeout
+                if math.isfinite(configured_timeout) and configured_timeout > 0 else 8.0
             )
-        except Exception:  # noqa: BLE001 - optional quotes must not discard a verified itinerary; cancellation propagates
-            logger.warning("Travel quote lookup unavailable")
-            quotes = TripQuotes(
-                flight=QuoteItem(status="unavailable", reason="lookup_unavailable"),
-                lodging=QuoteItem(
-                    status="not_applicable" if trip.totalDays == 1 else "unavailable",
-                    reason="lookup_unavailable",
+            quote_deadline = min(
+                asyncio.get_running_loop().time() + quote_timeout,
+                state.get("deadline", float("inf")) - 28.0,
+            )
+            quote_request = QuoteRequest(
+                country_code=state["destination"].country_code,
+                country=trip.destinationCountry,
+                city=trip.destinationCity,
+                start_date=start,
+                end_date=start + timedelta(days=trip.totalDays - 1),
+                flight_required=baseline.transport_mode == "air",
+                origin_airport=(
+                    settings.MYREALTRIP_DOMESTIC_ORIGIN_AIRPORT
+                    if state["destination"].country_code == "KR" and baseline.transport_mode == "air"
+                    else None
                 ),
+                verified_country_name=state["destination"].verified_country_name or None,
+                verified_city_name=state["destination"].verified_city_name or None,
+                preferred_cabin="BUSINESS" if trip.budget > 0 else "ECONOMY",
+                preferred_stay_star_rating="fivestar" if trip.budget > 0 else None,
+                flight_budget_krw=trip.budget * FLIGHT_BUDGET_SHARE,
+                lodging_budget_krw=trip.budget * LODGING_BUDGET_SHARE,
             )
-        return {"trip_quotes": quotes}
+            async with asyncio.timeout_at(quote_deadline):
+                live = await self.quotes.quote(quote_request, deadline=quote_deadline)
+        except TimeoutError:
+            if isinstance(self.quotes, MyRealTripQuoteProvider) and quote_request is not None:
+                live = self.quotes.completed_quotes(quote_request)
+            logger.warning("Travel quote deadline reached; keeping completed prices and planning benchmarks")
+        except Exception:  # noqa: BLE001 - optional quotes must not discard a verified itinerary; cancellation propagates
+            logger.warning("Travel quote lookup unavailable; using planning benchmarks")
+        return {"trip_quotes": merge_trip_quotes(baseline, live)}
 
     async def expand_places(self, state: CourseState) -> dict:
         """Query deferred real candidates before spending another model request."""
@@ -259,10 +303,13 @@ class CourseGraphNodes:
                 pending_days=pending,
                 existing_days=existing,
                 deadline=draft_deadline,
+                existing_anchors=state.get("anchor_candidates"),
+                airports_required=state.get("trip_quotes") is not None and state["trip_quotes"].transport_mode == "air",
             )
         except PartialDraftError as error:
             return {
                 "partial_drafts": error.days,
+                "anchor_candidates": self._keep_anchor_candidates(state, error.anchor_candidates),
                 "attempt": state["attempt"] + 1,
                 "feedback": "일부 일자 후보 응답이 지연되었습니다. 완료한 일자는 유지하고 누락한 일자만 보충하세요.",
             }
@@ -297,6 +344,7 @@ class CourseGraphNodes:
             )
         return {
             "draft_data": result,
+            "anchor_candidates": self._keep_anchor_candidates(state, result.anchor_candidates),
             "partial_drafts": {},
             "attempt": state["attempt"] + 1,
             "feedback": "",
@@ -304,6 +352,33 @@ class CourseGraphNodes:
             "route_pass_failures": {},
             "expanding_places": False,
         }
+
+    async def resolve_anchors(self, state: CourseState) -> dict:
+        """Verify shared airport/hotel names before ranking daytime costs.
+
+        Reservation availability is not a prerequisite. Resolved request-local
+        locations survive daily repairs and are reused during final attachment.
+        """
+        previous = state.get("anchor_selection")
+        if not isinstance(previous, ResolvedCourseAnchors):
+            previous = None
+        candidates = state.get("anchor_candidates", AnchorCandidates())
+        if previous is not None:
+            new_codes = {candidate.iata_code for candidate in candidates.airports} - set(previous.airport_attempts)
+            if (previous.airport is not None or previous.quotes.transport_mode != 'air'
+                    or len(previous.airport_attempts) >= MAX_ANCHOR_LOOKUPS or not new_codes):
+                return {}
+        _progress("anchors", language=state["request"].language)
+        quotes = state.get("trip_quotes") or baseline_trip_quotes(
+            state["request"], state["destination"], adults=settings.MYREALTRIP_ADULTS,
+        )
+        selected = await resolve_course_anchors(
+            state["request"], state["destination"], quotes,
+            candidates, self.provider,
+            deadline=state.get("deadline", float("inf")) - 28.0,
+            previous=previous,
+        )
+        return {"anchor_selection": selected, "trip_quotes": selected.quotes}
 
     async def verify_places(self, state: CourseState) -> dict:
         """Verify venue facts, supplement nearby candidates and form day plans."""
@@ -341,6 +416,9 @@ class CourseGraphNodes:
                 queried,
                 limit,
                 prefer_meal_balance=not state.get("expanding_places", False),
+                daily_budget=daily_place_budget(
+                    state["request"], state.get("trip_quotes")
+                ),
             ):
                 unique.setdefault(key(candidate), candidate)
         queried.update(unique)
@@ -1053,7 +1131,7 @@ class CourseGraphNodes:
             startDate=trip.startDate,
             totalDays=trip.totalDays,
             totalCost=course_cost(state["days"])
-            + (state["trip_quotes"].known_total_krw if state.get("trip_quotes") else 0),
+            + (state["trip_quotes"].total_krw if state.get("trip_quotes") else 0),
             tags=verified_course_tags(state["days"]),
             itinerary=ItinerarySchema(days=state["days"]),
         )
@@ -1105,6 +1183,51 @@ class CourseGraphNodes:
             _progress("repeated_supplemental", language=request.language)
         return {"course": course, "feedback": ""}
 
+    async def attach_lodging(self, state: CourseState) -> dict:
+        """Append a verified shared hotel after history has recorded daytime visits.
+
+        Accommodation may repeat on overnight dates without weakening the
+        distinct tourism/meal guarantees. Unknown hotel identity keeps the
+        daytime course; failed return routes remain explicitly unknown.
+        """
+        request = state["request"]
+        if request.tripCondition.totalDays <= 1:
+            return {"course": state["course"]}
+        _progress("lodging", language=request.language)
+        selection = state.get("anchor_selection")
+        resolved = isinstance(selection, ResolvedCourseAnchors)
+        course = await attach_course_lodging(
+            request, state["course"], state["destination"], state.get("trip_quotes"), self.provider,
+            deadline=state.get("deadline", float("inf")) - 5.0,
+            verified_lodging=selection.lodging if resolved else None,
+            lookup=not resolved,
+        )
+        if course is state["course"]:
+            _progress("lodging_unavailable", language=request.language)
+        return {"course": course}
+
+    async def attach_airports(self, state: CourseState) -> dict:
+        """Connect flight endpoints without adding them to tourism/history checks.
+
+        Only an identified destination airport is eligible. Airport failures
+        preserve the verified course; unknown transfers keep null metrics.
+        """
+        request, quotes = state["request"], state.get("trip_quotes")
+        if quotes is None or quotes.transport_mode != 'air':
+            return {"course": state["course"]}
+        _progress("airports", language=request.language)
+        selection = state.get("anchor_selection")
+        resolved = isinstance(selection, ResolvedCourseAnchors)
+        course = await attach_course_airports(
+            request, state["course"], state["destination"], quotes, self.provider,
+            deadline=state.get("deadline", float("inf")) - 5.0,
+            verified_airport=selection.airport if resolved else None,
+            lookup=not resolved,
+        )
+        if course is state["course"]:
+            _progress("airports_unavailable", language=request.language)
+        return {"course": course}
+
     async def localize_display(self, state: CourseState) -> dict:
         """Translate display text within the existing optional request budget.
 
@@ -1120,15 +1243,19 @@ class CourseGraphNodes:
         return {"course": course}
 
     async def finalize_course(self, state: CourseState) -> dict:
-        """Disclose partial quotes and return the course after display localization."""
+        """Disclose benchmark amounts and return the localized course."""
         request, course = state["request"], state["course"]
         quotes = state.get("trip_quotes")
-        if quotes and not quotes.complete:
+        if quotes and quotes.estimated_items:
             get_stream_writer()(
                 {
                     "step": "GENERATING_ROUTE",
                     "message": progress_message(
-                        request.language, "quote_missing", items=quotes.missing_items
+                        request.language, "quote_estimated",
+                        items=tuple(
+                            "transport" if item == "flight" else item
+                            for item in quotes.estimated_items
+                        ),
                     ),
                 }
             )
@@ -1145,9 +1272,10 @@ class CourseGraphNodes:
                 }
             )
         logger.info(
-            "Travel quote summary: flight=%s lodging=%s total_cost_krw=%d budget_krw=%s",
-            quotes.flight.status if quotes else "unavailable",
-            quotes.lodging.status if quotes else "unavailable",
+            "Travel cost summary: mode=%s transport=%s lodging=%s total_cost_krw=%d budget_krw=%s",
+            quotes.transport_mode if quotes else "unknown",
+            quotes.flight if quotes else None,
+            quotes.lodging if quotes else None,
             course.totalCost,
             request.tripCondition.budget,
         )
@@ -1219,8 +1347,11 @@ class CourseGraphNodes:
                 pending_days=pending,
                 existing_days=existing,
                 deadline=deadline,
+                existing_anchors=state.get("anchor_candidates"),
+                airports_required=state.get("trip_quotes") is not None and state["trip_quotes"].transport_mode == "air",
             )
         except PartialDraftError as error:
+            updates["anchor_candidates"] = self._keep_anchor_candidates(state, error.anchor_candidates)
             if state.get("draft_data"):
                 result = state["draft_data"].model_copy(deep=True)
                 for index, day in error.days.items():
@@ -1250,6 +1381,9 @@ class CourseGraphNodes:
         updates.update(
             {
                 "draft_data": result,
+                "anchor_candidates": self._keep_anchor_candidates(
+                    state, updates.get("anchor_candidates", result.anchor_candidates),
+                ),
                 "partial_drafts": {},
                 "queried_place_keys": set(state["place_cache"]),
                 "expanding_places": False,
@@ -1378,6 +1512,15 @@ class CourseGraphNodes:
         profiles = await self.history.recent_profiles(history_key(request))
         return [set(item["place_ids"]) for item in profiles], profiles
 
+    @staticmethod
+    def _keep_anchor_candidates(state: CourseState, proposed: AnchorCandidates) -> AnchorCandidates:
+        """Preserve trip-wide names when only incomplete tourist days are retried."""
+        retained = state.get("anchor_candidates", AnchorCandidates())
+        return AnchorCandidates(
+            airports=proposed.airports or retained.airports,
+            lodgings=proposed.lodgings or retained.lodgings,
+        )
+
     def _history_feedback(self, state: CourseState) -> str:
         profiles = state.get("recent_profiles", [])
         areas = sorted({value for item in profiles for value in item.get("areas", [])})
@@ -1385,7 +1528,8 @@ class CourseGraphNodes:
             {value for item in profiles for value in item.get("experiences", [])}
         )
         return (
-            f"일정의 일별 장소 예산 목표(KRW): {daily_place_budget(state['request'], state.get('trip_quotes')):.0f}. 확인된 항공·숙박 비용을 제외한 금액이며 미조회 항목이 있으면 전체 예산 충족을 보장하지 마세요. 예산 초과가 불가피하면 명소와 필수 식사를 유지하세요.\n"
+            budget_guidance(state["request"], state.get("trip_quotes")) + "\n"
+            + self._anchor_budget_feedback(state) + "\n"
             + (
                 (
                     "최근 계획 권역: "
@@ -1399,6 +1543,20 @@ class CourseGraphNodes:
                 if profiles
                 else ""
             )
+        )
+
+    @staticmethod
+    def _anchor_budget_feedback(state: CourseState) -> str:
+        """Give shared hotel proposals a budget target without asserting a price."""
+        quotes = state.get("trip_quotes")
+        nights = state["request"].tripCondition.totalDays - 1
+        if quotes is None or nights <= 0 or quotes.lodging.amount_krw is None:
+            return ""
+        nightly = quotes.lodging.amount_krw // nights
+        return (
+            f"공유 숙소 후보의 1박 계획 금액은 {nightly}원입니다. 이는 후보 호텔의 실제 판매가가 아닙니다. "
+            "요청한 도시의 물가와 전체 관광 권역을 고려하여 이 수준에 맞는 실제 호텔을 제안하세요. "
+            "예약 가능 여부나 확정 요금을 생성하지 마세요."
         )
 
     async def _run_with_fallback(self, node: CourseNode, state: CourseState) -> dict:
