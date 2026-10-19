@@ -1,7 +1,8 @@
 """Connect verified arrival/departure airports to an otherwise complete course.
 
-Flight prices already belong to totalCost. Airport endpoints add only measured
-ground-transfer fares and do not imply a booked flight or feasible timetable.
+Flight prices already belong to totalCost. Airport endpoints display outbound
+and return allocations of that amount, adding only measured ground-transfer
+fares to the total. They do not imply separately quoted tickets or a booking.
 """
 
 import asyncio
@@ -29,12 +30,12 @@ logger = logging.getLogger(__name__)
 AIRPORT_TIMEOUT_SECONDS = 12.0
 
 
-def _airport_stop(airport: VerifiedPlace, language: str, *, arrival: bool) -> StopSchema:
-    """Create planning allowances, never an invented flight schedule or fare."""
+def _airport_stop(airport: VerifiedPlace, language: str, *, arrival: bool, cost: int) -> StopSchema:
+    """Display an allocated flight cost, not a separately quoted one-way ticket."""
     reason, memo = airport_copy(language, arrival=arrival)
     return StopSchema(
         sequence=1, stayMinutes=60 if arrival else 120, reason=reason, memo=memo,
-        cost=0, place=airport.place.model_copy(deep=True),
+        cost=cost, place=airport.place.model_copy(deep=True),
         transportToNext=TransportToNextSchema(type='none', distance=0, minutes=0, memo=None),
     )
 
@@ -69,6 +70,9 @@ async def attach_airports(
         course. A verified airport survives an expired transfer budget with
         unknown metrics. Existing visits, lodging and history are preserved.
         Long measured airport transfers remain valid beyond the tourist cap.
+        The round-trip amount is split across the two endpoints for display;
+        an odd KRW goes to the outbound leg. This never adds airfare twice or
+        claims the supplier returned separate one-way prices.
     Raises:
         asyncio.CancelledError: Caller cancellation after transfer tasks join.
     """
@@ -134,11 +138,15 @@ async def attach_airports(
             day = output.itinerary.days[index]
             output.itinerary.days[index] = DayItinerarySchema(day=day.day, date=day.date, stops=day.stops)
         first, last = output.itinerary.days[0], output.itinerary.days[-1]
-        arrival = _airport_stop(airport, request.language, arrival=True)
+        # quote_trip has already filled missing fares from planning benchmarks,
+        # and finalize has charged that amount once. Endpoint costs only expose
+        # the outbound/return allocations; they cannot change the quoted total.
+        one_way, remainder = divmod(quotes.flight.amount_krw or 0, 2)
+        arrival = _airport_stop(airport, request.language, arrival=True, cost=one_way + remainder)
         arrival.transportToNext = arrival_route
         first.stops.insert(0, arrival)
         last.stops[-1].transportToNext = departure_route
-        last.stops.append(_airport_stop(airport, request.language, arrival=False))
+        last.stops.append(_airport_stop(airport, request.language, arrival=False, cost=one_way))
         for day in (first, last):
             for index, stop in enumerate(day.stops, start=1):
                 stop.sequence = index

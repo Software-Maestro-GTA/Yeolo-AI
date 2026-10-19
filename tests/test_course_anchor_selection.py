@@ -443,6 +443,11 @@ async def test_real_graph_uses_joint_candidates_without_supplier_inventory(
     assert len(visits) == len({stop.place.placeId for stop in visits}) == 15
     assert course.totalCost == 105000 + baseline.total_krw + 2 * 1000 + 2 * 2300
     assert sum(day.stops[-1].cost for day in course.itinerary.days[:-1]) == baseline.lodging.amount_krw
+    arrival_cost = course.itinerary.days[0].stops[0].cost
+    departure_cost = course.itinerary.days[-1].stops[-1].cost
+    assert arrival_cost > 0 and departure_cost > 0
+    assert arrival_cost + departure_cost == baseline.flight.amount_krw
+    assert abs(arrival_cost - departure_cost) <= 1
     assert await history.recent(history_key(request_data)) == [{stop.place.placeId for stop in visits}]
     assert all(not anchors.intersection(entry['attraction_ids']) for entry in await history.recent_profiles(history_key(request_data)))
     provider.search_airport.assert_not_awaited()
@@ -454,5 +459,7 @@ async def test_real_graph_uses_joint_candidates_without_supplier_inventory(
     localizer.assert_awaited_once()
     public = course.model_dump(context={'public_response': True})
     assert public['itinerary']['days'][0]['stops'][0]['place']['category'] == 'AIRPORT'
+    assert public['itinerary']['days'][0]['stops'][0]['cost'] == arrival_cost
     assert public['itinerary']['days'][0]['stops'][-1]['place']['category'] == 'LODGING'
     assert public['itinerary']['days'][-1]['stops'][-1]['place']['category'] == 'AIRPORT'
+    assert public['itinerary']['days'][-1]['stops'][-1]['cost'] == departure_cost

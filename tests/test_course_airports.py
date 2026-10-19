@@ -114,7 +114,8 @@ async def test_arrival_and_departure_surround_all_visits_and_charge_only_transfe
     arrival, departure = result.itinerary.days[0].stops[0], result.itinerary.days[-1].stops[-1]
     assert arrival.place.placeId == departure.place.placeId == 'places/verified-nrt'
     assert (arrival.stayMinutes, departure.stayMinutes) == (60, 120)
-    assert arrival.cost == departure.cost == 0
+    assert arrival.cost == departure.cost == 200000
+    assert arrival.cost + departure.cost == quotes.flight.amount_krw
     assert departure.transportToNext.type == 'none'
     assert arrival.transportToNext.minutes == result.itinerary.days[-1].stops[-2].transportToNext.minutes == 75
     assert result.totalCost == course.totalCost + 2 * 2300
@@ -145,6 +146,7 @@ async def test_one_day_flight_places_same_airport_at_both_ends(airport_case):
     stops = result.itinerary.days[0].stops
     assert len(stops) == 7
     assert stops[0].place.placeId == stops[-1].place.placeId == 'places/verified-nrt'
+    assert stops[0].cost == stops[-1].cost == 200000
     assert [stop.place.placeId for stop in stops[1:-1]] == [stop.place.placeId for stop in course.itinerary.days[0].stops]
     assert [stop.sequence for stop in stops] == list(range(1, 8))
     assert result.totalCost == course.totalCost + 4600
@@ -171,6 +173,27 @@ async def test_price_without_airport_identity_does_not_invent_endpoints(airport_
     assert result is course
     provider.search_airport.assert_not_awaited()
     provider.route.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['available', 'estimated'])
+async def test_round_trip_fare_splits_without_losing_odd_won_or_recharging_total(airport_case, status):
+    """Displayed outbound/return allocations preserve quoted or estimated whole-trip fares."""
+    request, course, destination, _, provider = airport_case
+    quotes = TripQuotes(
+        QuoteItem(status, 400001, source='offline-test-price', reference_date='2026-10-19', airport_identity=airport_identity()),
+        QuoteItem('unavailable'),
+    )
+    course.totalCost = 415001
+    result = await attach_airports(request, course, destination, quotes, provider)
+    assert [len(day.stops) for day in result.itinerary.days] == [6, 5, 6]
+    arrival, departure = result.itinerary.days[0].stops[0], result.itinerary.days[-1].stops[-1]
+    assert (arrival.cost, departure.cost) == (200001, 200000)
+    assert arrival.cost + departure.cost == quotes.flight.amount_krw
+    assert result.totalCost == course.totalCost + 4600
+    public = result.model_dump(context={'public_response': True})
+    assert public['itinerary']['days'][0]['stops'][0]['cost'] == 200001
+    assert public['itinerary']['days'][-1]['stops'][-1]['cost'] == 200000
 
 
 @pytest.mark.asyncio
@@ -212,6 +235,7 @@ async def test_failed_transfer_retains_airport_with_unknown_metrics(airport_case
     for route in (result.itinerary.days[0].stops[0].transportToNext, result.itinerary.days[-1].stops[-2].transportToNext):
         assert route.type == 'unknown'
         assert route.distance is route.minutes is route.memo is getattr(route, 'cost', None) is None
+    assert result.itinerary.days[0].stops[0].cost == result.itinerary.days[-1].stops[-1].cost == 200000
     assert result.totalCost == course.totalCost
 
 
@@ -239,6 +263,7 @@ async def test_expired_transfer_budget_retains_previously_verified_airport(airpo
     assert [len(day.stops) for day in result.itinerary.days] == [6, 5, 6]
     assert result.itinerary.days[0].stops[0].place.placeId == 'places/verified-nrt'
     assert result.itinerary.days[-1].stops[-1].place.placeId == 'places/verified-nrt'
+    assert result.itinerary.days[0].stops[0].cost == result.itinerary.days[-1].stops[-1].cost == 200000
     for route in (result.itinerary.days[0].stops[0].transportToNext,
                   result.itinerary.days[-1].stops[-2].transportToNext):
         assert route.type == 'unknown'
@@ -270,6 +295,7 @@ async def test_repeated_airport_attachment_is_idempotent(airport_case):
     repeated = await attach_airports(request, result, destination, quotes, provider)
     assert repeated.model_dump() == before
     assert repeated.totalCost == course.totalCost + 4600
+    assert repeated.itinerary.days[0].stops[0].cost + repeated.itinerary.days[-1].stops[-1].cost == quotes.flight.amount_krw
     provider.search_airport.assert_awaited_once()
     assert provider.route.await_count == 2
 
@@ -294,6 +320,7 @@ async def test_airport_route_timeout_joins_children_and_preserves_endpoints(airp
     assert [len(day.stops) for day in result.itinerary.days] == [6, 5, 6]
     assert len(finished) == provider.route.await_count == 2
     assert result.itinerary.days[0].stops[0].transportToNext.type == result.itinerary.days[-1].stops[-2].transportToNext.type == 'unknown'
+    assert result.itinerary.days[0].stops[0].cost == result.itinerary.days[-1].stops[-1].cost == 200000
     assert result.totalCost == course.totalCost
 
 
@@ -399,6 +426,7 @@ async def test_real_graph_adds_airports_after_hotels_without_polluting_diversity
     visit_ids = [stop.place.placeId for day in result.itinerary.days for stop in day.stops if stop.place.placeId not in {'places/verified-nrt', 'places/verified-hotel'}]
     assert len(visit_ids) == len(set(visit_ids)) == 10
     assert result.totalCost == 70000 + 400000 + 100001 + 1000 + 4600
+    assert result.itinerary.days[0].stops[0].cost == result.itinerary.days[-1].stops[-1].cost == 200000
     assert await history.recent(history_key(request_data)) == [set(visit_ids)]
     assert all(not ({'places/verified-nrt', 'places/verified-hotel'} & set(entry['attraction_ids'])) for entry in await history.recent_profiles(history_key(request_data)))
     assert localized_ids.count('places/verified-nrt') == 2
