@@ -118,7 +118,7 @@ class TransportToNextSchema(BaseModel):
     )
     distance: float | None = Field(None, description="실제 이동 거리 (미터)")
     minutes: int | None = Field(None, description="실제 이동 소요 시간 (분)")
-    memo: str | None = Field(None, description="요청 언어로 작성된 이동 안내")
+    memo: str | None = Field(None, description="실제 경로 정보에 근거한 이동 안내; 작성 가능한 정보가 없으면 null")
 
     @model_validator(mode="after")
     def check_unknown_metrics(self) -> Self:
@@ -134,8 +134,8 @@ class TransportToNextSchema(BaseModel):
 class StopSchema(BaseModel):
     sequence: int = Field(..., ge=1, description="방문 순서")
     stayMinutes: int = Field(..., ge=1, description="체류 시간 (분)")
-    memo: str = Field(..., description="요청 언어로 작성된 방문 팁")
-    reason: str = Field(..., description="취향과 검증된 장소에 근거한 추천 이유")
+    memo: str = Field(..., description="검증을 통과한 LLM 방문 팁; 생성·검증 미확보 시 빈 문자열")
+    reason: str = Field(..., description="취향과 검증된 장소에 근거한 LLM 추천 이유; 생성·검증 미확보 시 빈 문자열")
     cost: int = Field(default=0, ge=0, description="예상 활동·식사·입장 비용 또는 해당 일차 숙박 비용 (KRW); 첫날·마지막 날 공항은 왕복 항공료를 나눈 편도 예상 배분액이며 실제 편도 견적은 아님. 항공·숙박 비용은 totalCost에 중복 합산하지 않음")
     place: PlaceSchema = Field(..., description="지도 연결용 장소 정보")
     transportToNext: TransportToNextSchema = Field(

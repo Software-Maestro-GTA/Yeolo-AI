@@ -30,7 +30,7 @@ def output_for(operation):
             'recommendCity': {'countryName': '대한민국', 'cityName': '서울', 'reason': '카페에 대한 관심을 바탕으로 제안해요.'},
         }
     if operation == 'candidates':
-        return {'title': '서울 여행', 'reason': '문화 탐방', 'days': [
+        return {'title': '서울 여행', 'days': [
             {'candidates': [{'name': '국립중앙박물관'}, {'name': '서울숲'}]},
         ]}
     output = {
@@ -132,6 +132,11 @@ async def test_gemini_gateway_request_preserves_schema_parameters_and_identity(o
         assert body['reasoning_effort'] == 'low'
         assert body['max_completion_tokens'] == 5000
         candidate_schema = body['response_format']['json_schema']['schema']
+        assert 'reason' not in candidate_schema['properties']
+        assert 'reason' not in candidate_schema['$defs']['Candidate']['properties']
+        messages = ' '.join(message['content'] for message in body['messages'])
+        assert 'reason은 25자' not in messages and '코드에서 재구성' not in messages
+        assert 'reason이나 memo를 작성하지 마세요' in messages
         anchor_schema = candidate_schema['$defs']['AnchorCandidates']
         assert set(anchor_schema['properties']) == {'airports', 'lodgings'}
         assert all(field['maxItems'] == 2 for field in anchor_schema['properties'].values())
@@ -219,7 +224,7 @@ async def test_gateway_failure_has_no_direct_fallback_and_closes_clients(operati
 
 @pytest.mark.asyncio
 async def test_invalid_daily_output_closes_clients(offline_wire):
-    clients = offline_wire(lambda _: completion({'title': '후보', 'reason': '', 'days': []}))
+    clients = offline_wire(lambda _: completion({'title': '후보', 'days': []}))
     with pytest.raises(OutputParserException, match='assigned day'):
         await invoke('candidates')
     assert all(client.is_closed for client in clients)

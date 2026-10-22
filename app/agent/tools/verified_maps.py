@@ -25,7 +25,6 @@ from app.services.place_categories import AIRPORT_TYPES, LODGING_TYPES
 from app.services.route_guidance import (
     MAX_MEMO_LENGTH,
     ROUTE_FIELD_MASK,
-    fallback_route_guidance,
     format_route_guidance,
     navigation_source,
 )
@@ -885,12 +884,14 @@ class VerifiedMapsProvider:
         seconds, distance = _route_metrics(data)
         # Guidance is optional: only validated numeric route facts determine
         # feasibility. Cancellation remains observable (it is BaseException).
-        source = []
         try:
             memo = format_route_guidance(data, mode, language=self.language)
-            source = navigation_source(data)
-            if (memo is None and fallback_route_guidance(mode, language=self.language) is not None) or (memo is not None and (not isinstance(memo, str) or not memo.strip() or len(memo) > MAX_MEMO_LENGTH)):
+            if memo is not None and (not isinstance(memo, str) or not memo.strip() or len(memo) > MAX_MEMO_LENGTH):
                 raise ValueError('Unusable optional route guidance')
         except Exception:  # noqa: BLE001 - optional presentation must not invalidate verified metrics
-            memo = fallback_route_guidance(mode, language=self.language)
+            memo = None
+        try:
+            source = navigation_source(data)
+        except Exception:  # noqa: BLE001 - optional sources must not invalidate verified metrics
+            source = []
         return InternalTransportSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=memo, navigationSource=source)

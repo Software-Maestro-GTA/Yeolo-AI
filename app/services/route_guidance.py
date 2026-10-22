@@ -71,108 +71,6 @@ def guidance_matches_language(value: str, language: str, *, allow_line_codes: bo
     return all(name.startswith(allowed) for name in letters)
 
 
-def _line_code(raw: dict) -> str:
-    """Keep only a short, supplied line code when stop names are untranslated."""
-    line = _mapping(_mapping(raw.get('transitDetails')).get('transitLine'))
-    value = _clean(line.get('nameShort')) or _clean(line.get('name'))
-    if re.fullmatch(r'[A-Z0-9][A-Z0-9./-]{0,15}', value):
-        return value
-    return ''
-
-
-def _transit_code_guidance(legs: list, language: str) -> str | None:
-    """Keep every supplied transit line in order, with localized map guidance.
-
-    Missing or excessive connections return generic guidance, so a partial
-    list of lines is never presented as the complete transfer sequence.
-    """
-    fallback = fallback_route_guidance('transit', language)
-    codes = []
-    for leg in legs:
-        steps = _mapping(leg).get('steps')
-        if not isinstance(steps, list) or len(steps) > 120:
-            return fallback
-        for step in steps:
-            raw = _mapping(step)
-            if raw.get('travelMode') not in {'WALK', 'TRANSIT'}:
-                return fallback
-            if raw.get('travelMode') != 'TRANSIT':
-                continue
-            code = _line_code(raw)
-            if not code:
-                return fallback
-            codes.append(code)
-            if len(codes) > 3:
-                return fallback
-    if not codes:
-        return fallback
-    base = language.split('-', 1)[0].lower()
-    if base == 'ko':
-        labels = [f'{code}번' if code.isdecimal() else code for code in codes]
-        action = f'{labels[0]} 노선을 이용하세요.' if len(labels) == 1 else f'{" → ".join(labels)} 순서로 이용하세요.'
-        result = action + ' 승차·하차 위치와 행선지는 지도 앱의 대중교통 길찾기에서 확인하세요.'
-    elif base == 'en':
-        result = f'Take {" → ".join(codes)} in order. Check boarding and alighting stops and direction in your map app.'
-    elif base == 'ja':
-        result = f'{" → ".join(codes)}を順に利用してください。乗降場所と行き先は地図アプリの公共交通案内で確認してください。'
-    elif base == 'zh':
-        traditional = any(part in {'hant', 'tw', 'hk', 'mo'} for part in language.lower().split('-')[1:])
-        result = (f'依序搭乘{" → ".join(codes)}路線。請在地圖應用程式的大眾運輸導航中確認上下車站和方向。'
-                  if traditional else f'依次搭乘{" → ".join(codes)}线路。请在地图应用的公共交通导航中确认上下车站和方向。')
-    else:
-        return fallback
-    return result if len(result) <= MAX_MEMO_LENGTH else fallback
-
-
-def fallback_route_guidance(mode: str, language: str = 'ko') -> str | None:
-    """Return a generic action without inventing missing navigation details.
-
-    Args:
-        mode: Existing transport type.
-        language: Requested BCP 47 language; supported generic fallbacks use its base.
-    Returns:
-        Short localized action, or None when a safe translation is unavailable.
-    """
-    base = language.split('-', 1)[0].lower()
-    if base == 'zh' and any(part in {'hant', 'tw', 'hk', 'mo'} for part in language.lower().split('-')[1:]):
-        base = 'zh-Hant'
-    actions = {
-        'ko': {
-            'walking': '지도 앱의 도보 길찾기를 열고 안내된 보행 경로를 따라가세요.',
-            'transit': '지도 앱의 대중교통 길찾기를 열고 노선과 행선지를 확인해 타세요.',
-            'driving': '내비게이션에 목적지를 설정하고 안내된 차량 경로를 따라가세요.',
-            'taxi': '택시 기사에게 목적지를 보여주고 내비게이션의 도착지를 확인하세요.',
-        },
-        'en': {
-            'walking': 'Open walking directions in your map app and follow the route.',
-            'transit': 'Open transit directions in your map app and check the line and destination before boarding.',
-            'driving': 'Set your destination in navigation and follow the driving route.',
-            'taxi': 'Show the driver your destination and check it in navigation.',
-        },
-        'ja': {
-            'walking': '地図アプリで徒歩ルートを開き、案内に沿って進んでください。',
-            'transit': '地図アプリで公共交通ルートを開き、路線と行き先を確認して乗車してください。',
-            'driving': 'ナビに目的地を設定し、案内されたルートを進んでください。',
-            'taxi': '運転手に目的地を見せ、ナビの行き先を確認してください。',
-        },
-        'zh-Hant': {
-            'walking': '在地圖應用程式中開啟步行導航，並沿指示路線前進。',
-            'transit': '在地圖應用程式中開啟大眾運輸導航，確認路線和方向後搭車。',
-            'driving': '在導航中設定目的地，並沿指示路線行駛。',
-            'taxi': '向司機出示目的地，並確認導航中的終點。',
-        },
-        'zh': {
-            'walking': '在地图应用中打开步行导航，并沿指示路线前进。',
-            'transit': '在地图应用中打开公共交通导航，确认线路和方向后乘车。',
-            'driving': '在导航中设置目的地，并沿指示路线行驶。',
-            'taxi': '向司机出示目的地，并确认导航中的终点。',
-        },
-    }
-    if base not in actions:
-        return None
-    return actions[base].get(mode)
-
-
 def _sentence(instruction: str) -> str:
     """Keep a supplied instruction whole, adding only terminal punctuation."""
     return instruction if instruction.endswith(('.', '!', '?', '。', '！', '？')) else instruction + '.'
@@ -253,35 +151,33 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
         language: Requested language; provider instructions must use its script.
     Returns:
         One paragraph of at most 240 characters and three complete action units.
-        All transit connections must fit; otherwise a generic action is returned.
+        All transit connections must fit; otherwise None is returned.
         No route fact is inferred and no identifier or instruction is sliced.
-        Untranslated transit names use supplied line codes and localized map
-        guidance. Optional foreign walking prose is omitted. Unsupported locales
-        without usable provider instructions return None.
+        Untranslated transit names require usable provider instructions or later
+        translation from retained source actions. Optional foreign walking prose
+        is omitted. Missing or unusable navigation returns None.
     """
-    fallback = fallback_route_guidance(mode, language)
     routes = _mapping(data).get('routes')
     if not isinstance(routes, list) or not routes:
-        return fallback
+        return None
     legs = _mapping(routes[0]).get('legs')
     if not isinstance(legs, list):
-        return fallback
+        return None
     parts: list[tuple[int, str, bool]] = []
     transit_count = 0
     count = 0
     # An unprocessed suffix might hide a required connection; never summarize
     # bounded parsing of such a response as a complete transit route.
     if len(legs) > 20:
-        return fallback
-    language_fallback = _transit_code_guidance(legs, language) if mode == 'transit' else fallback
+        return None
     for leg in legs[:20]:
         steps = _mapping(leg).get('steps')
         if not isinstance(steps, list):
             if mode == 'transit':
-                return fallback
+                return None
             continue
         if len(steps) > 120:
-            return fallback
+            return None
         for step in steps[:120]:
             count += 1
             raw = _mapping(step)
@@ -292,12 +188,12 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
                 # Navigation instructions were requested from Maps in the user
                 # language; never apply Korean sentence templates to foreign text.
                 if not instruction:
-                    return fallback
+                    return None
                 if not guidance_matches_language(instruction, language, allow_line_codes=True):
-                    return language_fallback
+                    return None
                 transit_count += 1
                 if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
-                    return fallback
+                    return None
             elif transit:
                 details = _mapping(raw.get('transitDetails'))
                 stops = _mapping(details.get('stopDetails'))
@@ -308,15 +204,15 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
                 supplied_direction = details.get('headsign')
                 direction = _clean(supplied_direction)
                 if not all((start, end, line_name)) or (supplied_direction and not direction):
-                    return fallback
+                    return None
                 if not guidance_matches_language(f'{start} {end} {line_name} {direction}', language, allow_line_codes=True):
                     if instruction and guidance_matches_language(instruction, language, allow_line_codes=True):
                         transit_count += 1
                         if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
-                            return fallback
+                            return None
                         parts.append((count, _sentence(instruction), True))
                         continue
-                    return language_fallback
+                    return None
                 direction_label = ''
                 if direction:
                     direction = re.sub(r'(?<=[가-힣])\.(?=[가-힣])', '·', direction)
@@ -332,7 +228,7 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
                     instruction = f'{start}에서 {line_label}{direction_label}{particle} 타고 {end}에서 내리세요.'
                 transit_count += 1
                 if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
-                    return fallback
+                    return None
             if instruction and not guidance_matches_language(instruction, language, allow_line_codes=transit):
                 # Walking access is optional; never mix foreign prose into a
                 # complete boarding/transfer chain that is already readable.
@@ -341,14 +237,14 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
                 parts.append((count, _sentence(instruction), transit))
             else:
                 if mode == 'transit' and not raw:
-                    return fallback
+                    return None
     if not parts:
-        return fallback
+        return None
     # Transit actions are mandatory. Final walking is the first optional action,
     # followed by the approach and remaining chronological walking instructions.
     connections = [part for part in parts if part[2]]
     if len(_memo([part[1] for part in connections])) > MAX_MEMO_LENGTH:
-        return fallback
+        return None
     selected: dict[int, str] = {}
     for index, instruction, _ in connections:
         selected[index] = instruction
@@ -362,7 +258,7 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
         if len(lines) <= 3 and len(_memo(lines)) <= MAX_MEMO_LENGTH:
             selected[index] = instruction
     if not selected:
-        return fallback
+        return None
     lines = [selected[index] for index in sorted(selected)]
     result = _memo(lines)
-    return result if len(result) <= MAX_MEMO_LENGTH else fallback
+    return result if len(result) <= MAX_MEMO_LENGTH else None

@@ -9,7 +9,12 @@ from app.agent.tools.verified_maps import (
     InternalTransportSchema as TransportToNextSchema,
 )
 from app.agent.tools.verified_maps import VerifiedPlace
-from app.services.course_routing import distance_meters, valid_route
+from app.services.course_routing import (
+    distance_meters,
+    route_preference_rank,
+    unavailable_route,
+    valid_route,
+)
 
 
 def test_unknown_route_has_no_metrics_or_fare_and_is_not_verified_travel():
@@ -57,10 +62,17 @@ def test_unknown_or_estimated_route_is_never_accepted(mode, distance, memo):
     assert not valid_route(route)
 
 
-@pytest.mark.parametrize('minutes', [91, 0, None])
-def test_known_route_metrics_still_enforce_duration_cap(minutes):
+@pytest.mark.parametrize('minutes', [0, None])
+def test_known_route_requires_positive_duration(minutes):
     route = TransportToNextSchema(type='transit', distance=5000, minutes=minutes)
     assert not valid_route(route)
+
+
+@pytest.mark.parametrize('minutes', [89, 90, 91, 120, 800])
+def test_measured_route_has_no_fixed_duration_limit(minutes):
+    route = TransportToNextSchema(type='transit', distance=5000, minutes=minutes)
+    assert valid_route(route)
+    assert route_preference_rank([route]) == (0, minutes)
 
 
 @pytest.mark.parametrize('distance', [None, 0, -1, math.nan, math.inf])
@@ -70,3 +82,10 @@ def test_provider_route_requires_positive_finite_distance(distance):
 
 def test_valid_provider_metrics_are_retained():
     assert valid_route(TransportToNextSchema(type='transit', distance=500, minutes=10))
+
+
+def test_route_ranking_uses_total_duration_without_per_link_threshold_penalty():
+    routes = lambda minutes: [TransportToNextSchema(type='transit', distance=5000, minutes=value) for value in minutes]
+    # The shorter total must win even when one link crosses the former boundary.
+    assert route_preference_rank(routes([100, 10])) < route_preference_rank(routes([60, 60]))
+    assert route_preference_rank(routes([120])) < route_preference_rank([unavailable_route()])

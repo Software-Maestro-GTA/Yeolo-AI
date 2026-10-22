@@ -42,7 +42,7 @@ def source_course():
     value = course()
     value.itinerary.days[0].stops[0].transportToNext = InternalTransportSchema(
         type='transit', distance=1250, minutes=21, cost=None,
-        memo='지도 앱의 대중교통 길찾기를 열고 노선과 행선지를 확인해 타세요.',
+        memo=None,
         navigationSource=navigation_source(source_payload()),
     )
     return value

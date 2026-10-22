@@ -29,7 +29,6 @@ from app.services.course_diversity import (
 )
 from app.services.course_reasons import (
     CAFE,
-    visit_tip,
 )
 from app.services.course_routing import (
     distance_meters,
@@ -138,14 +137,13 @@ def _schedule_day(
             if last
             else routes[index]
         )
-        note = visit_tip(venue.place.category)
         stops.append(
             ScheduledStopSchema(
                 sequence=index + 1,
                 arrivalTime=f"{arrival // 60:02d}:{arrival % 60:02d}",
                 stayMinutes=candidate.stay_minutes,
-                memo=note,
-                reason=candidate.reason,
+                memo="",
+                reason="",
                 cost=candidate.cost,
                 place=venue.place,
                 transportToNext=transport,

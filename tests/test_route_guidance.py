@@ -85,8 +85,8 @@ async def test_transit_memo_connects_boarding_transfer_alighting_and_final_walk(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('steps', [None, {}, 'broken', [None, 42, {}], [{'travelMode': 'TRANSIT', 'transitDetails': {'stopDetails': 'bad'}}]])
-async def test_malformed_optional_steps_preserve_metrics_and_generic_action(endpoints, steps):
+@pytest.mark.parametrize('steps', [None, {}, 'broken', [None, 42, {}, '', ' ' * 5, '가' * 241], [{'travelMode': 'TRANSIT', 'transitDetails': {'stopDetails': 'bad'}}]])
+async def test_malformed_optional_steps_preserve_metrics_without_copy(endpoints, steps):
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response(steps)))) as client:
         provider = VerifiedMapsProvider(client=client, api_key='offline')
         route = await provider.route(*endpoints, mode='transit')
@@ -94,9 +94,8 @@ async def test_malformed_optional_steps_preserve_metrics_and_generic_action(endp
         assert provider.metrics.snapshot()['skus']['routes_essentials']['requests'] == 1
     assert route == cached
     assert (route.minutes, route.distance) == (21, 1250)
-    assert route.memo and '1250' not in route.memo and '21분' not in route.memo
-    assert len(route.memo) <= 120 and '\n' not in route.memo and '주요 이동' not in route.memo
-    assert not any(word in route.memo for word in ('1호선', '출구', '승강장', '재확인이 필요'))
+    assert route.memo is None
+    assert route.navigationSource == []
 
 
 @pytest.mark.asyncio
@@ -106,15 +105,15 @@ async def test_formatter_exception_is_optional_but_cancellation_is_not(endpoints
         provider = VerifiedMapsProvider(client=client, api_key='offline')
         route = await provider.route(*endpoints)
         assert (route.minutes, route.distance) == (21, 1250)
-        assert 'optional guidance' not in route.memo
-        assert len(route.memo) <= 120 and '조회 시점' not in route.memo
+        assert route.memo is None
+        assert route.navigationSource == [{'kind': 'instruction', 'text': '직진'}]
         formatter.side_effect = asyncio.CancelledError()
         with pytest.raises(asyncio.CancelledError):
             await provider.route(*endpoints)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('bad_guidance', [None, 42, {}])
+@pytest.mark.parametrize('bad_guidance', [None, 42, {}, '', ' ' * 5, '가' * 241])
 async def test_invalid_optional_formatter_return_cannot_break_verified_route(endpoints, mocker, bad_guidance):
     mocker.patch('app.agent.tools.verified_maps.format_route_guidance', return_value=bad_guidance)
     requests = []
@@ -126,19 +125,18 @@ async def test_invalid_optional_formatter_return_cannot_break_verified_route(end
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints)
     assert (route.minutes, route.distance, route.cost) == (21, 1250, 0)
-    assert isinstance(route.memo, str) and route.memo.strip()
-    assert len(route.memo) <= 120 and '\n' not in route.memo and '주요 이동' not in route.memo
-    assert not any(repeated in route.memo for repeated in ('목적지까지', '조회 시점', '출발 기준'))
+    assert route.memo is None
+    assert route.navigationSource == [{'kind': 'instruction', 'text': '직진하세요'}]
     assert len(requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_incomplete_transit_details_are_an_honest_summary_not_invented_connection(endpoints):
+async def test_incomplete_transit_details_return_null_without_invented_connection(endpoints):
     payload = response([walking('세종대로에서 시청역으로 이동하세요'), {'travelMode': 'TRANSIT'}, walking('북촌로에서 목적지로 이동하세요')])
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
         route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
-    assert len(route.memo) <= 120
-    assert not any(fragment in route.memo for fragment in ('세종대로', '북촌로', '1호선', '3호선', '몇 번 출구'))
+    assert route.memo is None
+    assert route.navigationSource == []
     assert (route.minutes, route.distance) == (21, 1250)
 
 
@@ -244,14 +242,13 @@ async def test_compact_guidance_preserves_long_but_fitting_stop_identifiers_with
 
 
 @pytest.mark.asyncio
-async def test_unfittable_essential_identifiers_use_generic_action_instead_of_truncated_stop(endpoints):
+async def test_unfittable_essential_identifiers_return_null_instead_of_truncated_stop(endpoints):
     start = '가나다라마바사' * 20 + '시청앞'
     end = '아자차카타파하' * 20 + '최종정류장'
     payload = response([transit(start, end, '402', '장지공영차고지')])
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
         route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
-    assert len(route.memo) <= 120
-    assert not any(fragment in route.memo for fragment in ('가나다', '아자차', '402', '장지공영차고지'))
+    assert route.memo is None
     assert (route.minutes, route.distance) == (21, 1250)
 
 
@@ -260,8 +257,8 @@ async def test_four_required_transit_connections_cannot_be_presented_as_three_li
     payload = response([transit(f'{index}번승차역', f'{index}번하차역', f'{index}호선', f'{index}번방면') for index in range(1, 5)])
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
         route = await VerifiedMapsProvider(client=client, api_key='offline').route(*endpoints, mode='transit')
-    assert len(route.memo) <= 120 and '\n' not in route.memo and '주요 이동' not in route.memo
-    assert not any(partial in route.memo for partial in ('승차역', '하차역', '1호선', '2호선', '3호선', '4호선'))
+    assert route.memo is None
+    assert route.navigationSource == []
     assert (route.minutes, route.distance) == (21, 1250)
 
 
@@ -369,17 +366,11 @@ async def test_route_locale_is_forwarded_and_supplied_navigation_avoids_korean_t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['en', 'ja', 'zh-CN', 'zh-TW', 'es'])
-async def test_missing_foreign_navigation_is_localized_or_null_never_korean(endpoints, language):
+async def test_missing_foreign_navigation_is_null_without_generic_replacement(endpoints, language):
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response([])))) as client:
         result = await VerifiedMapsProvider(client=client, api_key='offline', language=language).route(*endpoints, mode='transit')
     assert (result.minutes, result.distance) == (21, 1250)
-    if language == 'es':
-        assert result.memo is None
-    else:
-        assert isinstance(result.memo, str) and result.memo
-        assert not any('\uac00' <= char <= '\ud7a3' for char in result.memo)
-    if language == 'zh-TW':
-        assert '地圖' in result.memo
+    assert result.memo is None
 
 
 @pytest.mark.asyncio

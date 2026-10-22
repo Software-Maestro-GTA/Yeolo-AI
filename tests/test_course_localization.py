@@ -18,13 +18,9 @@ USER_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('language,booking_word', [
-    ('ko', '예약'), ('en', 'booking'), ('ja', '予約'), ('zh', '预订'),
-    ('zh-TW', '預訂'), ('fr', 'réserver'), ('es', 'reservar'),
-    ('de', 'Buchung'), ('pt', 'reservar'),
-])
-async def test_lodging_copy_remains_about_accommodation_when_localization_unavailable(language, booking_word, mocker):
-    """An overnight stop cannot fall back to sightseeing copy or change its price."""
+@pytest.mark.parametrize('language', ['ko', 'en', 'ja', 'zh', 'zh-TW', 'fr', 'es', 'de', 'pt'])
+async def test_lodging_copy_stays_empty_when_localization_unavailable(language, mocker):
+    """An overnight stop cannot acquire template prose or change its price."""
     value = course()
     hotel = value.itinerary.days[0].stops[-1]
     hotel.place = InternalPlaceSchema(
@@ -37,9 +33,7 @@ async def test_lodging_copy_remains_about_accommodation_when_localization_unavai
     gateway = mocker.patch('app.services.course_localization.get_abto')
     result = await course_localization.localize_course(request(language), value, timeout_seconds=0)
     updated = result.itinerary.days[0].stops[-1]
-    assert booking_word in updated.memo
-    assert course_localization.guidance_matches_language(updated.memo, language)
-    assert course_localization.guidance_matches_language(updated.reason, language)
+    assert updated.memo == updated.reason == ""
     assert updated.place.placeId == 'verified-hotel' and updated.cost == 47501
     assert updated.transportToNext.type == 'none' and result.totalCost == 95000
     gateway.assert_not_called()
@@ -329,7 +323,7 @@ async def test_hostile_or_incomplete_translation_falls_back_without_changing_ver
     result = await course_localization.localize_course(request(), value)
     assert result is value and facts(result) == before
     assert result.itinerary.days[0].stops[0].reason != output["stops"][0]["reason"]
-    assert result.itinerary.days[0].stops[0].memo.strip()
+    assert result.itinerary.days[0].stops[0].memo == result.itinerary.days[0].stops[0].reason == ""
     assert len(clients) == 2 and all(client.is_closed for client in clients)
 
 
@@ -347,7 +341,7 @@ async def test_hostile_or_incomplete_translation_falls_back_without_changing_ver
         ("pt-BR", "Consulte"),
     ],
 )
-async def test_optional_model_outage_uses_supported_language_category_grounded_fallback(
+async def test_optional_model_outage_does_not_create_visit_templates(
     language, marker, wire, caplog
 ):
     calls = []
@@ -365,7 +359,8 @@ async def test_optional_model_outage_uses_supported_language_category_grounded_f
     value = course()
     before = facts(value)
     result = await course_localization.localize_course(request(language), value)
-    assert facts(result) == before and marker in result.itinerary.days[0].stops[0].memo
+    assert facts(result) == before
+    assert all(stop.memo == stop.reason == "" for day in result.itinerary.days for stop in day.stops)
     assert (
         len(calls) == 1
         and len(clients) == 2
@@ -404,8 +399,7 @@ async def test_strong_actual_preferences_only_and_low_budget_skip_model(mocker):
         request("en", fields), value, timeout_seconds=0.1
     )
     museum, park = result.itinerary.days[0].stops
-    assert "fits your preferences" in museum.reason
-    assert "preferences" not in park.reason
+    assert museum.reason == museum.memo == park.reason == park.memo == ""
     constructor.assert_not_called()
 
 
@@ -477,7 +471,7 @@ async def test_optional_local_timer_returns_localized_course_instead_of_failure(
         course_localization.localize_course(request(), course(), timeout_seconds=0.2),
         timeout=2,
     )
-    assert result.itinerary.days[0].stops[0].memo.startswith("Start")
+    assert result.itinerary.days[0].stops[0].memo == result.itinerary.days[0].stops[0].reason == ""
     assert len(clients) == 2 and all(client.is_closed for client in clients)
 
 
@@ -521,5 +515,5 @@ async def test_other_bcp47_locale_still_attempts_requested_language_then_logs_en
         "Target language: vi-VN"
         in json.loads(calls[0].content)["messages"][-1]["content"]
     )
-    assert result.itinerary.days[0].stops[0].memo.startswith("Start")
+    assert result.itinerary.days[0].stops[0].memo == result.itinerary.days[0].stops[0].reason == ""
     assert "English for unsupported locale: vi-VN" in caplog.text

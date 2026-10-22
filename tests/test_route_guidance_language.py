@@ -13,7 +13,6 @@ from app.agent.tools.verified_maps import (
     VerifiedPlace,
 )
 from app.services.maps_cost import classify_maps_sku
-from app.services.route_guidance import fallback_route_guidance
 
 
 def _walking(instruction: str) -> dict[str, Any]:
@@ -69,16 +68,13 @@ async def _route_memo(steps: list[dict[str, Any]], *, language: str = 'ko', mode
 
 
 @pytest.mark.asyncio
-async def test_vietnam_screenshot_keeps_verified_line_code_without_mixed_stop_directions():
+async def test_vietnam_screenshot_requires_translation_before_producing_navigation():
     memo = await _route_memo([
         _walking('북동쪽으로 걷기 사용이 제한된 도로 계단 이용.'),
         _transit('Số 131 Hoàng Diệu', 'Đối Diện 18-20', '07', 'Xuân Diệu - DN-HC0039'),
         _walking('Bạch Đằng에서 Lý Thường Kiệt 방면 북쪽으로 걷기 뒤 루츠 부티크 호텔 통과 (왼쪽 33m) 목적지는 길의 왼쪽에 있습니다.'),
     ])
-    assert memo and '07' in memo and '지도' in memo
-    assert not any(fragment in memo for fragment in (
-        'Hoàng', 'Số', 'Diệu', 'Đối', 'Xuân', 'Bạch', 'Lý', 'Thường', 'DN-HC0039', '33m',
-    ))
+    assert memo is None
 
 
 @pytest.mark.asyncio
@@ -106,29 +102,26 @@ async def test_complete_korean_instruction_precedes_foreign_structured_stop_name
 
 
 @pytest.mark.asyncio
-async def test_one_mixed_transit_connection_falls_back_for_whole_chain_with_all_line_codes():
+async def test_one_mixed_transit_connection_leaves_whole_chain_empty_until_translation():
     memo = await _route_memo([
         _transit('시청역', '중앙역', '07', '북쪽'),
         _transit('Central Station', 'Museum Station', 'M2.1', 'North'),
     ])
-    assert memo and all(code in memo for code in ('07', 'M2.1')) and '지도' in memo
-    assert memo.index('07') < memo.index('M2.1')
-    assert not any(fragment in memo for fragment in ('시청역', '중앙역', 'Central', 'Museum', 'North'))
+    assert memo is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('line', ['07', 'M2.1', 'JR', 'G09'])
-async def test_verified_short_line_identifiers_survive_as_codes_without_translating_stops(line):
+async def test_verified_short_line_identifiers_cannot_replace_untranslated_stops(line):
     memo = await _route_memo([_transit('Central Station', 'Museum Station', line, 'North')])
-    assert memo and line in memo and '지도' in memo
-    assert not any(fragment in memo for fragment in ('Central', 'Museum', 'North'))
+    assert memo is None
 
 
 @pytest.mark.asyncio
-async def test_foreign_names_without_a_short_line_code_use_existing_localized_fallback():
+async def test_foreign_names_without_a_short_line_code_leave_memo_empty():
     step = _transit('Hoàng Diệu', 'Bạch Đằng', '', 'Xuân Diệu')
     step['transitDetails']['transitLine']['name'] = 'Tuyến xe buýt số bảy'
-    assert await _route_memo([step]) == fallback_route_guidance('transit', 'ko')
+    assert await _route_memo([step]) is None
 
 
 @pytest.mark.asyncio
@@ -143,19 +136,17 @@ async def test_foreign_names_without_a_short_line_code_use_existing_localized_fa
     ('de', '박물관 거리에서 오른쪽으로 도세요.'),
     ('pt', '박물관 거리에서 오른쪽으로 도세요.'),
 ])
-async def test_clearly_wrong_script_navigation_uses_requested_language_without_metric_changes(language, instruction):
+async def test_clearly_wrong_script_navigation_leaves_memo_empty_without_metric_changes(language, instruction):
     memo = await _route_memo([_walking(instruction)], language=language, mode='walking')
-    assert memo == fallback_route_guidance('walking', language)
-    assert memo is None or instruction not in memo
+    assert memo is None
 
 
 @pytest.mark.asyncio
-async def test_english_transit_instruction_for_japanese_request_uses_japanese_with_verified_code():
+async def test_english_transit_instruction_for_japanese_request_leaves_memo_empty_until_translation():
     memo = await _route_memo([
         _transit('Central Station', 'Museum Station', 'G09', 'North', instruction='Take G09 to Museum Station.'),
     ], language='ja')
-    assert memo and any('\u3040' <= char <= '\u30ff' for char in memo)
-    assert not any(fragment in memo for fragment in ('Take', 'Central', 'Museum', 'North'))
+    assert memo is None
 
 
 @pytest.mark.asyncio
@@ -166,5 +157,4 @@ async def test_missing_step_mode_does_not_claim_complete_connection_with_partial
         unclassified_step,
         _transit('East Station', 'Museum Station', 'G09', 'North'),
     ])
-    assert memo == fallback_route_guidance('transit', 'ko')
-    assert '07' not in memo and 'G09' not in memo
+    assert memo is None

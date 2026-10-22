@@ -189,13 +189,13 @@ async def test_five_route_failure_uses_safe_four_before_three(visit_dependencies
     impossible = places[draft.days[0].candidates[-1].name].place.placeId
     llm.return_value = draft
     async def route(left, right, **kwargs):
-        return TransportToNextSchema(type='transit', distance=1500, minutes=100 if impossible in {left.place.placeId, right.place.placeId} else 10, cost=1500)
+        return TransportToNextSchema(type='transit', distance=1500, minutes=800 if impossible in {left.place.placeId, right.place.placeId} else 10, cost=1500)
     provider.route.side_effect = route
     day = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course'].itinerary.days[0]
     assert len(day.stops) == 4 and len(core_ids(day)) == 2
     assert impossible not in {stop.place.placeId for stop in day.stops}
     assert 3 <= llm.await_count <= 4
-    assert all(stop.transportToNext.minutes <= 90 for stop in day.stops[:-1])
+    assert all(stop.transportToNext.minutes == 10 for stop in day.stops[:-1])
 
 
 @pytest.mark.asyncio
@@ -247,19 +247,23 @@ async def test_food_inflated_five_fallback_explains_core_deficit_without_fake_re
 
 
 @pytest.mark.asyncio
-async def test_final_repair_returns_five_when_routes_recover_without_reduced_note(visit_dependencies):
+async def test_refill_after_drafting_outage_shortens_stays_without_dropping_places(visit_dependencies):
     from app.agent.course_graph import build_course_graph
 
-    request, provider, history, llm, _, make_draft = visit_dependencies
+    request, provider, history, llm, places, make_draft = visit_dependencies
     draft = make_draft(cores=3)
+    for candidate in draft.days[0].candidates:
+        candidate.stay_minutes = 240
     llm.side_effect = [draft] + [TimeoutError('final drafting outage')] * 3
-    async def route(left, right, **kwargs):
-        return TransportToNextSchema(type='transit', distance=1500, minutes=100 if llm.await_count == 1 else 10, cost=1500)
-    provider.route.side_effect = route
-    day = (await build_course_graph(provider, history).ainvoke({'request': request, 'attempt': 0}))['course'].itinerary.days[0]
+    updates = [update async for update in build_course_graph(provider, history).astream({'request': request, 'attempt': 0}, stream_mode='updates')]
+    day = next(update['finalize']['course'] for update in updates if 'finalize' in update).itinerary.days[0]
+    assert any('refill' in update for update in updates)
     assert len(day.stops) == 5 and len(core_ids(day)) == 3
+    assert {stop.place.placeId for stop in day.stops} == {places[candidate.name].place.placeId for candidate in draft.days[0].candidates}
+    assert all(stop.stayMinutes <= 60 for stop in day.stops)
+    assert all(stop.transportToNext.minutes == 10 for stop in day.stops[:-1])
     assert 2 <= llm.await_count <= 4
-    assert provider.route.await_count <= 4 * 4 + 16 * 4
+    assert provider.route.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -300,9 +304,7 @@ async def test_initial_three_drafts_do_not_consume_independent_fullness_refills(
     llm.side_effect = [initial, initial, initial, filled]
 
     async def route(left, right, **kwargs):
-        minutes = 100 if impossible in {left.place.placeName, right.place.placeName} else 10
-        if llm.await_count <= 3 and {left.place.placeName, right.place.placeName} - completed:
-            minutes = 100
+        minutes = 800 if impossible in {left.place.placeName, right.place.placeName} else 10
         return TransportToNextSchema(type='walking', distance=400, minutes=minutes, cost=0)
 
     provider.route.side_effect = route
@@ -314,7 +316,9 @@ async def test_initial_three_drafts_do_not_consume_independent_fullness_refills(
     assert provider.search.await_count == 11
     ids = [stop.place.placeId for day in course.itinerary.days for stop in day.stops]
     assert len(ids) == len(set(ids))
-    assert all(stop.transportToNext.minutes <= 90 for day in course.itinerary.days for stop in day.stops[:-1])
+    second_day_names = {stop.place.placeName for stop in course.itinerary.days[1].stops}
+    assert replacement.name in second_day_names and impossible not in second_day_names
+    assert all(stop.transportToNext.minutes == 10 for day in course.itinerary.days for stop in day.stops[:-1])
 
 
 @pytest.mark.asyncio

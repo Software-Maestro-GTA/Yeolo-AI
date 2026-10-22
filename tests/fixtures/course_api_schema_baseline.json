@@ -677,12 +677,12 @@
             "type": "integer"
           },
           "memo": {
-            "description": "요청 언어로 작성된 방문 팁",
+            "description": "검증을 통과한 LLM 방문 팁; 생성·검증 미확보 시 빈 문자열",
             "title": "Memo",
             "type": "string"
           },
           "reason": {
-            "description": "취향과 검증된 장소에 근거한 추천 이유",
+            "description": "취향과 검증된 장소에 근거한 LLM 추천 이유; 생성·검증 미확보 시 빈 문자열",
             "title": "Reason",
             "type": "string"
           },
@@ -764,7 +764,7 @@
               }
             ],
             "default": null,
-            "description": "요청 언어로 작성된 이동 안내",
+            "description": "실제 경로 정보에 근거한 이동 안내; 작성 가능한 정보가 없으면 null",
             "title": "Memo"
           }
         },
