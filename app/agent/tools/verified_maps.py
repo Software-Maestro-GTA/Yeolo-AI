@@ -168,7 +168,7 @@ class InternalPlaceSchema(PlaceSchema):
     """
 
     category: str = Field(..., description='Actual provider type for internal validation; serialized as an app category')
-    providerTypes: list[str] = Field(default_factory=list, exclude=True, description='Actual Essentials types for display grouping only')
+    providerTypes: list[str] = Field(default_factory=list, exclude=True, description='Actual Essentials types for display grouping and grounded visit copy')
     address: str = Field(default='', description='Provider address for internal area matching')
     placeEngName: str = Field(default='', description='Optional proposed English search name; not officially verified')
 

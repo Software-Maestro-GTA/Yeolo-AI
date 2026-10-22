@@ -190,9 +190,9 @@ async def test_failed_return_route_preserves_hotel_with_unknown_transfer(lodging
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('arrival, minutes', [('17:00', 141), ('20:00', 10)])
+@pytest.mark.parametrize('arrival, minutes', [('19:00', 141), ('20:00', 81)])
 async def test_return_exceeding_day_keeps_other_nights_and_daytime_visits(lodging_case, arrival, minutes):
-    """A return ending after 21:00 defers only that night without fabricating metrics."""
+    """A return ending after 23:00 defers only that night without fabricating metrics."""
     request, course, destination, quotes, provider = lodging_case
     course.itinerary.days[1].stops[-1].arrivalTime = arrival
 
@@ -210,12 +210,46 @@ async def test_return_exceeding_day_keeps_other_nights_and_daytime_visits(lodgin
     assert result.itinerary.days[2].model_dump() == course.itinerary.days[2].model_dump()
     assert result.totalCost == course.totalCost + 1400
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('minutes, attached', [(15, True), (126, True), (127, False)])
+async def test_late_museum_visit_can_return_after_21_until_23(lodging_case, minutes, attached):
+    """A 20:14 visit end allows 126 travel minutes including 10+30 minutes overhead."""
+    request, course, destination, quotes, provider = lodging_case
+    last_visit = course.itinerary.days[1].stops[-1]
+    last_visit.arrivalTime, last_visit.stayMinutes = '18:44', 90
+
+    async def route(origin, hotel, *, mode, **kwargs):
+        if mode != 'transit':
+            raise NoRouteError()
+        return InternalTransportSchema(
+            type='transit', distance=2300,
+            minutes=minutes if origin.place.placeId == last_visit.place.placeId else 18,
+            cost=1400,
+        )
+
+    provider.route.side_effect = route
+    before = course.model_dump()
+    result = await attach_lodging(request, course, destination, quotes, provider)
+    assert course.model_dump() == before
+    assert [len(day.stops) for day in result.itinerary.days] == [6, 6 if attached else 5, 5]
+    assert [stop.model_dump(exclude={'transportToNext'}) for stop in result.itinerary.days[1].stops[:5]] == [
+        stop.model_dump(exclude={'transportToNext'}) for stop in course.itinerary.days[1].stops
+    ]
+    assert result.totalCost == course.totalCost + 1400 * (1 + attached)
+    if attached:
+        assert result.itinerary.days[1].stops[-1].place.placeId == 'places/verified-hotel'
+        assert result.itinerary.days[1].stops[-2].transportToNext.minutes == minutes
+    else:
+        assert result.itinerary.days[1].model_dump() == course.itinerary.days[1].model_dump()
+
+
 @pytest.mark.asyncio
 async def test_long_measured_return_fits_day_and_retains_fastest_alternative(lodging_case):
-    """18:20 visit end plus 10+120+30 minutes finishes exactly at 21:00."""
+    """20:20 visit end plus 10+120+30 minutes finishes exactly at 23:00."""
     request, course, destination, quotes, provider = lodging_case
     for day in course.itinerary.days[:-1]:
-        day.stops[-1].arrivalTime = '17:20'
+        day.stops[-1].arrivalTime = '19:20'
 
     async def route(origin, hotel, *, mode, **kwargs):
         if mode == 'transit':
@@ -260,15 +294,15 @@ async def test_feasible_long_transit_does_not_trigger_duration_based_taxi_lookup
 
 @pytest.mark.asyncio
 async def test_remaining_day_time_checks_faster_taxi_when_first_mode_cannot_fit(lodging_case):
-    """A 20-minute travel allowance must compare transit 30 against taxi 10."""
+    """A 140-minute travel allowance must compare transit 150 against taxi 120."""
     request, course, destination, quotes, provider = lodging_case
     course.itinerary.days[1].stops[-1].arrivalTime = '19:00'
 
     async def route(origin, hotel, *, mode, **kwargs):
         if mode == 'transit':
-            return InternalTransportSchema(type='transit', distance=10000, minutes=30, cost=1000)
+            return InternalTransportSchema(type='transit', distance=10000, minutes=150, cost=1000)
         if mode == 'taxi':
-            return InternalTransportSchema(type='taxi', distance=8000, minutes=10, cost=3000)
+            return InternalTransportSchema(type='taxi', distance=8000, minutes=120, cost=3000)
         raise NoRouteError()
 
     provider.route.side_effect = route
@@ -276,8 +310,8 @@ async def test_remaining_day_time_checks_faster_taxi_when_first_mode_cannot_fit(
     assert [len(day.stops) for day in result.itinerary.days] == [6, 6, 5]
     first_return = result.itinerary.days[0].stops[-2].transportToNext
     late_return = result.itinerary.days[1].stops[-2].transportToNext
-    assert (first_return.type, first_return.minutes) == ('transit', 30)
-    assert (late_return.type, late_return.minutes) == ('taxi', 10)
+    assert (first_return.type, first_return.minutes) == ('transit', 150)
+    assert (late_return.type, late_return.minutes) == ('taxi', 120)
     assert result.totalCost == course.totalCost + 4000
 
 @pytest.mark.asyncio
@@ -307,7 +341,7 @@ async def test_walk_exceeding_remaining_day_uses_verified_transit_alternative(lo
 
     async def route(origin, hotel, *, mode, **kwargs):
         if mode == 'walking':
-            return InternalTransportSchema(type='walking', distance=8000, minutes=100, cost=0)
+            return InternalTransportSchema(type='walking', distance=8000, minutes=160, cost=0)
         if mode == 'transit':
             return InternalTransportSchema(type='transit', distance=3000, minutes=10, cost=500)
         raise NoRouteError()

@@ -90,7 +90,7 @@ async def test_reviewed_place_copy_runs_after_localization_and_survives_graph_co
 
     async def written(request, course, **kwargs):
         assert seen == ['localized']
-        assert 0 < kwargs['timeout_seconds'] <= 30
+        assert 80 < kwargs['timeout_seconds'] <= 89
         seen.append('written')
         for day in course.itinerary.days:
             for stop in day.stops:
@@ -109,6 +109,35 @@ async def test_reviewed_place_copy_runs_after_localization_and_survives_graph_co
     for stop in course.itinerary.days[0].stops:
         assert stop.reason.endswith('검토된 추천 이유')
         assert stop.memo.endswith('검토된 방문 팁')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('localization_elapsed', [80, 239.5])
+async def test_copy_receives_remaining_budget_after_localization_without_fresh_time(
+    request_data, graph_dependencies, mocker, monkeypatch, localization_elapsed,
+):
+    from app.agent.course_nodes import CourseGraphNodes
+
+    provider, history, _, _, _ = graph_dependencies
+    clock = [100.0]
+    course = mocker.sentinel.course
+
+    async def localized(request, value, **kwargs):
+        assert value is course
+        clock[0] += localization_elapsed
+        return value
+
+    mocker.patch('app.agent.course_nodes._progress')
+    mocker.patch('app.agent.course_nodes.localize_course', side_effect=localized)
+    writer = mocker.patch('app.agent.course_nodes.write_place_copy', return_value=course)
+    loop = asyncio.get_running_loop()
+    with monkeypatch.context() as patch:
+        patch.setattr(loop, 'time', lambda: clock[0])
+        result = await CourseGraphNodes(provider, history).localize_display({
+            'request': request_data, 'course': course, 'deadline': 340.0,
+        })
+    assert result == {'course': course}
+    assert writer.await_args.kwargs['timeout_seconds'] == max(0.0, 240 - localization_elapsed - 1)
 
 
 @pytest.mark.asyncio
@@ -131,10 +160,13 @@ async def test_copy_failure_cannot_restore_prior_localized_or_draft_prose(
         return course
 
     mocker.patch('app.agent.course_nodes.localize_course', side_effect=stale_localization)
-    mocker.patch('app.agent.course_nodes.write_place_copy', side_effect=write_place_copy)
+    async def write_with_budget(request, course, **kwargs):
+        if failure == 'expired':
+            kwargs['timeout_seconds'] = 0
+        return await write_place_copy(request, course, **kwargs)
+
+    mocker.patch('app.agent.course_nodes.write_place_copy', side_effect=write_with_budget)
     gateway = mocker.patch('app.services.course_place_copy.get_abto', side_effect=ValueError('offline writer'))
-    if failure == 'expired':
-        mocker.patch('app.agent.course_nodes.COPY_TIMEOUT_SECONDS', 0)
     course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
     assert len(course.itinerary.days[0].stops) == 5
     assert all(stop.reason == stop.memo == '' for stop in course.itinerary.days[0].stops)
@@ -480,8 +512,8 @@ async def test_same_museum_passes_actual_preference_evidence_to_writer(request_d
     second = await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0})
     assert first['course'].itinerary.days[0].stops[0].reason == ''
     assert second['course'].itinerary.days[0].stops[0].reason == ''
-    assert captured[0][0]['compatible_preferences'][0]['label'] == '문화 체험'
-    assert captured[1][0]['compatible_preferences'][0]['label'] == '관람'
+    assert captured[0][0][0]['compatible_preferences'][0]['label'] == '문화 체험'
+    assert captured[1][0][0]['compatible_preferences'][0]['label'] == '관람'
     assert llm.await_count == 2  # Candidate generation remains independently bounded.
 
 

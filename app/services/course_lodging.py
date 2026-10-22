@@ -2,7 +2,7 @@
 
 Supplier or proposed hotel names are resolved through Maps Essentials. Return transfers may
 remain unknown; no hotel, coordinates, fare or room availability is invented.
-Measured returns fit the internal day clock, including settling in by 21:00.
+Measured returns fit the internal day clock, including settling in by 23:00.
 """
 
 import asyncio
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 LODGING_TIMEOUT_SECONDS = 12.0
 LODGING_SETTLING_MINUTES = 30
 RETURN_TRANSITION_MINUTES = 10
-DAY_END_MINUTES = 21 * 60
+DAY_END_MINUTES = 23 * 60
 
 
 @dataclass(frozen=True)
@@ -101,7 +101,7 @@ async def attach_lodging(
         if hotel identity cannot be verified. Existing daytime visits and history
         stay intact. Nightly amounts split the included lodging total exactly;
         only new known transfer fares increase totalCost. Measured returns
-        remain eligible when settling in fits before 21:00. A day that
+        remain eligible when settling in fits by 23:00. A day that
         cannot fit the return retains its daytime visits without the hotel link.
         Without an internal clock, return timing remains unconfirmed and no
         departure time or fixed route-duration ceiling is invented.
@@ -161,7 +161,7 @@ async def attach_lodging(
         for index, route in enumerate(routes):
             original = output.itinerary.days[index]
             if not _return_fits_day(original.stops[-1], route):
-                logger.info('Overnight return deferred: day=%s cannot verify a finish by 21:00', original.day)
+                logger.info('Overnight return deferred: day=%s cannot verify a finish by 23:00', original.day)
                 continue
             day = DayItinerarySchema(day=original.day, date=original.date, stops=original.stops)
             output.itinerary.days[index] = day

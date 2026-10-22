@@ -78,7 +78,7 @@ from app.services.course_localization import (
     progress_message,
 )
 from app.services.course_lodging import attach_lodging as attach_course_lodging
-from app.services.course_place_copy import COPY_TIMEOUT_SECONDS, write_place_copy
+from app.services.course_place_copy import write_place_copy
 from app.services.course_planning import (
     MAX_DAY_PLANS,
     MEAL_WINDOWS,
@@ -1322,6 +1322,8 @@ class CourseGraphNodes:
         Returns:
             Course with localized navigation and independently reviewed visit copy.
             Missing or rejected visit copy remains empty; all facts are preserved.
+            Visit copy uses the remaining request budget after localization,
+            retaining the existing one-second finalization reserve.
         Raises:
             asyncio.CancelledError: Request cancellation propagates to model calls.
         """
@@ -1331,9 +1333,11 @@ class CourseGraphNodes:
             request, state["course"],
             timeout_seconds=min(LOCALIZATION_TIMEOUT_SECONDS, max(0.0, state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.0)),
         )
+        now = asyncio.get_running_loop().time()
+        copy_deadline = state.get('deadline', now + settings.COURSE_TIMEOUT_SECONDS)
         course = await write_place_copy(
             request, course,
-            timeout_seconds=min(COPY_TIMEOUT_SECONDS, max(0.0, state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.0)),
+            timeout_seconds=max(0.0, copy_deadline - now - 1.0),
         )
         return {"course": course}
 
