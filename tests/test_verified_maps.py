@@ -472,7 +472,7 @@ async def test_id_search_and_essential_details_supply_place_without_pro_fields_o
         requests.append(request)
         if request.method == 'POST':
             body = json.loads(request.content)
-            assert body['pageSize'] == 5 and body['languageCode'] == language
+            assert body['pageSize'] == 5 and body['languageCode'] == 'ko'
             assert body['textQuery'] == '서울 미술관, KR'
             assert body['locationBias']['rectangle']['low'] == {'latitude': 37.3, 'longitude': 126.7}
         else:

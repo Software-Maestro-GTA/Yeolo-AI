@@ -357,9 +357,9 @@ async def test_route_locale_is_forwarded_and_supplied_navigation_avoids_korean_t
         provider = VerifiedMapsProvider(client=client, api_key='offline', language=language)
         result = await provider.route(*endpoints)
         metrics = provider.metrics.snapshot()
-    assert len(requests) == 1 and json.loads(requests[0].content)['languageCode'] == language
-    assert result.memo == instruction
-    assert not any('\uac00' <= char <= '\ud7a3' for char in result.memo)
+    assert len(requests) == 1 and json.loads(requests[0].content)['languageCode'] == 'ko'
+    assert result.memo is None
+    assert result.navigationSource
     assert (result.minutes, result.distance) == (21, 1250)
     assert metrics['estimate_complete'] and metrics['skus']['routes_essentials']['requests'] == 1
 
@@ -382,7 +382,7 @@ async def test_foreign_transit_uses_whole_provider_instruction_instead_of_korean
     payload = response([first, second, walking('Walk along Museum Street.')])
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as client:
         result = await VerifiedMapsProvider(client=client, api_key='offline', language='en').route(*endpoints, mode='transit')
-    assert result.memo == 'Take Line 1 from City Hall to Central Station. Transfer to Line 3 and get off at Museum Station. Walk along Museum Street.'
+    assert result.memo is None
     assert (result.minutes, result.distance) == (21, 1250)
 
 

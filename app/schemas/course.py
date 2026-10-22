@@ -40,7 +40,7 @@ class TripConditionSchema(BaseModel):
 class CourseRequestSchema(BaseModel):
     userId: UUID = Field(..., description="사용자 ID (UUID)")
     language: str = Field(
-        ..., description="응답 문구의 BCP 47 언어 코드 (예: ko, en, ja, zh-TW)"
+        ..., description="호환용 BCP 47 언어 코드; 값과 관계없이 응답은 항상 한국어"
     )
     mbti: str | None = Field(None, description="사용자 MBTI")
     tasteProfile: TasteProfileSchema | None = Field(
@@ -51,24 +51,11 @@ class CourseRequestSchema(BaseModel):
     @field_validator("language")
     @classmethod
     def normalize_language(cls, value: str) -> str:
-        """Normalize locale notation while rejecting arbitrary prompt instructions."""
+        """Accept legacy locale notation and use Korean for all output."""
         value = value.strip().replace("_", "-")
         if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", value):
             raise ValueError("language must be a BCP 47 language code")
-        parts = value.split("-")
-        return "-".join(
-            [
-                parts[0].lower(),
-                *[
-                    part.title()
-                    if len(part) == 4
-                    else part.upper()
-                    if len(part) == 2
-                    else part.lower()
-                    for part in parts[1:]
-                ],
-            ]
-        )
+        return "ko"
 
     @model_validator(mode="after")
     def check_mbti_or_taste_profile(self) -> Self:
@@ -81,7 +68,7 @@ class PlaceSchema(BaseModel):
     """Verified identity and map marker only; rich details stay in Google Maps."""
 
     placeId: str = Field(..., description="검증된 Google Maps Place ID")
-    placeName: str = Field(..., description="요청 언어로 표기한 검증 장소명; Google 공식 표시 이름은 조회하지 않음")
+    placeName: str = Field(..., description="한국어로 표기한 검증 장소명; Google 공식 표시 이름은 조회하지 않음")
     category: PlaceCategoryCode = Field(
         ...,
         description="앱 장소 분류: FOOD(맛집·미식), CAFE(카페·디저트), SPOT(스팟·명소), CULTURE(문화·전시), NATURE(자연·산책), ACTIVITY(액티비티·체험), NIGHTLIFE(야경·나이트), LODGING(숙소), AIRPORT(공항)",
@@ -154,7 +141,7 @@ class ItinerarySchema(BaseModel):
 
 
 class CourseSchema(BaseModel):
-    title: str = Field(..., description="요청 언어로 작성된 코스 제목")
+    title: str = Field(..., description="한국어로 작성된 코스 제목")
     destinationCountry: str = Field(..., description="목적지 국가")
     destinationCity: str = Field(..., description="목적지 도시")
     startDate: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="시작일")
@@ -165,7 +152,7 @@ class CourseSchema(BaseModel):
         description="일정 비용과 왕복 교통·숙박 실조회 또는 기준 추정액의 합계 (KRW); 공항·숙소 stop 비용은 중복 합산하지 않음",
     )
     tags: list[str] = Field(
-        default_factory=list, description="요청 언어로 작성된 여행 태그"
+        default_factory=list, description="한국어로 작성된 여행 태그"
     )
     itinerary: ItinerarySchema = Field(..., description="확정된 세부 여정")
 
@@ -176,4 +163,4 @@ class CourseResponseSchema(BaseModel):
 
 class ProgressEventData(BaseModel):
     step: Literal["GENERATING_ROUTE"] = "GENERATING_ROUTE"
-    message: str = Field(..., description="요청 언어로 작성된 진행 안내")
+    message: str = Field(..., description="한국어로 작성된 진행 안내")

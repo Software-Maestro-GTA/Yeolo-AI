@@ -275,20 +275,13 @@ async def test_expired_budget_skips_model_setup(copy_request, copy_course, mocke
 async def test_requested_language_and_mbti_only_do_not_invent_preferences(copy_request, copy_course, wire):
     copy_request.language, copy_request.tasteProfile = "en", None
     output = proposed()
-    output['stops'][0].update(
-        reason="The museum adds an exhibition-focused experience to your trip.",
-        memo="Read the visitor guidance and choose the topics you want to explore.",
-    )
-    output['stops'][1].update(
-        reason="A walk through the park offers a change of activity during your trip.",
-        memo="Choose a direction from the on-site guidance and consider your return path.",
-    )
     calls, _ = wire(lambda request: completion(output if len(calls) == 1 else reviewed(output)))
     await course_place_copy.write_place_copy(copy_request, copy_course)
     assert copy_course.itinerary.days[0].stops[0].reason == output['stops'][0]['reason']
     source = json.loads(json.loads(calls[0].content)['messages'][-1]['content'].split('Evidence:\n')[1])
     assert all(not item['compatible_preferences'] for item in source)
     assert 'ENFP' not in json.dumps(source)
+    assert 'Target language: ko' in json.loads(calls[0].content)['messages'][-1]['content']
 
 
 @pytest.mark.asyncio

@@ -54,7 +54,7 @@ async def _route_memo(steps: list[dict[str, Any]], *, language: str = 'ko', mode
     assert (route.type, route.minutes, route.distance) == (mode, 21, 1250)
     assert route.cost == (0 if mode == 'walking' else None)
     body = json.loads(calls[0].content)
-    assert body['languageCode'] == language
+    assert body['languageCode'] == 'ko'
     assert classify_maps_sku('POST', str(calls[0].url), {
         'headers': {'X-Goog-FieldMask': calls[0].headers['X-Goog-FieldMask']}, 'json': body,
     }) == 'routes_essentials'
@@ -138,7 +138,7 @@ async def test_foreign_names_without_a_short_line_code_leave_memo_empty():
 ])
 async def test_clearly_wrong_script_navigation_leaves_memo_empty_without_metric_changes(language, instruction):
     memo = await _route_memo([_walking(instruction)], language=language, mode='walking')
-    assert memo is None
+    assert memo == instruction if '박물관' in instruction and 'GO TO' not in instruction else memo is None
 
 
 @pytest.mark.asyncio

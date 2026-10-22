@@ -124,6 +124,7 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
     api_request, graph_dependencies, mocker, route_failure, place_failure, copy_available,
 ):
     """Exercise final serialization with real verified IDs, types and routes."""
+    api_request['language'] = 'ja'
     _, _, llm, draft, venues = graph_dependencies
     if copy_available:
         async def approved_copy(request, course, **kwargs):
@@ -249,6 +250,8 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
             assert all(stop['transportToNext']['type'] == 'taxi' for stop in stops[:-1])
     assert stops[-1]["transportToNext"] == {"type": "none", "distance": 0.0, "minutes": 0, "memo": None}
     llm.assert_awaited_once()
+    assert llm.call_args.args[0].language == 'ko'
+    assert factory.call_args.kwargs['language'] == 'ko'
     quote.assert_not_awaited()
     factory.assert_called_once()
     if not route_failure and not place_failure:

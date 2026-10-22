@@ -188,9 +188,9 @@ async def test_missing_calling_key_rejected_before_streaming(mocker, mock_env, v
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body_language,header_language,expected", [
-    (None, "ja-JP", "ja-JP"), ("en_US", "ko", "en-US"), (None, "*", "ko"),
+    (None, "ja-JP", "ko"), ("en_US", "ko", "ko"), (None, "*", "ko"),
 ])
-async def test_summary_uses_body_language_then_header(mocker, mock_env, valid_request_payload, body_language, header_language, expected):
+async def test_summary_uses_korean_for_legacy_body_and_header_languages(mocker, mock_env, valid_request_payload, body_language, header_language, expected):
     from tests.test_behavior_evidence import full_profile, sse_events
     from tests.test_taste_summary import mock_summary_model
 

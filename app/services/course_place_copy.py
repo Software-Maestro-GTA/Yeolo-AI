@@ -55,7 +55,7 @@ personal preference may be asserted. Do not invent numeric details or URLs.
 
 WRITE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", GROUNDING_RULES + """
-Write reason and memo in the target BCP 47 language for every supplied slot once.
+Write reason and memo in Korean for every supplied slot once.
 reason explains why this verified type offers a relevant experience, connecting
 only compatible preferences when supplied. memo gives a different practical
 visitor action, not the recommendation reason repeated. Write concise natural
@@ -63,7 +63,7 @@ sentences, varying wording and focus across the whole batch, even for the same
 type. Do not just substitute names in repeated templates. Preserve display names
 when mentioning them. Use no markdown. Return only slot, reason, memo.
 """),
-    ("human", "Target language: {language}\nEvidence:\n{source}"),
+    ("human", "Target language: ko\nEvidence:\n{source}"),
 ])
 
 REVIEW_PROMPT = ChatPromptTemplate.from_messages([
@@ -72,11 +72,10 @@ Independently audit proposed copy against the evidence for that exact slot.
 Do not trust the writer. Return one decision per slot. reason_supported and
 memo_supported are true only if EVERY assertion is supported or is a generic
 type-supported suggestion. Reject even plausible unsupported venue details,
-inferred preferences, or claims copied from another slot. Require the target
-language. Reject generic name-swapped repeated wording and reason/memo that say
+inferred preferences, or claims copied from another slot. Require Korean. Reject generic name-swapped repeated wording and reason/memo that say
 the same thing. Never rewrite the text or approve a claim using outside knowledge.
 """),
-    ("human", "Target language: {language}\nEvidence:\n{source}\nProposed copy:\n{proposed}"),
+    ("human", "Target language: ko\nEvidence:\n{source}\nProposed copy:\n{proposed}"),
 ])
 
 
@@ -207,7 +206,7 @@ async def write_place_copy(
             async def one(batch: list[dict[str, Any]]) -> list[PlaceCopy]:
                 async with semaphore:
                     try:
-                        inputs = {"language": request.language, "source": json.dumps(batch, ensure_ascii=False)}
+                        inputs = {"source": json.dumps(batch, ensure_ascii=False)}
                         with abto.with_context(feature_id="course.candidates.generate", device_id=str(request.userId)):
                             proposed = PlaceCopyBatch.model_validate(await writer.ainvoke(inputs))
                             expected = {source["slot"] for source in batch}
@@ -254,7 +253,7 @@ async def write_place_copy(
         for stop in day.stops:
             copy = by_slot.get(f"{day.day}:{stop.sequence}:{stop.place.placeId}")
             if copy and all(
-                _valid_text(text, names, request.language) and counts[_normalized(text, names)] == 1
+                _valid_text(text, names, 'ko') and counts[_normalized(text, names)] == 1
                 and not any(name in text for name in names
                             if name and name != stop.place.placeName and name not in stop.place.placeName)
                 for text in (copy.reason, copy.memo)

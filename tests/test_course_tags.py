@@ -2,9 +2,7 @@
 
 import pytest
 
-from app.services.course_localization import _fallback
 from app.services.course_tags import verified_course_tags
-from tests.test_course_localization import course, request
 from tests.test_course_reasons import content_day
 
 
@@ -41,18 +39,6 @@ def test_tag_mapping_uses_additional_verified_types_for_generic_attractions():
     assert verified_course_tags([day]) == ['자연']
 
 
-@pytest.mark.parametrize('language,expected', [
-    ('ko-KR', ['문화', '음식']), ('en', ['Culture', 'Food']),
-    ('ja', ['文化', '食事']), ('zh-CN', ['文化', '餐饮']),
-    ('zh-TW', ['文化', '餐飲']), ('fr', ['Culture', 'Restauration']),
-    ('es', ['Cultura', 'Comida']), ('de', ['Kultur', 'Essen']),
-    ('pt', ['Cultura', 'Alimentação']), ('vi-VN', ['Culture', 'Food']),
-])
-def test_localization_failure_uses_the_same_neutral_tag_categories(language, expected):
-    value = course()
-    value.itinerary.days[0].stops[1].place.category = 'ramen_restaurant'
-    before = [stop.place.model_dump() for stop in value.itinerary.days[0].stops]
-    result = _fallback(request(language), value)
-    assert result.tags == expected
-    assert [stop.place.model_dump() for stop in result.itinerary.days[0].stops] == before
-    assert all(stop.reason == stop.memo == '' for stop in result.itinerary.days[0].stops)
+def test_tag_names_are_korean_for_every_verified_group():
+    day = content_day('museum', 'ramen_restaurant', 'park')
+    assert verified_course_tags([day]) == ['문화', '음식', '자연']

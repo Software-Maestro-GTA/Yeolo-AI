@@ -28,42 +28,18 @@ class BehaviorItemSchema(BaseModel):
 
 class BehaviorAnalysisRequest(BaseModel):
     userId: UUID4 = Field(..., description="사용자 ID (UUID4 형식)")
-    language: str = Field(default="ko", description="요약 문구의 BCP 47 언어 코드, 생략 시 헤더 또는 ko")
+    language: str = Field(default="ko", description="호환용 BCP 47 언어 코드; 값과 관계없이 요약은 항상 한국어")
     items: list[BehaviorItemSchema] = Field(..., description="전처리된 이미지 메타데이터 목록")
 
     @field_validator("language")
     @classmethod
     def normalize_language(cls, value: str) -> str:
-        """Normalize language/region tags and reject arbitrary prompt instructions."""
+        """Validate legacy locale input and use Korean for all output."""
         value = value.strip().replace("_", "-")
         if len(value) > 35 or not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", value):
             raise ValueError("language must be a BCP 47 language code")
-        parts = value.split("-")
-        return "-".join([parts[0].lower(), *[
-            part.title() if len(part) == 4 else part.upper() if len(part) == 2 else part.lower()
-            for part in parts[1:]
-        ]])
-
+        return "ko"
 
 def language_from_header(value: str) -> str:
-    """Resolve a valid Accept-Language preference, falling back to Korean.
-
-    Args:
-        value: Optional HTTP language preferences, including quality weights.
-    Returns:
-        Highest-weight valid locale, or ko for malformed/wildcard-only headers.
-    """
-    candidates = []
-    for entry in value.split(","):
-        tag, *parameters = entry.strip().split(";")
-        try:
-            quality = 1.0
-            for parameter in parameters:
-                if parameter.strip().startswith("q="):
-                    quality = float(parameter.strip()[2:])
-            if not 0 < quality <= 1:
-                continue
-            candidates.append((quality, BehaviorAnalysisRequest.normalize_language(tag)))
-        except ValueError:
-            continue
-    return max(candidates, key=lambda item: item[0])[1] if candidates else "ko"
+    """Accept a legacy Accept-Language header and always select Korean."""
+    return "ko"

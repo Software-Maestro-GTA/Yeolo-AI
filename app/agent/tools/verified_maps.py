@@ -437,7 +437,7 @@ class VerifiedMapsProvider:
         client: Optional injected HTTP client; caller retains ownership.
         api_key: Optional configured Google Maps key.
         concurrency: Maximum active provider requests.
-        language: Preferred Maps display and navigation language (BCP 47).
+        language: Legacy BCP 47 input; display and route instructions use Korean.
 
     Raises:
         ValueError: Provider cannot establish a destination, venue, or route.
@@ -446,7 +446,7 @@ class VerifiedMapsProvider:
     def __init__(self, client: httpx.AsyncClient | None = None, api_key: str | None = None, concurrency: int = 6, language: str = 'ko') -> None:
         if not isinstance(language, str) or not re.fullmatch(r'[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*', language):
             raise ValueError('Invalid Maps language code')
-        self.language = language
+        self.language = 'ko'
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(6))
         self.owns_client = client is None
         self.api_key = settings.GOOGLE_MAPS_API_KEY if api_key is None else api_key

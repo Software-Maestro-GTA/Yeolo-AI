@@ -96,7 +96,7 @@ async def _draft_day_candidates(
             with abto.with_context(feature_id='course.candidates.generate', device_id=str(request.userId)):
                 result = await chain.ainvoke(
                     {
-                        "language": request.language,
+                        "language": "ko",
                         "mbti": request.mbti or "미제공",
                         "taste_profile": request.tasteProfile.model_dump_json()
                         if request.tasteProfile

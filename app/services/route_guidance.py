@@ -36,24 +36,19 @@ def _mapping(value: Any) -> dict:
 
 
 def guidance_matches_language(value: str, language: str, *, allow_line_codes: bool = False) -> bool:
-    """Reject incompatible writing systems without translating navigation facts.
+    """Check Korean script without translating supplied navigation facts.
 
     Args:
         value: Complete supplied or formatted navigation text.
-        language: Requested BCP 47 locale.
+        language: Legacy locale argument; only Korean guidance is accepted.
         allow_line_codes: Permit short uppercase identifiers in transit copy.
     Returns:
-        Whether supported copy uses its expected script. Transit line codes
+        Whether copy uses Korean script. Transit line codes
         and measured units remain valid identifiers. This is a script guard,
         not a language classifier for
         languages that share the same writing system.
     """
     text = unicodedata.normalize('NFKC', _clean(value))
-    base = language.split('-', 1)[0].lower()
-    latin_languages = {'en', 'fr', 'es', 'de', 'pt'}
-    if base not in {'ko', 'ja', 'zh'} | latin_languages:
-        # Preserve the previous localization safeguard for other locales.
-        return bool(text) and not any('HANGUL' in unicodedata.name(char, '') for char in text)
     # Keep identifiers such as JR, MRT, G09 and M2.1, never transliterate names.
     tokens = re.findall(r'[A-Za-z][A-Za-z0-9]*(?:[./-][A-Za-z0-9]+)*', text) if allow_line_codes else []
     for token in set(tokens):
@@ -63,12 +58,7 @@ def guidance_matches_language(value: str, language: str, *, allow_line_codes: bo
     letters = [unicodedata.name(char, '') for char in text if unicodedata.category(char).startswith('L')]
     if not letters:
         return False
-    allowed = {
-        'ko': ('HANGUL',),
-        'ja': ('HIRAGANA', 'KATAKANA', 'CJK UNIFIED IDEOGRAPH', 'CJK COMPATIBILITY IDEOGRAPH', 'IDEOGRAPHIC'),
-        'zh': ('CJK UNIFIED IDEOGRAPH', 'CJK COMPATIBILITY IDEOGRAPH'),
-    }.get(base, ('LATIN',))
-    return all(name.startswith(allowed) for name in letters)
+    return all(name.startswith('HANGUL') for name in letters)
 
 
 def _sentence(instruction: str) -> str:
@@ -148,7 +138,7 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
     Args:
         data: Already validated route response; optional steps may be malformed.
         mode: Existing transport type.
-        language: Requested language; provider instructions must use its script.
+        language: Legacy locale argument; provider instructions must use Korean script.
     Returns:
         One paragraph of at most 240 characters and three complete action units.
         All transit connections must fit; otherwise None is returned.
@@ -184,17 +174,7 @@ def format_route_guidance(data: dict, mode: str, language: str = 'ko') -> str | 
             supplied_instruction = _mapping(raw.get('navigationInstruction')).get('instructions')
             instruction = _clean(supplied_instruction)
             transit = raw.get('travelMode') == 'TRANSIT'
-            if transit and language.split('-', 1)[0].lower() != 'ko':
-                # Navigation instructions were requested from Maps in the user
-                # language; never apply Korean sentence templates to foreign text.
-                if not instruction:
-                    return None
-                if not guidance_matches_language(instruction, language, allow_line_codes=True):
-                    return None
-                transit_count += 1
-                if transit_count > 3 or len(instruction) > MAX_MEMO_LENGTH:
-                    return None
-            elif transit:
+            if transit:
                 details = _mapping(raw.get('transitDetails'))
                 stops = _mapping(details.get('stopDetails'))
                 start = _clean(_mapping(stops.get('departureStop')).get('name'))

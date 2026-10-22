@@ -12,7 +12,6 @@ from tests.test_course_localization import (
     course,
     facts,
     request,
-    translated,
 )
 from tests.test_course_localization import wire as _wire
 
@@ -240,54 +239,3 @@ async def test_invalid_peer_schema_keeps_valid_name_and_memo_when_repair_fails(
     assert first.transportToNext.memo == "게키조도리에서 우회전하세요."
     assert result is value and facts(result) == before
     assert len(calls) == 2 and all(client.is_closed for client in clients)
-
-
-@pytest.mark.asyncio
-async def test_invalid_non_korean_course_copy_keeps_valid_names_and_navigation(wire):
-    calls = []
-
-    def respond(outgoing):
-        calls.append(outgoing)
-        output = translated()
-        output["title"] = ""
-        output["navigation"][0]["text"] = "Follow the pedestrian path."
-        return completion(output)
-
-    clients = wire(respond)
-    value = course()
-    before = facts(value)
-
-    result = await course_localization.localize_course(request("en"), value)
-
-    first, second = result.itinerary.days[0].stops
-    assert first.place.placeName == "Verified Museum"
-    assert second.place.placeName == "Verified Park"
-    assert first.transportToNext.memo == "Follow the pedestrian path."
-    assert result is value and facts(result) == before
-    assert len(calls) == 1 and all(client.is_closed for client in clients)
-
-
-@pytest.mark.parametrize(
-    ("language", "copy"),
-    [
-        ("en", "Walk along 黄陂南路 toward the park."),
-        ("en", "Enjoy the park and посетите the gallery."),
-        ("ja", "公園でゆっくり散策し、Turn leftしてください。"),
-        ("zh", "沿着道路向前走り、左转。"),
-    ],
-)
-def test_course_copy_rejects_foreign_script_outside_preserved_place_names(language, copy):
-    with pytest.raises(ValueError):
-        course_localization._validate_text(copy, copy, [], language)
-
-
-@pytest.mark.parametrize(
-    ("language", "copy", "name"),
-    [
-        ("en", "Visit 검증된 박물관 and explore the exhibits.", "검증된 박물관"),
-        ("ja", "Café Lumièreの展示をお楽しみください。", "Café Lumière"),
-        ("zh", "在Café Lumière欣赏展览。", "Café Lumière"),
-    ],
-)
-def test_course_copy_allows_only_exact_preserved_place_names(language, copy, name):
-    assert course_localization._validate_text(copy, copy, [name], language) == copy
