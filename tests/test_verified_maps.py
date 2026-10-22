@@ -472,7 +472,7 @@ async def test_id_search_and_essential_details_supply_place_without_pro_fields_o
         requests.append(request)
         if request.method == 'POST':
             body = json.loads(request.content)
-            assert body['pageSize'] == 5 and body['languageCode'] == language
+            assert body['pageSize'] == 5 and body['languageCode'] == 'ko'
             assert body['textQuery'] == '서울 미술관, KR'
             assert body['locationBias']['rectangle']['low'] == {'latitude': 37.3, 'longitude': 126.7}
         else:
@@ -865,11 +865,11 @@ async def test_transit_uses_supplied_trip_departure_time():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(('mode', 'label', 'departure_supplied'), [
-    ('walking', '도보', False), ('transit', '대중교통', False),
-    ('transit', '대중교통', True), ('driving', '차량', True), ('taxi', '택시', False),
+@pytest.mark.parametrize(('mode', 'departure_supplied'), [
+    ('walking', False), ('transit', False),
+    ('transit', True), ('driving', True), ('taxi', False),
 ])
-async def test_missing_route_steps_keep_compact_mode_action_and_actual_departure_request(mode, label, departure_supplied):
+async def test_missing_route_steps_return_null_memo_and_preserve_actual_departure_request(mode, departure_supplied):
     import json
     from datetime import datetime, timedelta, timezone
 
@@ -887,14 +887,12 @@ async def test_missing_route_steps_keep_compact_mode_action_and_actual_departure
     assert len(bodies) == 1
     assert result.type == mode and result.distance == 1250 and result.minutes == 11
     assert result.cost == (0 if mode == 'walking' else None)
-    assert label in result.memo and len(result.memo) <= 120
-    assert '11분' not in result.memo and '1250' not in result.memo
-    assert not any(blanket in result.memo for blanket in ['재확인이 필요', '운행·혼잡·요금', '확정 운행', '승차장', '환승'])
+    assert result.memo is None
+    assert result.navigationSource == []
     if mode == 'transit' and departure_supplied:
         assert bodies[0]['departureTime'] == '2026-10-05T05:25:00Z'
     else:
         assert 'departureTime' not in bodies[0]
-    assert not any(repeated in result.memo for repeated in ('다음 방문 장소까지', '2026-10-05', '14:25', 'UTC', '조회 시점', '출발 기준'))
 
 
 @pytest.mark.asyncio

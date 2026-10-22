@@ -94,7 +94,9 @@ def assert_complete_contract(payload):
                 assert_number(stop[key])
             assert stop["cost"] >= 0 and stop["stayMinutes"] > 0
             for key in ("memo", "reason"):
-                assert isinstance(stop[key], str) and stop[key]
+                assert isinstance(stop[key], str)
+            # Missing reviewed copy is explicit; neither field is fabricated.
+            assert bool(stop['memo']) == bool(stop['reason'])
             place = stop["place"]
             assert set(place) == {"placeId", "placeName", "category", "latitude", "longitude"}
             assert all(isinstance(place[key], str) and place[key] for key in ("placeId", "placeName"))
@@ -112,17 +114,27 @@ def assert_complete_contract(payload):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('route_failure,place_failure', [
-    (None, None), ('taxi_only', None), ('empty', None), ('503', None), ('malformed', None),
-    ('403', None), ('timeout', None), (None, 'stale_candidate'),
-    (None, 'malformed_candidate'), (None, 'wrong_id_candidate'),
-    (None, 'stale_destination'),
+@pytest.mark.parametrize('route_failure,place_failure,copy_available', [
+    (None, None, False), ('taxi_only', None, False), ('empty', None, False), ('503', None, False), ('malformed', None, False),
+    ('403', None, False), ('timeout', None, False), (None, 'stale_candidate', False),
+    (None, 'malformed_candidate', False), (None, 'wrong_id_candidate', False),
+    (None, 'stale_destination', False), (None, None, True),
 ])
 async def test_production_endpoint_graph_and_serializer_emit_exact_public_contract(
-    api_request, graph_dependencies, mocker, route_failure, place_failure,
+    api_request, graph_dependencies, mocker, route_failure, place_failure, copy_available,
 ):
     """Exercise final serialization with real verified IDs, types and routes."""
+    api_request['language'] = 'ja'
     _, _, llm, draft, venues = graph_dependencies
+    if copy_available:
+        async def approved_copy(request, course, **kwargs):
+            for day in course.itinerary.days:
+                for stop in day.stops:
+                    stop.reason = f'{stop.place.placeName}의 검토된 방문 경험'
+                    stop.memo = f'{stop.place.placeName}의 검토된 방문 행동'
+            return course
+
+        mocker.patch('app.agent.course_nodes.write_place_copy', side_effect=approved_copy)
     search_ids = {"대한민국": "country-KR", "서울, 대한민국": "city-Seoul"}
     records = {
         "country-KR": {"id": "country-KR", "types": ["country", "political"],
@@ -218,6 +230,10 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
     assert course["startDate"] == course["itinerary"]["days"][0]["date"] == api_request["tripCondition"]["startDate"]
     assert course["totalDays"] == len(course["itinerary"]["days"]) == 1
     stops = course["itinerary"]["days"][0]["stops"]
+    if copy_available:
+        assert all(stop['reason'].endswith('검토된 방문 경험') and stop['memo'].endswith('검토된 방문 행동') for stop in stops)
+    else:
+        assert all(stop['reason'] == stop['memo'] == '' for stop in stops)
     assert len(stops) == 5 and len({stop["place"]["placeId"] for stop in stops}) == 5
     assert {stop["place"]["placeId"] for stop in stops} == {
         venue.place.placeId.removeprefix("places/") for venue in venues.values()
@@ -234,6 +250,8 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
             assert all(stop['transportToNext']['type'] == 'taxi' for stop in stops[:-1])
     assert stops[-1]["transportToNext"] == {"type": "none", "distance": 0.0, "minutes": 0, "memo": None}
     llm.assert_awaited_once()
+    assert llm.call_args.args[0].language == 'ko'
+    assert factory.call_args.kwargs['language'] == 'ko'
     quote.assert_not_awaited()
     factory.assert_called_once()
     if not route_failure and not place_failure:

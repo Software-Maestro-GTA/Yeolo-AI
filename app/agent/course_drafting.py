@@ -71,7 +71,7 @@ async def _draft_day_candidates(
         if generate_airports or generate_lodgings
         else "이번 호출은 anchor_candidates의 airports와 lodgings를 모두 빈 배열로 반환하세요."
     )
-    context = f"이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. reason은 25자 이내 한 문장만 작성하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{anchor_assignment}\n{feedback}"
+    context = f"이번 호출은 {day_index + 1}일차 {assigned.isoformat()}만 생성합니다. 전체 여행 조건은 맥락이며 days는 정확히 1개만 반환하세요. 다른 날짜에 배정한 권역/장소와 겹치지 마세요.\n전체 일자별 계획 힌트: {day_hints or []}\n{anchor_assignment}\n{feedback}"
     # The provider deadline stays valid even when the local request expires sooner.
     abto = get_abto()
     sync_options = abto.openai_options()
@@ -96,7 +96,7 @@ async def _draft_day_candidates(
             with abto.with_context(feature_id='course.candidates.generate', device_id=str(request.userId)):
                 result = await chain.ainvoke(
                     {
-                        "language": request.language,
+                        "language": "ko",
                         "mbti": request.mbti or "미제공",
                         "taste_profile": request.tasteProfile.model_dump_json()
                         if request.tasteProfile
@@ -254,7 +254,6 @@ async def draft_candidates(
         raise PartialDraftError(days, errors, anchor_candidates=anchors)
     return CourseDraft(
         title=f"{request.tripCondition.destinationCity} {request.tripCondition.totalDays}일 여행",
-        reason="",
         tags=[],
         days=[days[index] for index in range(request.tripCondition.totalDays)],
         anchor_candidates=anchors,

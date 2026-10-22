@@ -20,7 +20,6 @@ from app.schemas.course import (
     StopSchema,
     TransportToNextSchema,
 )
-from app.services.course_localization import airport_copy
 from app.services.course_routing import unavailable_route
 from app.services.course_transfers import optional_transfer
 from app.services.myrealtrip_quotes import TripQuotes
@@ -30,11 +29,10 @@ logger = logging.getLogger(__name__)
 AIRPORT_TIMEOUT_SECONDS = 12.0
 
 
-def _airport_stop(airport: VerifiedPlace, language: str, *, arrival: bool, cost: int) -> StopSchema:
+def _airport_stop(airport: VerifiedPlace, *, arrival: bool, cost: int) -> StopSchema:
     """Display an allocated flight cost, not a separately quoted one-way ticket."""
-    reason, memo = airport_copy(language, arrival=arrival)
     return StopSchema(
-        sequence=1, stayMinutes=60 if arrival else 120, reason=reason, memo=memo,
+        sequence=1, stayMinutes=60 if arrival else 120, reason="", memo="",
         cost=cost, place=airport.place.model_copy(deep=True),
         transportToNext=TransportToNextSchema(type='none', distance=0, minutes=0, memo=None),
     )
@@ -69,7 +67,7 @@ async def attach_airports(
         transfers. No identified airport or lookup failure keeps the original
         course. A verified airport survives an expired transfer budget with
         unknown metrics. Existing visits, lodging and history are preserved.
-        Long measured airport transfers remain valid beyond the tourist cap.
+        Measured airport transfers remain valid without a per-link duration cap.
         The round-trip amount is split across the two endpoints for display;
         an odd KRW goes to the outbound leg. This never adds airfare twice or
         claims the supplier returned separate one-way prices.
@@ -122,7 +120,7 @@ async def attach_airports(
             arrival_route, departure_route = unavailable_route(), unavailable_route()
         else:
             tasks = [asyncio.create_task(optional_transfer(
-                provider, origin, target, destination, expires, max_minutes=None,
+                provider, origin, target, destination, expires,
             )) for origin, target in pairs]
             try:
                 arrival_route, departure_route = await asyncio.gather(*tasks)
@@ -142,11 +140,11 @@ async def attach_airports(
         # and finalize has charged that amount once. Endpoint costs only expose
         # the outbound/return allocations; they cannot change the quoted total.
         one_way, remainder = divmod(quotes.flight.amount_krw or 0, 2)
-        arrival = _airport_stop(airport, request.language, arrival=True, cost=one_way + remainder)
+        arrival = _airport_stop(airport, arrival=True, cost=one_way + remainder)
         arrival.transportToNext = arrival_route
         first.stops.insert(0, arrival)
         last.stops[-1].transportToNext = departure_route
-        last.stops.append(_airport_stop(airport, request.language, arrival=False, cost=one_way))
+        last.stops.append(_airport_stop(airport, arrival=False, cost=one_way))
         for day in (first, last):
             for index, stop in enumerate(day.stops, start=1):
                 stop.sequence = index

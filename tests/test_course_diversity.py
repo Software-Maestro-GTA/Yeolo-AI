@@ -212,8 +212,8 @@ async def test_novelty_repair_failure_returns_captured_verified_course(diversity
     assert len(course.itinerary.days[0].stops) == 5
     assert all('광화문 북촌' in stop.place.placeName for stop in course.itinerary.days[0].stops)
     assert llm.await_count <= 2
-    assert all(stop.transportToNext.minutes <= 90 for stop in course.itinerary.days[0].stops[:-1])
-    assert all(stop.reason and stop.memo for stop in course.itinerary.days[0].stops)
+    assert all(stop.transportToNext.minutes == 10 for stop in course.itinerary.days[0].stops[:-1])
+    assert all(stop.reason == stop.memo == '' for stop in course.itinerary.days[0].stops)
 
 
 @pytest.mark.asyncio

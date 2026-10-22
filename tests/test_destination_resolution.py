@@ -322,7 +322,7 @@ async def test_destination_permission_failure_is_sanitized_and_not_retried():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['ko', 'en', 'ja', 'zh-TW'])
-async def test_country_city_queries_use_requested_locale_and_reuse_cross_provider_component_names(language):
+async def test_country_city_queries_use_korean_and_reuse_cross_provider_component_names(language):
     searches, details = [], []
 
     def respond(request):
@@ -330,7 +330,7 @@ async def test_country_city_queries_use_requested_locale_and_reuse_cross_provide
         if request.method == 'POST':
             body = json.loads(request.content)
             searches.append(body)
-            assert body['languageCode'] == language
+            assert body['languageCode'] == 'ko'
             return essential_response(request, [records[1]] if ', ' in body['textQuery'] else [records[0]])
         details.append(request)
         assert request.url.params['languageCode'] == ('ko' if request.url.path.endswith('/verified-country') else 'en')

@@ -130,9 +130,10 @@ def test_intermediate_route_requires_confirmed_positive_metrics(archived_output,
     assert report['errors']
 
 
-def test_empty_stop_recommendation_reason_fails(archived_output):
+@pytest.mark.parametrize('field', ['reason', 'memo'])
+def test_partial_visit_copy_pair_fails(archived_output, field):
     request, result = archived_output
-    result['course']['itinerary']['days'][0]['stops'][0]['reason'] = '   '
+    result['course']['itinerary']['days'][0]['stops'][0][field] = '   '
     report = validate(request, result)
     assert not report['passed']
     assert report['errors']
@@ -332,3 +333,39 @@ def test_total_cost_must_be_finite_and_nonnegative(archived_output, value):
     request, result = archived_output
     result['course']['totalCost'] = value
     assert not validate(request, result)['passed']
+
+
+@pytest.mark.parametrize('empty', ['', '   '])
+def test_missing_grounded_visit_copy_passes_with_warning(archived_output, empty):
+    request, result = archived_output
+    for day in result['course']['itinerary']['days']:
+        for stop in day['stops']:
+            stop['memo'] = stop['reason'] = empty
+    report = validate(request, result)
+    assert report['passed'] and report['errors'] == []
+    assert sum('grounded visit copy unavailable' in warning for warning in report['warnings']) == 12
+
+
+def test_confirmed_route_accepts_null_memo_and_long_measured_duration(archived_output):
+    request, result = archived_output
+    route = result['course']['itinerary']['days'][0]['stops'][0]['transportToNext']
+    route.update(type='transit', minutes=120, distance=50000, memo=None)
+    report = validate(request, result)
+    assert report['passed'] and report['errors'] == []
+
+
+def test_copy_wording_is_not_rejected_by_a_literal_phrase_rule(archived_output):
+    request, result = archived_output
+    result['course']['itinerary']['days'][0]['stops'][0]['reason'] = '관심이 많은 문화 활동과 연결한 방문'
+    assert validate(request, result)['passed']
+
+
+@pytest.mark.parametrize('kind', ['none', 'unknown'])
+def test_route_without_metrics_cannot_have_navigation(archived_output, kind):
+    request, result = archived_output
+    stops = result['course']['itinerary']['days'][0]['stops']
+    stop = stops[-1] if kind == 'none' else stops[0]
+    stop['transportToNext'] = {'type': kind, 'minutes': None, 'distance': None, 'memo': '길찾기를 확인하세요.'}
+    report = validate(request, result)
+    assert not report['passed']
+    assert any('guidance without a measured route' in error for error in report['errors'])

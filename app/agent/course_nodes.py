@@ -78,6 +78,7 @@ from app.services.course_localization import (
     progress_message,
 )
 from app.services.course_lodging import attach_lodging as attach_course_lodging
+from app.services.course_place_copy import COPY_TIMEOUT_SECONDS, write_place_copy
 from app.services.course_planning import (
     MAX_DAY_PLANS,
     MEAL_WINDOWS,
@@ -94,19 +95,17 @@ from app.services.course_planning import (
     _shorter_visits,
     _visit_shortage,
 )
-from app.services.course_reasons import (
-    apply_personalized_reasons,
-    verified_course_tags,
-)
 from app.services.course_routing import (
     distance_meters,
     has_route_metrics,
     is_unknown_route,
     minimum_travel_minutes,
+    route_preference_rank,
     unavailable_route,
     usable_route,
     valid_route,
 )
+from app.services.course_tags import verified_course_tags
 from app.services.myrealtrip_quotes import (
     MyRealTripQuoteProvider,
     QuoteRequest,
@@ -114,6 +113,7 @@ from app.services.myrealtrip_quotes import (
 from app.services.travel_cost_baselines import baseline_trip_quotes, merge_trip_quotes
 
 logger = logging.getLogger(__name__)
+ROUTE_ALTERNATIVE_SECONDS = 2.0
 
 
 def _progress(key: str, *, language: str = "ko") -> None:
@@ -702,23 +702,26 @@ class CourseGraphNodes:
                 failure = MapsProviderError('route_data')
                 pass_failures[key] = failure
                 raise failure
-            if valid_route(route):
-                cache[key] = route
+            # A long measured journey is reusable evidence, not a failed lookup.
+            cache[key] = route
             return route
 
         async def lookup(
-            left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None
+            left: VerifiedPlace, right: VerifiedPlace, departure: datetime | None,
+            *, fits_next_visit: Callable[[TransportToNextSchema], bool],
+            select_fastest: bool = False,
         ) -> TransportToNextSchema:
             """Use real mode alternatives before returning unavailable travel.
 
-            The preferred mode still needs one request on success. Walking is
+            A measured route fitting the next visit needs only one request.
+            Otherwise try faster modes within the optional lookup budget. Walking is
             a fallback only within 3 km; a measured taxi route does not assume
             the traveler has a car. Exhausted outages are isolated by mode so
             one unavailable service cannot suppress another usable mode.
             """
             key = route_key(left, right, departure)
             preferred = key[2]
-            if key in cache:
+            if key in cache and fits_next_visit(cache[key]) and not select_fastest:
                 return cache[key]
             modes = ["transit", "taxi"]
             if preferred == "walking":
@@ -726,20 +729,51 @@ class CourseGraphNodes:
             elif distance_meters(left, right) <= 3000:
                 modes.insert(1, "walking")
             last_error = None
+            best = None
+            alternative_deadline = None
             for mode in modes:
                 try:
-                    # Keep actual overlong metrics for the existing plan check;
-                    # never replace them with unknown or an estimated duration.
-                    return await actual_route(left, right, departure, mode)
+                    # Once actual metrics exist, faster guidance is optional.
+                    # A slow alternative must not erase the known journey.
+                    async with asyncio.timeout_at(alternative_deadline):
+                        route = await actual_route(left, right, departure, mode)
+                except TimeoutError:
+                    pass_failures[route_key(left, right, departure, mode)] = MapsProviderError('transient')
+                    break
                 except MapsProviderError as error:
                     last_error = error
                     if error.kind not in {"no_route", "route_data", "transient"}:
                         break
+                    continue
+                if fits_next_visit(route) and not select_fastest:
+                    return route
+                if best is None or route.minutes < best.minutes:
+                    best = route
+                if alternative_deadline is None:
+                    alternative_deadline = min(
+                        asyncio.get_running_loop().time() + ROUTE_ALTERNATIVE_SECONDS,
+                        state.get("deadline", float("inf")) - 1.0,
+                    )
+            if best is not None:
+                return best
             if last_error is not None:
                 logger.warning("Course transfer unavailable: kind=%s status=%s", last_error.kind, last_error.status_code)
             return unavailable_route()
 
-        async def verify_one(item: tuple[int, list[Visit]]) -> tuple:
+        def next_visit_check(next_visit: Visit, day_date: date, earliest_departure: int) -> Callable[[TransportToNextSchema], bool]:
+            next_candidate, next_venue = next_visit
+            opening, latest = MEAL_WINDOWS[next_candidate.meal]
+
+            def fits(route: TransportToNextSchema) -> bool:
+                return valid_route(route) and _opening_start(
+                    next_venue.periods, day_date,
+                    max(opening, earliest_departure + route.minutes + 10),
+                    next_candidate.stay_minutes, latest,
+                ) is not None
+
+            return fits
+
+        async def verify_plan(item: tuple[int, list[Visit]], *, optimize_modes: bool = False) -> tuple:
             index, selected = item
             day_date = date.fromisoformat(
                 state["request"].tripCondition.startDate
@@ -768,10 +802,14 @@ class CourseGraphNodes:
                         departure = datetime.combine(
                             day_date, time(), tzinfo=ZoneInfo("Asia/Seoul")
                         ) + timedelta(minutes=arrival + candidate.stay_minutes)
-                    route = await lookup(venue, right[1], departure)
+                    route = await lookup(
+                        venue, right[1], departure,
+                        fits_next_visit=next_visit_check(right, day_date, arrival + candidate.stay_minutes),
+                        select_fastest=optimize_modes,
+                    )
                     if not usable_route(route):
                         raise CourseGenerationError(
-                            f"{candidate.name} → {right[0].name}: 경로 정보가 불완전하거나 이동 시간이 90분을 초과합니다."
+                            f"{candidate.name} → {right[0].name}: 경로 정보가 불완전합니다."
                         )
                     routes.append(route)
                     timing_confirmed = timing_confirmed and not is_unknown_route(route)
@@ -791,10 +829,36 @@ class CourseGraphNodes:
                     + f": {left[0].name} → {right[0].name}. 서로 가까운 다른 장소가 필요합니다."
                 )
             except (CourseGenerationError, ValueError) as error:
+                if isinstance(error, CourseGenerationError) and routes and not optimize_modes:
+                    # A later meal/day conflict can require faster earlier legs.
+                    # Reuse cached facts and compare modes once for this plan;
+                    # no individual journey duration triggers this retry.
+                    return await verify_plan(item, optimize_modes=True)
                 last_error = str(error)
             else:
                 return {"selected": selected, "routes": routes, "day": day}, "", False
             return None, last_error, temporary_failure
+
+        alternative_deadlines: dict[int, float] = {}
+
+        async def verify_one(item: tuple[int, list[Visit]]) -> tuple:
+            """Bound optional closer-place checks after retaining a feasible day."""
+            expires = alternative_deadlines.get(item[0])
+            if expires is not None and expires <= asyncio.get_running_loop().time():
+                return None, "", True
+            try:
+                async with asyncio.timeout_at(expires):
+                    return await verify_plan(item)
+            except TimeoutError:
+                # The saved day remains available; caller cancellation is not caught.
+                return None, "", True
+
+        def retain_alternative(index: int, record: dict) -> None:
+            deferred_days.setdefault(index, []).append(record)
+            alternative_deadlines.setdefault(index, min(
+                asyncio.get_running_loop().time() + ROUTE_ALTERNATIVE_SECONDS,
+                state.get("deadline", float("inf")) - 1.0,
+            ))
 
         plan_limit = (
             16
@@ -809,7 +873,16 @@ class CourseGraphNodes:
             if index not in validated and plans
         }
         last_errors: dict[int, str] = {}
-        unknown_days: dict[int, list[dict]] = {}
+        deferred_days: dict[int, list[dict]] = {}
+        settled_days: set[int] = set()
+
+        def has_closer_plan(index: int, selected: list[Visit]) -> bool:
+            def separation(plan: list[Visit]) -> float:
+                return sum(distance_meters(left[1], right[1]) for left, right in pairwise(plan))
+
+            current = separation(selected)
+            return any(len(plan) >= len(selected) and separation(plan) < current
+                       for plan in remaining.get(index, []))
         while remaining:
             assignments = _choose_disjoint_plans(remaining, used)
             if not assignments:
@@ -819,16 +892,17 @@ class CourseGraphNodes:
                 if isinstance(outcome, BaseException):
                     raise outcome
                 record, error, temporary = outcome
-                if record is not None and not any(is_unknown_route(route) for route in record['routes']):
-                    validated[index] = record
-                    used.update(
-                        _canonical_id(venue.place.placeId) for _, venue in selected
-                    )
+                if record is not None:
+                    retain_alternative(index, record)
+                if (record is not None and not any(_visit_shortage(record['selected']))
+                        and all(valid_route(route) for route in record['routes'])
+                        and not has_closer_plan(index, selected)):
+                    # Stop this day's optional search, but do not reserve its
+                    # places before checking other days' retained alternatives.
+                    settled_days.add(index)
                     remaining.pop(index, None)
                 else:
-                    if record is not None:
-                        unknown_days.setdefault(index, []).append(record)
-                    else:
+                    if record is None:
                         last_errors[index] = error
                     remaining[index].remove(selected)
                     if record is None and not temporary:
@@ -843,7 +917,7 @@ class CourseGraphNodes:
         if not state.get("repairing"):
             local = {}
             for index, plans in enumerate(state["day_plans"]):
-                if index in validated or not plans:
+                if index in validated or index in settled_days or not plans:
                     continue
                 day_date = date.fromisoformat(
                     state["request"].tripCondition.startDate
@@ -867,34 +941,47 @@ class CourseGraphNodes:
                 if isinstance(outcome, BaseException):
                     raise outcome
                 record, error, temporary = outcome
-                if record is not None and not any(is_unknown_route(route) for route in record['routes']):
-                    validated[index] = record
-                    used.update(
-                        _canonical_id(venue.place.placeId) for _, venue in selected
-                    )
+                if record is not None:
+                    retain_alternative(index, record)
                 else:
-                    if record is not None:
-                        unknown_days.setdefault(index, []).append(record)
-                    else:
-                        last_errors[index] = error
-                    if record is None and not temporary:
+                    last_errors[index] = error
+                    if not temporary:
                         rejected_plans.setdefault(index, set()).add(
                             _plan_signature(selected)
                         )
-        # Prefer fully measured alternatives, then retain the best disjoint
-        # venue itineraries instead of redrafting solely for missing travel.
+        # Existing bounded plans and the proposal floor have now been checked
+        # for shorter links. Select all new days jointly: committing a short
+        # alternative early could take a place from another day's sole long plan.
+        # Keep feasible long journeys before missing routes;
+        # neither is a reason to redraft or drop confirmed places on its own.
         pending = {
-            index: [record['selected'] for record in sorted(records, key=lambda record: sum(is_unknown_route(route) for route in record['routes']))]
-            for index, records in unknown_days.items() if index not in validated
+            index: [record['selected'] for record in sorted(records, key=lambda record: (
+                *_visit_shortage(record['selected']), *route_preference_rank(record['routes']),
+            ))]
+            for index, records in deferred_days.items() if index not in validated
         }
-        unknown_counts = {
-            (index, _plan_signature(record['selected'])): sum(is_unknown_route(route) for route in record['routes'])
-            for index, records in unknown_days.items() for record in records
+        ranks = {
+            (index, _plan_signature(record['selected'])): (
+                *_visit_shortage(record['selected']), *route_preference_rank(record['routes']),
+            )
+            for index, records in deferred_days.items() for record in records
         }
+        # Encode total/core visit shortages, missing links, measured minutes.
+        # Every higher priority outweighs all lower components across all days.
+        # Feasible five-stop long days must not lose to shorter reduced courses.
+        weights = [1] * 4
+        for component in range(2, -1, -1):
+            lower_bound = 1 + sum(max(ranks[index, _plan_signature(plan)][component + 1] for plan in plans)
+                                  for index, plans in pending.items())
+            weights[component] = weights[component + 1] * lower_bound
+
+        def route_cost(index: int, plan: list[Visit]) -> int:
+            return sum(value * weight for value, weight in zip(ranks[index, _plan_signature(plan)], weights))
+
         for index, selected in _choose_disjoint_plans(
-            pending, used, plan_cost=lambda index, plan: unknown_counts[index, _plan_signature(plan)]
+            pending, used, plan_cost=route_cost,
         ).items():
-            record = next(record for record in unknown_days[index] if record['selected'] == selected)
+            record = next(record for record in deferred_days[index] if record['selected'] == selected)
             validated[index] = record
             used.update(_canonical_id(venue.place.placeId) for _, venue in selected)
         for index in range(len(state["day_plans"])):
@@ -1116,14 +1203,13 @@ class CourseGraphNodes:
         return {"days": days, "feedback": ""}
 
     async def finalize(self, state: CourseState) -> dict:
-        """Compose grounded course copy and atomically record recent history."""
+        """Assemble the verified course and atomically record recent history."""
         _progress(
             "finalize",
             language=state["request"].language,
         )
         request = state["request"]
         trip = request.tripCondition
-        apply_personalized_reasons(request, state["days"])
         course = CourseSchema(
             title=f"{trip.destinationCity} {trip.totalDays}일 여행",
             destinationCountry=trip.destinationCountry,
@@ -1229,16 +1315,25 @@ class CourseGraphNodes:
         return {"course": course}
 
     async def localize_display(self, state: CourseState) -> dict:
-        """Translate display text within the existing optional request budget.
+        """Localize names/navigation, then write and review grounded visit copy.
 
-        The service preserves verified facts and original guidance on failure.
-        No new provider, model call or retry budget is introduced by this node.
+        Args:
+            state: Verified course, user preferences and request-wide deadline.
+        Returns:
+            Course with localized navigation and independently reviewed visit copy.
+            Missing or rejected visit copy remains empty; all facts are preserved.
+        Raises:
+            asyncio.CancelledError: Request cancellation propagates to model calls.
         """
         request = state["request"]
         _progress("localize", language=request.language)
         course = await localize_course(
             request, state["course"],
             timeout_seconds=min(LOCALIZATION_TIMEOUT_SECONDS, max(0.0, state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.0)),
+        )
+        course = await write_place_copy(
+            request, course,
+            timeout_seconds=min(COPY_TIMEOUT_SECONDS, max(0.0, state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.0)),
         )
         return {"course": course}
 

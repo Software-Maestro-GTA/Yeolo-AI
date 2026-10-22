@@ -30,7 +30,7 @@ def output_for(operation):
             'recommendCity': {'countryName': '대한민국', 'cityName': '서울', 'reason': '카페에 대한 관심을 바탕으로 제안해요.'},
         }
     if operation == 'candidates':
-        return {'title': '서울 여행', 'reason': '문화 탐방', 'days': [
+        return {'title': '서울 여행', 'days': [
             {'candidates': [{'name': '국립중앙박물관'}, {'name': '서울숲'}]},
         ]}
     output = {
@@ -57,7 +57,7 @@ async def invoke(operation, user_id=USER_ID):
     if operation == 'summary':
         return await taste_profile_chains.generate_taste_summary('{}', user_id=user_id)
     request = CourseRequestSchema.model_validate({
-        'userId': str(user_id), 'language': 'ko', 'mbti': 'INTJ',
+        'userId': str(user_id), 'language': 'en-US', 'mbti': 'INTJ',
         'tripCondition': {'destinationCountry': '대한민국', 'destinationCity': '서울',
                           'startDate': '2026-10-17', 'totalDays': 1, 'budget': 900000},
     })
@@ -113,6 +113,7 @@ async def test_gemini_gateway_request_preserves_schema_parameters_and_identity(o
     assert body['response_format']['type'] == 'json_schema'
     assert body['response_format']['json_schema']['schema']['properties']
     if operation == 'summary':
+        assert '항상 한국어로 작성하세요' in body['messages'][0]['content']
         summary_schema = body['response_format']['json_schema']['schema']
         assert summary_schema['properties']['hashtags']['minItems'] == 3
         assert summary_schema['properties']['hashtags']['maxItems'] == 4
@@ -132,6 +133,13 @@ async def test_gemini_gateway_request_preserves_schema_parameters_and_identity(o
         assert body['reasoning_effort'] == 'low'
         assert body['max_completion_tokens'] == 5000
         candidate_schema = body['response_format']['json_schema']['schema']
+        assert 'reason' not in candidate_schema['properties']
+        assert 'reason' not in candidate_schema['$defs']['Candidate']['properties']
+        messages = ' '.join(message['content'] for message in body['messages'])
+        assert 'reason은 25자' not in messages and '코드에서 재구성' not in messages
+        assert 'reason이나 memo를 작성하지 마세요' in messages
+        assert 'language: ko' in messages and 'language: en-US' not in messages
+        assert '제목, 태그는 항상 한국어로 작성하세요' in messages
         anchor_schema = candidate_schema['$defs']['AnchorCandidates']
         assert set(anchor_schema['properties']) == {'airports', 'lodgings'}
         assert all(field['maxItems'] == 2 for field in anchor_schema['properties'].values())
@@ -219,7 +227,7 @@ async def test_gateway_failure_has_no_direct_fallback_and_closes_clients(operati
 
 @pytest.mark.asyncio
 async def test_invalid_daily_output_closes_clients(offline_wire):
-    clients = offline_wire(lambda _: completion({'title': '후보', 'reason': '', 'days': []}))
+    clients = offline_wire(lambda _: completion({'title': '후보', 'days': []}))
     with pytest.raises(OutputParserException, match='assigned day'):
         await invoke('candidates')
     assert all(client.is_closed for client in clients)

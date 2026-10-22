@@ -35,6 +35,8 @@ def validate_output(request: dict, result: dict) -> dict:
         App category groups cannot establish lunch/dinner service or official names.
         Visit timing and raw provider types are checked inside the graph before
         public serialization and are not reconstructed from display groups.
+        Missing visit-copy pairs are warnings; partial pairs are errors.
+        Route guidance may be null when actual navigation is unavailable.
     """
     from pydantic import ValidationError
 
@@ -112,11 +114,14 @@ def validate_output(request: dict, result: dict) -> dict:
             if not math.isfinite(place.latitude) or not -90 <= place.latitude <= 90 or not math.isfinite(place.longitude) or not -180 <= place.longitude <= 180:
                 errors.append(f'{label}: invalid coordinates')
             food_stops += int(place.category == 'FOOD')
-            if not stop.reason.strip():
-                errors.append(f'{label}: empty reason')
-            if '관심이 많은' in stop.reason:
-                errors.append(f'{label}: disallowed reason phrase')
+            has_reason, has_memo = bool(stop.reason.strip()), bool(stop.memo.strip())
+            if has_reason != has_memo:
+                errors.append(f'{label}: incomplete visit copy pair')
+            elif not has_reason:
+                warnings.append(f'{label}: grounded visit copy unavailable')
             route = stop.transportToNext
+            if route.type in {'none', 'unknown'} and route.memo is not None:
+                errors.append(f'{label}: guidance without a measured route')
             if seq == len(day.stops):
                 if route.type != 'none' or route.minutes not in {None, 0} or route.distance not in {None, 0}:
                     errors.append(f'{label}: invalid final route')

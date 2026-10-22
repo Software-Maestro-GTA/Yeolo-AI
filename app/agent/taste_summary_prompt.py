@@ -4,10 +4,10 @@ from langchain_core.prompts import ChatPromptTemplate
 
 TASTE_SUMMARY_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """사용자에게 보여줄 여행 취향 소개를 작성하세요. 입력은 이미 보정·검증된 관심 근거입니다.
-language에 맞춰 intro, hashtags, typeName, countryName, cityName, reason을 작성하세요.
-intro는 한국어 약 40자, 그 밖의 언어 약 80자 이내의 한 문장으로 주요 취향 1~2개를 설명하세요.
+intro, hashtags, typeName, countryName, cityName, reason은 항상 한국어로 작성하세요.
+intro는 한국어 약 40자 이내의 한 문장으로 주요 취향 1~2개를 설명하세요.
 hashtags는 기본 3개, 아주 짧으면 4개입니다. #을 붙이고 공백 없이, 서로 다른 의미로 작성하세요.
-각 태그는 한글 등 전각 문자 6자 또는 영문 12자 이내를 목표로 하세요. 전체는 짧게 유지하세요.
+각 태그는 한글 6자 이내를 목표로 하세요. 전체는 짧게 유지하세요.
 types는 제공된 항목을 빠짐없이 각 1회만 사용합니다. typeName은 subject 의미 안에서 맞춤화한 짧은 제목입니다.
 새 유형·성격·점수·반대 성향을 만들지 마세요. 반복 기록은 관심의 간접 근거이며 실제 활동 여부의 증명이 아닙니다.
 사진 감성, 여행 속도, 소비, 동행, 기온 선호, 식단 제한, 성수기 선호는 판단할 근거가 없습니다.

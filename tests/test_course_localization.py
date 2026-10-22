@@ -18,13 +18,9 @@ USER_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('language,booking_word', [
-    ('ko', '예약'), ('en', 'booking'), ('ja', '予約'), ('zh', '预订'),
-    ('zh-TW', '預訂'), ('fr', 'réserver'), ('es', 'reservar'),
-    ('de', 'Buchung'), ('pt', 'reservar'),
-])
-async def test_lodging_copy_remains_about_accommodation_when_localization_unavailable(language, booking_word, mocker):
-    """An overnight stop cannot fall back to sightseeing copy or change its price."""
+@pytest.mark.parametrize('language', ['ko', 'en', 'ja', 'zh', 'zh-TW', 'fr', 'es', 'de', 'pt'])
+async def test_lodging_copy_stays_empty_when_localization_unavailable(language, mocker):
+    """An overnight stop cannot acquire template prose or change its price."""
     value = course()
     hotel = value.itinerary.days[0].stops[-1]
     hotel.place = InternalPlaceSchema(
@@ -37,15 +33,13 @@ async def test_lodging_copy_remains_about_accommodation_when_localization_unavai
     gateway = mocker.patch('app.services.course_localization.get_abto')
     result = await course_localization.localize_course(request(language), value, timeout_seconds=0)
     updated = result.itinerary.days[0].stops[-1]
-    assert booking_word in updated.memo
-    assert course_localization.guidance_matches_language(updated.memo, language)
-    assert course_localization.guidance_matches_language(updated.reason, language)
+    assert updated.memo == updated.reason == ""
     assert updated.place.placeId == 'verified-hotel' and updated.cost == 47501
     assert updated.transportToNext.type == 'none' and result.totalCost == 95000
     gateway.assert_not_called()
 
 
-def request(language="en", profile=None):
+def request(language="ko", profile=None):
     return CourseRequestSchema.model_validate(
         {
             "userId": USER_ID,
@@ -127,34 +121,6 @@ def course():
     )
 
 
-def translated():
-    return {
-        "title": "서울: a 1-day trip",
-        "tags": ["Culture", "Nature"],
-        "stops": [
-            {
-                "day": 1,
-                "sequence": 1,
-                "placeId": "verified-museum",
-                "reason": "Visit 검증된 박물관 for an exhibition experience.",
-                "memo": "Read the visitor guidance before exploring the displays.",
-            },
-            {
-                "day": 1,
-                "sequence": 2,
-                "placeId": "verified-park",
-                "reason": "Visit 검증된 공원 for a chance to explore nature.",
-                "memo": "Follow the on-site guidance and explore the surroundings.",
-            },
-        ],
-        "navigation": [
-            {"id": "n0", "text": "Follow the pedestrian route."},
-            {"id": "n1", "text": "Verified Museum"},
-            {"id": "n2", "text": "Verified Park"},
-        ],
-    }
-
-
 def facts(value):
     output = deepcopy(value.model_dump())
     output.pop("title")
@@ -219,54 +185,39 @@ def wire(mocker):
 
 
 @pytest.mark.asyncio
-async def test_real_gateway_wire_copy_schema_identity_deadline_and_owned_client_cleanup(
-    wire,
-):
+@pytest.mark.parametrize('legacy_language', ['ko', 'en-US', 'ja', 'zh-TW'])
+async def test_real_gateway_wire_is_korean_only_and_preserves_schema_identity_deadline_cleanup(wire, legacy_language):
     calls = []
-
-    def respond(http_request):
-        calls.append(http_request)
-        return completion(translated())
-
+    def respond(outgoing):
+        calls.append(outgoing)
+        return completion({'navigation': [{'id': 'n0', 'text': '보행 경로를 따라 이동하세요.'}]})
     clients = wire(respond)
     value = course()
-    before = facts(value)
-    result = await course_localization.localize_course(request(), value)
-    assert (
-        result is value
-        and result.title == translated()["title"]
-        and result.tags == ["Culture", "Nature"]
-    )
-    assert facts(result) == before
-    assert result.itinerary.days[0].stops[0].transportToNext.memo == "Follow the pedestrian route."
-    assert (
-        result.itinerary.days[0].stops[0].reason == translated()["stops"][0]["reason"].replace("검증된 박물관", "Verified Museum")
-    )
+    before = value.model_dump()
+    immutable = facts(value)
+    result = await course_localization.localize_course(request(legacy_language), value)
+    assert result is value and facts(result) == immutable
+    assert result.title == before['title'] and result.tags == before['tags']
+    assert result.itinerary.days[0].stops[0].transportToNext.memo == '보행 경로를 따라 이동하세요.'
     assert len(calls) == 1
-    http_request = calls[0]
-    assert str(http_request.url) == "https://gateway.abto.app/v1/chat/completions"
-    assert http_request.headers["x-abto-feature-id"] == "course.candidates.generate"
-    assert http_request.headers["x-abto-device-id"] == USER_ID
-    assert http_request.headers["authorization"] == "Bearer ck-abto-offline"
-    assert http_request.headers["x-abto-key-gemini"] == "offline-gemini-key"
-    assert http_request.extensions["timeout"]["read"] == 60
-    payload = json.loads(http_request.content)
-    assert (
-        payload["max_completion_tokens"] == 10000
-        and payload["reasoning_effort"] == "low"
-    )
-    assert payload["response_format"]["type"] == "json_schema"
-    assert payload["response_format"]["json_schema"]["strict"] is False
-    assert "temperature" not in payload and "tools" not in payload
-    schema = payload["response_format"]["json_schema"]["schema"]
-    assert set(schema["properties"]) == {"title", "tags", "stops", "navigation"}
-    assert result.itinerary.days[0].stops[0].place.placeName == "Verified Museum"
-    assert not {"latitude", "cost", "stayMinutes", "transportToNext"} & set(
-        schema["$defs"]["LocalizedStopCopy"]["properties"]
-    )
-    source = payload["messages"][-1]["content"]
-    assert "Target language: en" in source and "verified-museum" in source
-    assert "latitude" not in source and "totalCost" not in source
+    outgoing = calls[0]
+    assert str(outgoing.url) == 'https://gateway.abto.app/v1/chat/completions'
+    assert outgoing.headers['x-abto-feature-id'] == 'course.candidates.generate'
+    assert outgoing.headers['x-abto-device-id'] == USER_ID
+    assert outgoing.headers['authorization'] == 'Bearer ck-abto-offline'
+    assert outgoing.headers['x-abto-key-gemini'] == 'offline-gemini-key'
+    assert outgoing.extensions['timeout']['read'] == 60
+    body = json.loads(outgoing.content)
+    assert body['max_completion_tokens'] == 6000 and body['reasoning_effort'] == 'low'
+    assert body['response_format']['type'] == 'json_schema'
+    assert body['response_format']['json_schema']['strict'] is False
+    schema = body['response_format']['json_schema']['schema']
+    assert set(schema['properties']) == {'navigation'}
+    assert set(schema['$defs']['NavigationText']['properties']) == {'id', 'text'}
+    assert 'temperature' not in body and 'tools' not in body
+    source = body['messages'][-1]['content']
+    assert 'Target language: Korean (ko)' in source
+    assert 'latitude' not in source and 'totalCost' not in source
     assert len(clients) == 2 and all(client.is_closed for client in clients)
     assert get_abto().get_headers() == {}
 
@@ -289,52 +240,6 @@ async def test_korean_is_returned_untouched_without_optional_model(language, moc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "damage",
-    [
-        "immutable_fields",
-        "missing_stop",
-        "duplicate_stop",
-        "wrong_place",
-        "blank",
-        "new_fact",
-        "changed_name",
-        "korean_prose",
-    ],
-)
-async def test_hostile_or_incomplete_translation_falls_back_without_changing_verified_facts(
-    damage, wire
-):
-    output = translated()
-    if damage == "immutable_fields":
-        output["stops"][0].update(cost=1, latitude=0, place={"placeId": "invented"})
-    elif damage == "missing_stop":
-        output["stops"].pop()
-    elif damage == "duplicate_stop":
-        output["stops"][1] = dict(output["stops"][0])
-    elif damage == "wrong_place":
-        output["stops"][0]["placeId"] = "invented"
-    elif damage == "blank":
-        output["stops"][0]["reason"] = "   "
-    elif damage == "new_fact":
-        output["stops"][0]["memo"] = "Open 24 hours. Admission costs 999 won."
-    elif damage == "changed_name":
-        output["stops"][0]["reason"] = (
-            "Visit an invented museum for an exhibition experience."
-        )
-    else:
-        output["stops"][0]["reason"] = "검증된 박물관에서 관람해 보세요."
-    clients = wire(lambda _: completion(output))
-    value = course()
-    before = facts(value)
-    result = await course_localization.localize_course(request(), value)
-    assert result is value and facts(result) == before
-    assert result.itinerary.days[0].stops[0].reason != output["stops"][0]["reason"]
-    assert result.itinerary.days[0].stops[0].memo.strip()
-    assert len(clients) == 2 and all(client.is_closed for client in clients)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
     "language,marker",
     [
         ("en-US", "Start"),
@@ -347,7 +252,7 @@ async def test_hostile_or_incomplete_translation_falls_back_without_changing_ver
         ("pt-BR", "Consulte"),
     ],
 )
-async def test_optional_model_outage_uses_supported_language_category_grounded_fallback(
+async def test_optional_model_outage_does_not_create_visit_templates(
     language, marker, wire, caplog
 ):
     calls = []
@@ -365,7 +270,8 @@ async def test_optional_model_outage_uses_supported_language_category_grounded_f
     value = course()
     before = facts(value)
     result = await course_localization.localize_course(request(language), value)
-    assert facts(result) == before and marker in result.itinerary.days[0].stops[0].memo
+    assert facts(result) == before
+    assert [(stop.reason, stop.memo) for day in result.itinerary.days for stop in day.stops] == [(stop.reason, stop.memo) for day in course().itinerary.days for stop in day.stops]
     assert (
         len(calls) == 1
         and len(clients) == 2
@@ -404,8 +310,7 @@ async def test_strong_actual_preferences_only_and_low_budget_skip_model(mocker):
         request("en", fields), value, timeout_seconds=0.1
     )
     museum, park = result.itinerary.days[0].stops
-    assert "fits your preferences" in museum.reason
-    assert "preferences" not in park.reason
+    assert (museum.reason, museum.memo, park.reason, park.memo) == tuple(text for stop in course().itinerary.days[0].stops for text in (stop.reason, stop.memo))
     constructor.assert_not_called()
 
 
@@ -477,14 +382,14 @@ async def test_optional_local_timer_returns_localized_course_instead_of_failure(
         course_localization.localize_course(request(), course(), timeout_seconds=0.2),
         timeout=2,
     )
-    assert result.itinerary.days[0].stops[0].memo.startswith("Start")
+    assert result.itinerary.days[0].stops[0].reason == course().itinerary.days[0].stops[0].reason
     assert len(clients) == 2 and all(client.is_closed for client in clients)
 
 
 @pytest.mark.parametrize(
     "language", ["en", "ja", "zh-CN", "zh-TW", "fr", "es", "de", "pt"]
 )
-def test_stage_keys_and_quote_budget_notices_are_localized(language):
+def test_stage_keys_and_quote_budget_notices_are_always_korean(language):
     stage = course_localization.progress_message(
         language, "verify_places"
     )
@@ -495,16 +400,14 @@ def test_stage_keys_and_quote_budget_notices_are_localized(language):
     budget = course_localization.progress_message(
         language, "budget_over", total=120000, budget=100000
     )
-    assert not any(
-        re.search(r"[가-힣]", message) for message in (stage, refill, quote, budget)
-    )
+    assert all(re.search(r"[가-힣]", message) for message in (stage, refill, quote, budget))
     assert "120,000" in budget and "100,000" in budget
     assert "{items}" not in quote
     assert quote != 'quote_estimated'
 
 
 @pytest.mark.asyncio
-async def test_other_bcp47_locale_still_attempts_requested_language_then_logs_english_fallback(
+async def test_other_bcp47_locale_uses_korean_without_foreign_fallback(
     wire, caplog
 ):
     calls = []
@@ -518,8 +421,8 @@ async def test_other_bcp47_locale_still_attempts_requested_language_then_logs_en
     wire(respond)
     result = await course_localization.localize_course(request("vi-VN"), course())
     assert (
-        "Target language: vi-VN"
+        "Target language: Korean (ko)"
         in json.loads(calls[0].content)["messages"][-1]["content"]
     )
-    assert result.itinerary.days[0].stops[0].memo.startswith("Start")
-    assert "English for unsupported locale: vi-VN" in caplog.text
+    assert result.itinerary.days[0].stops[0].reason == course().itinerary.days[0].stops[0].reason
+    assert "English for unsupported locale" not in caplog.text
