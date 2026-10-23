@@ -66,6 +66,7 @@ from app.services.course_budget import (
     daily_place_budget,
 )
 from app.services.course_candidate_batches import candidate_batch, candidate_query_key
+from app.services.course_display_diagnostics import DisplayDiagnostics
 from app.services.course_diversity import (
     MAX_OVERLAP,
     overlap_scores,
@@ -1314,32 +1315,53 @@ class CourseGraphNodes:
             _progress("airports_unavailable", language=request.language)
         return {"course": course}
 
-    async def localize_display(self, state: CourseState) -> dict:
-        """Localize names/navigation, then write and review grounded visit copy.
+    async def translate_display(self, state: CourseState) -> dict:
+        """Translate names/navigation and retain the optional stage's outcome.
 
         Args:
             state: Verified course, user preferences and request-wide deadline.
         Returns:
-            Course with localized navigation and independently reviewed visit copy.
-            Missing or rejected visit copy remains empty; all facts are preserved.
-            Visit copy uses the remaining request budget after localization,
-            retaining the existing one-second finalization reserve.
+            Course with localized navigation and internal translation diagnostics.
+            Source facts and valid partial translations survive model failures.
         Raises:
             asyncio.CancelledError: Request cancellation propagates to model calls.
         """
         request = state["request"]
-        _progress("localize", language=request.language)
+        _progress("translate_display", language=request.language)
+        report = DisplayDiagnostics('translation')
         course = await localize_course(
             request, state["course"],
             timeout_seconds=min(LOCALIZATION_TIMEOUT_SECONDS, max(0.0, state.get('deadline', float('inf')) - asyncio.get_running_loop().time() - 1.0)),
+            diagnostics=report,
         )
+        return {"course": course, "display_diagnostics": {
+            **state.get('display_diagnostics', {}), 'translation': report.snapshot(),
+        }}
+
+    async def generate_place_copy(self, state: CourseState) -> dict:
+        """Write/review visit copy with the remaining request time and diagnostics.
+
+        Args:
+            state: Translated verified course, preferences and request deadline.
+        Returns:
+            Course and internal place-copy outcome, retaining translation diagnostics.
+            Only approved visit pairs change; finalization keeps a one-second reserve.
+        Raises:
+            asyncio.CancelledError: Caller cancellation propagates after cleanup.
+        """
+        request = state['request']
+        _progress('generate_place_copy', language=request.language)
+        report = DisplayDiagnostics('place_copy')
         now = asyncio.get_running_loop().time()
         copy_deadline = state.get('deadline', now + settings.COURSE_TIMEOUT_SECONDS)
         course = await write_place_copy(
-            request, course,
+            request, state['course'],
             timeout_seconds=max(0.0, copy_deadline - now - 1.0),
+            diagnostics=report,
         )
-        return {"course": course}
+        return {"course": course, "display_diagnostics": {
+            **state.get('display_diagnostics', {}), 'place_copy': report.snapshot(),
+        }}
 
     async def finalize_course(self, state: CourseState) -> dict:
         """Disclose benchmark amounts and return the localized course."""

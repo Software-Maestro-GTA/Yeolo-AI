@@ -18,6 +18,7 @@ from app.schemas.taste_profile import (
     TravelPurposeSchema,
 )
 from app.services import course_place_copy
+from app.services.course_display_diagnostics import DisplayDiagnostics
 
 
 @pytest.fixture
@@ -243,12 +244,17 @@ async def test_day_review_timeout_keeps_completed_days_and_closes_pending_work(c
 
     calls, clients = wire(respond)
     before = facts(copy_course)
-    await course_place_copy.write_place_copy(copy_request, copy_course, timeout_seconds=0.4)
+    report = DisplayDiagnostics('place_copy')
+    await course_place_copy.write_place_copy(copy_request, copy_course, timeout_seconds=0.4, diagnostics=report)
     assert hanging_review_closed.is_set()
     assert len(calls) == 6 and all(client.is_closed for client in clients)
     assert facts(copy_course) == before
     for day in copy_course.itinerary.days:
         assert all(bool(stop.reason) == bool(stop.memo) == (day.day != 2) for stop in day.stops)
+    assert report.status == 'partial' and (report.total, report.completed) == (6, 4)
+    assert any(item['phase'] == 'place_copy_review' and item['reason'] == 'cancelled'
+               and item['day'] == 2 for item in report.failures)
+    assert any(item['phase'] == 'budget' and item['reason'] == 'timeout' for item in report.failures)
 
 
 @pytest.mark.asyncio
@@ -602,7 +608,10 @@ async def test_timeout_and_cancellation_close_inflight_work(copy_request, copy_c
     for day in before["itinerary"]["days"]:
         for stop in day["stops"]:
             stop["reason"] = stop["memo"] = ""
-    task = asyncio.create_task(course_place_copy.write_place_copy(copy_request, copy_course, timeout_seconds=0.2))
+    report = DisplayDiagnostics('place_copy')
+    task = asyncio.create_task(course_place_copy.write_place_copy(
+        copy_request, copy_course, timeout_seconds=0.2, diagnostics=report,
+    ))
     await asyncio.wait_for(started.wait(), 1)
     if cancel:
         task.cancel()
@@ -612,6 +621,8 @@ async def test_timeout_and_cancellation_close_inflight_work(copy_request, copy_c
         assert await task is copy_course
     assert closed.is_set() and copy_course.model_dump() == before
     assert all(client.is_closed for client in clients)
+    assert report.status == ('cancelled' if cancel else 'failed')
+    assert any(item['phase'] == 'place_copy_write' and item['reason'] == 'cancelled' for item in report.failures)
 
 
 @pytest.mark.asyncio

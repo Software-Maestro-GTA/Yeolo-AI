@@ -482,7 +482,7 @@ async def test_graph_localizes_lodging_but_keeps_it_out_of_diversity_history(
         {'request': request_data, 'attempt': 0}, stream_mode='updates',
     )]
     stages = [node for update in updates for node in update]
-    assert stages.index('finalize') < stages.index('attach_lodging') < stages.index('localize_display') < stages.index('finalize_course')
+    assert stages.index('finalize') < stages.index('attach_lodging') < stages.index('translate_display') < stages.index('generate_place_copy') < stages.index('finalize_course')
     result = updates[-1]['finalize_course']['course']
     assert [len(day.stops) for day in result.itinerary.days] == [6, 6, 5]
     visit_ids = [stop.place.placeId for day in result.itinerary.days for stop in day.stops if stop.place.placeId != 'places/verified-hotel']
