@@ -2,6 +2,7 @@
 
 Supplier or proposed hotel names are resolved through Maps Essentials. Return transfers may
 remain unknown; no hotel, coordinates, fare or room availability is invented.
+Measured returns fit the internal day clock, including settling in by 23:00.
 """
 
 import asyncio
@@ -20,10 +21,8 @@ from app.schemas.course import (
     StopSchema,
     TransportToNextSchema,
 )
-from app.services.course_localization import lodging_copy
 from app.services.course_routing import (
     has_route_metrics,
-    valid_route,
 )
 from app.services.course_transfers import optional_transfer
 from app.services.myrealtrip_quotes import TripQuotes
@@ -31,6 +30,9 @@ from app.services.place_categories import map_actual_place_category
 
 logger = logging.getLogger(__name__)
 LODGING_TIMEOUT_SECONDS = 12.0
+LODGING_SETTLING_MINUTES = 30
+RETURN_TRANSITION_MINUTES = 10
+DAY_END_MINUTES = 23 * 60
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,35 @@ class _LodgingQuery:
     name: str
     english_name: str = ''
     meal: str = 'none'
+
+
+def _return_time_allowance(stop: StopSchema) -> int | None:
+    """Reserve settling-in and transition time without inventing an internal clock."""
+    arrival = getattr(stop, 'arrivalTime', None)
+    try:
+        hour, minute = (int(value) for value in arrival.split(':'))
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            raise ValueError('Invalid internal arrival time')
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return DAY_END_MINUTES - (hour * 60 + minute + stop.stayMinutes
+                              + RETURN_TRANSITION_MINUTES + LODGING_SETTLING_MINUTES)
+
+
+def _return_fits_day(stop: StopSchema, route: TransportToNextSchema) -> bool:
+    """Check a measured return against the retained internal visit clock.
+
+    Unknown routes preserve the existing provisional policy. Public courses have
+    no arrivalTime: retain measured returns without inventing a departure time
+    or a fixed duration ceiling. Internal clocks
+    following earlier unknown transfers also remain provisional lower bounds.
+    """
+    if not has_route_metrics(route):
+        return True
+    allowance = _return_time_allowance(stop)
+    if allowance is None:
+        return True
+    return route.minutes <= allowance
 
 
 async def attach_lodging(
@@ -66,11 +97,14 @@ async def attach_lodging(
         lookup: Whether this call may resolve a supplier hotel. False reuses the
             completed selection, including a missing result, without new lookups.
     Returns:
-        A copied course with N-1 hotel stops and return transfers, or the original
+        A copied course with feasible overnight hotel stops and return transfers, or the original
         if hotel identity cannot be verified. Existing daytime visits and history
         stay intact. Nightly amounts split the included lodging total exactly;
-        only new known transfer fares increase totalCost. A measured return over
-        90 minutes prevents attachment rather than being disguised as unknown.
+        only new known transfer fares increase totalCost. Measured returns
+        remain eligible when settling in fits by 23:00. A day that
+        cannot fit the return retains its daytime visits without the hotel link.
+        Without an internal clock, return timing remains unconfirmed and no
+        departure time or fixed route-duration ceiling is invented.
     Raises:
         asyncio.CancelledError: Caller cancellation after child tasks are joined.
     """
@@ -103,14 +137,18 @@ async def attach_lodging(
             for day in course.itinerary.days for stop in day.stops
         ):
             return course
-        origins = [VerifiedPlace(day.stops[-1].place) for day in course.itinerary.days[:nights]]
+        final_stops = [day.stops[-1] for day in course.itinerary.days[:nights]]
         semaphore = asyncio.Semaphore(3)
 
-        async def transfer(origin: VerifiedPlace) -> TransportToNextSchema:
+        async def transfer(stop: StopSchema) -> TransportToNextSchema:
+            allowance = _return_time_allowance(stop)
             async with semaphore:
-                return await optional_transfer(provider, origin, hotel, destination, expires)
+                return await optional_transfer(
+                    provider, VerifiedPlace(stop.place), hotel, destination, expires,
+                    available_minutes=None if allowance is None else max(0, allowance),
+                )
 
-        tasks = [asyncio.create_task(transfer(origin)) for origin in origins]
+        tasks = [asyncio.create_task(transfer(stop)) for stop in final_stops]
         try:
             routes = await asyncio.gather(*tasks)
         finally:
@@ -118,22 +156,21 @@ async def attach_lodging(
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-        if any(has_route_metrics(route) and not valid_route(route) for route in routes):
-            logger.info('Overnight stay omitted: measured return exceeds duration policy')
-            return course
         output = course.model_copy(deep=True)
         nightly, remainder = divmod(amount, nights)
-        reason, memo = lodging_copy(request.language)
         for index, route in enumerate(routes):
             original = output.itinerary.days[index]
+            if not _return_fits_day(original.stops[-1], route):
+                logger.info('Overnight return deferred: day=%s cannot verify a finish by 23:00', original.day)
+                continue
             day = DayItinerarySchema(day=original.day, date=original.date, stops=original.stops)
             output.itinerary.days[index] = day
             day.stops[-1].transportToNext = route
             # Thirty minutes represents settling in, not overnight sleep or an
             # asserted check-in window. No overnight arrival time is fabricated.
             day.stops.append(StopSchema(
-                sequence=len(day.stops) + 1, stayMinutes=30,
-                memo=memo, reason=reason, cost=nightly + (index < remainder),
+                sequence=len(day.stops) + 1, stayMinutes=LODGING_SETTLING_MINUTES,
+                memo="", reason="", cost=nightly + (index < remainder),
                 place=hotel.place.model_copy(deep=True),
                 transportToNext=TransportToNextSchema(type='none', distance=0, minutes=0, memo=None),
             ))

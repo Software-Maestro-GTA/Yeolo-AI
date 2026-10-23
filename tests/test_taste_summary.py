@@ -24,8 +24,8 @@ def draft_for(serialized_context, **_kwargs):
         hashtags=["#여행", "#탐색", "#발견"],
         types=[{"typeCode": item["typeCode"], "typeName": "나만의 " + item["typeCode"]} for item in context["types"]],
         recommendCity={
-            "countryName": "슬로베니아" if context["language"].startswith("ko") else "Slovenia",
-            "cityName": "류블랴나" if context["language"].startswith("ko") else "Ljubljana",
+            "countryName": "슬로베니아",
+            "cityName": "류블랴나",
             "reason": "관심 공간을 둘러보는 여행을 제안해요.",
         },
     )
@@ -58,8 +58,8 @@ def test_supported_types_exclude_defaults_deduplicate_and_preserve_scores():
     next_context = prepare_summary_context(profile, metadata, "en")
     assert next(item['score'] for item in next_context.types if item['typeCode'] == 'CAFE_DESSERT') == 75
     result = assemble_taste_summary(draft_for(json.dumps(next_context.model_input())), next_context)
-    assert result.types[0].lowName == "Weaker"
-    assert result.recommendCity.countryName == "Slovenia"
+    assert result.types[0].lowName == "약함"
+    assert result.recommendCity.countryName == "슬로베니아"
 
 
 def test_sparse_profile_cannot_generate_summary_or_city_recommendation():
@@ -183,13 +183,15 @@ def test_summary_copy_is_nonempty_and_bounded(field, value):
         TasteSummaryDraft.model_validate(data)
 
 
-@pytest.mark.parametrize("header,expected", [
-    ("ko-KR, en;q=0.5", "ko-KR"), ("en;q=0.2, ja;q=0.9", "ja"),
-    ("en;q=0, ko;q=0.4", "ko"), ("*", "ko"), ("ja;q=nan", "ko"),
-    ("invalid instruction", "ko"), ("zh_TW", "zh-TW"),
-])
-def test_language_header_normalization(header, expected):
-    assert language_from_header(header) == expected
+@pytest.mark.parametrize('header', ['ko-KR, en;q=0.5', 'en;q=0.2, ja;q=0.9', '*', 'invalid instruction'])
+def test_legacy_language_header_always_selects_korean(header):
+    assert language_from_header(header) == 'ko'
+
+
+@pytest.mark.parametrize('language', ['en_US', 'zh-Hant-TW', 'ko-KR'])
+def test_legacy_body_language_is_accepted_and_normalized_to_korean(language):
+    request = BehaviorAnalysisRequest(userId='550e8400-e29b-41d4-a716-446655440000', language=language, items=[])
+    assert request.language == 'ko'
 
 
 def test_body_language_rejects_prompt_instructions():

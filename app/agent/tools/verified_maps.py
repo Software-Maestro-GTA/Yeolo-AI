@@ -25,7 +25,6 @@ from app.services.place_categories import AIRPORT_TYPES, LODGING_TYPES
 from app.services.route_guidance import (
     MAX_MEMO_LENGTH,
     ROUTE_FIELD_MASK,
-    fallback_route_guidance,
     format_route_guidance,
     navigation_source,
 )
@@ -169,7 +168,7 @@ class InternalPlaceSchema(PlaceSchema):
     """
 
     category: str = Field(..., description='Actual provider type for internal validation; serialized as an app category')
-    providerTypes: list[str] = Field(default_factory=list, exclude=True, description='Actual Essentials types for display grouping only')
+    providerTypes: list[str] = Field(default_factory=list, exclude=True, description='Actual Essentials types for display grouping and grounded visit copy')
     address: str = Field(default='', description='Provider address for internal area matching')
     placeEngName: str = Field(default='', description='Optional proposed English search name; not officially verified')
 
@@ -438,7 +437,7 @@ class VerifiedMapsProvider:
         client: Optional injected HTTP client; caller retains ownership.
         api_key: Optional configured Google Maps key.
         concurrency: Maximum active provider requests.
-        language: Preferred Maps display and navigation language (BCP 47).
+        language: Legacy BCP 47 input; display and route instructions use Korean.
 
     Raises:
         ValueError: Provider cannot establish a destination, venue, or route.
@@ -447,7 +446,7 @@ class VerifiedMapsProvider:
     def __init__(self, client: httpx.AsyncClient | None = None, api_key: str | None = None, concurrency: int = 6, language: str = 'ko') -> None:
         if not isinstance(language, str) or not re.fullmatch(r'[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*', language):
             raise ValueError('Invalid Maps language code')
-        self.language = language
+        self.language = 'ko'
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(6))
         self.owns_client = client is None
         self.api_key = settings.GOOGLE_MAPS_API_KEY if api_key is None else api_key
@@ -885,12 +884,14 @@ class VerifiedMapsProvider:
         seconds, distance = _route_metrics(data)
         # Guidance is optional: only validated numeric route facts determine
         # feasibility. Cancellation remains observable (it is BaseException).
-        source = []
         try:
             memo = format_route_guidance(data, mode, language=self.language)
-            source = navigation_source(data)
-            if (memo is None and fallback_route_guidance(mode, language=self.language) is not None) or (memo is not None and (not isinstance(memo, str) or not memo.strip() or len(memo) > MAX_MEMO_LENGTH)):
+            if memo is not None and (not isinstance(memo, str) or not memo.strip() or len(memo) > MAX_MEMO_LENGTH):
                 raise ValueError('Unusable optional route guidance')
         except Exception:  # noqa: BLE001 - optional presentation must not invalidate verified metrics
-            memo = fallback_route_guidance(mode, language=self.language)
+            memo = None
+        try:
+            source = navigation_source(data)
+        except Exception:  # noqa: BLE001 - optional sources must not invalidate verified metrics
+            source = []
         return InternalTransportSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=memo, navigationSource=source)

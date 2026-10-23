@@ -460,7 +460,7 @@
         "type": "string"
       },
       "language": {
-        "description": "응답 문구의 BCP 47 언어 코드 (예: ko, en, ja, zh-TW)",
+        "description": "호환용 BCP 47 언어 코드; 값과 관계없이 응답은 항상 한국어",
         "title": "Language",
         "type": "string"
       },
@@ -507,7 +507,7 @@
       "CourseSchema": {
         "properties": {
           "title": {
-            "description": "요청 언어로 작성된 코스 제목",
+            "description": "한국어로 작성된 코스 제목",
             "title": "Title",
             "type": "string"
           },
@@ -541,7 +541,7 @@
             "type": "integer"
           },
           "tags": {
-            "description": "요청 언어로 작성된 여행 태그",
+            "description": "한국어로 작성된 여행 태그",
             "items": {
               "type": "string"
             },
@@ -621,7 +621,7 @@
             "type": "string"
           },
           "placeName": {
-            "description": "요청 언어로 표기한 검증 장소명; Google 공식 표시 이름은 조회하지 않음",
+            "description": "한국어로 표기한 검증 장소명; Google 공식 표시 이름은 조회하지 않음",
             "title": "Placename",
             "type": "string"
           },
@@ -677,12 +677,12 @@
             "type": "integer"
           },
           "memo": {
-            "description": "요청 언어로 작성된 방문 팁",
+            "description": "검증을 통과한 LLM 방문 팁; 생성·검증 미확보 시 빈 문자열",
             "title": "Memo",
             "type": "string"
           },
           "reason": {
-            "description": "취향과 검증된 장소에 근거한 추천 이유",
+            "description": "취향과 검증된 장소에 근거한 LLM 추천 이유; 생성·검증 미확보 시 빈 문자열",
             "title": "Reason",
             "type": "string"
           },
@@ -764,7 +764,7 @@
               }
             ],
             "default": null,
-            "description": "요청 언어로 작성된 이동 안내",
+            "description": "실제 경로 정보에 근거한 이동 안내; 작성 가능한 정보가 없으면 null",
             "title": "Memo"
           }
         },
@@ -796,7 +796,7 @@
         "type": "string"
       },
       "message": {
-        "description": "요청 언어로 작성된 진행 안내",
+        "description": "한국어로 작성된 진행 안내",
         "title": "Message",
         "type": "string"
       }

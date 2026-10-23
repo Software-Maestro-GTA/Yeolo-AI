@@ -26,7 +26,7 @@ async def optional_transfer(
     destination: Destination,
     deadline: float,
     *,
-    max_minutes: int | None = 90,
+    available_minutes: int | None = None,
 ) -> TransportToNextSchema:
     """Try bounded measured alternatives within one shared deadline.
 
@@ -36,7 +36,8 @@ async def optional_transfer(
         target: Verified arrival location.
         destination: Country context for choosing travel modes.
         deadline: Absolute event-loop deadline shared with other transfers.
-        max_minutes: Preferred duration ceiling; None accepts long airport links.
+        available_minutes: Time actually left in the day's schedule, if known.
+            None accepts measured routes without imposing a duration ceiling.
     Returns:
         First acceptable real route, shortest measured overlong alternative, or
         unknown. Straight-line distance only selects modes, never public metrics.
@@ -54,8 +55,8 @@ async def optional_transfer(
         async with asyncio.timeout_at(deadline):
             for mode in modes:
                 try:
-                    # No flight timetable or verified final daytime clock is
-                    # available. Do not assert a scheduled departure time.
+                    # Internal arrival clocks are planning bounds, not a flight
+                    # timetable. Do not assert a scheduled departure time.
                     route = await provider.route(origin, target, mode=mode, departure_time=None)
                 except MapsProviderError as error:
                     if error.kind not in {'no_route', 'route_data', 'transient'}:
@@ -66,7 +67,7 @@ async def optional_transfer(
                     continue
                 if not has_route_metrics(route):
                     continue
-                if max_minutes is None or route.minutes <= max_minutes:
+                if available_minutes is None or route.minutes <= available_minutes:
                     return route
                 if overlong is None or route.minutes < overlong.minutes:
                     overlong = route

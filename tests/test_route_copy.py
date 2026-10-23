@@ -20,7 +20,6 @@ from tests.test_course_localization import (
     course,
     facts,
     request,
-    translated,
 )
 from tests.test_course_localization import wire as _wire
 
@@ -42,7 +41,7 @@ def source_course():
     value = course()
     value.itinerary.days[0].stops[0].transportToNext = InternalTransportSchema(
         type='transit', distance=1250, minutes=21, cost=None,
-        memo='지도 앱의 대중교통 길찾기를 열고 노선과 행선지를 확인해 타세요.',
+        memo=None,
         navigationSource=navigation_source(source_payload()),
     )
     return value
@@ -238,39 +237,6 @@ def test_long_source_is_preserved_whole_instead_of_generic_fallback_or_slicing()
 
 
 @pytest.mark.asyncio
-async def test_other_locale_shares_existing_course_copy_call_with_navigation(wire):
-    calls = []
-
-    def respond(outgoing):
-        calls.append(outgoing)
-        return completion({
-            'title': '서울の旅', 'tags': ['文化', '自然'],
-            'stops': [
-                {'day': 1, 'sequence': i + 1, 'placeId': stop.place.placeId,
-                 'reason': f'{stop.place.placeName}で見学を楽しんでください。', 'memo': '現地の案内を確認してください。'}
-                for i, stop in enumerate(value.itinerary.days[0].stops)
-            ],
-            'navigation': [
-                {'id': 'n0', 'text': '博物館通りで右に曲がってください。'},
-                {'id': 'n1', 'text': '博物館'},
-                {'id': 'n2', 'text': '公園'},
-            ],
-        })
-
-    value = source_course()
-    value.itinerary.days[0].stops[0].transportToNext.navigationSource = [
-        {'kind': 'instruction', 'text': 'Turn right onto Museum Street.'},
-    ]
-    before = facts(value)
-    wire(respond)
-    result = await localize_course(request('ja'), value)
-    assert len(calls) == 1 and facts(result) == before
-    assert result.itinerary.days[0].stops[0].transportToNext.memo == '博物館通りで右に曲がってください。'
-    body = json.loads(calls[0].content)
-    assert set(body['response_format']['json_schema']['schema']['properties']) == {'title', 'tags', 'stops', 'navigation'}
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['ko', 'ko-KR'])
 async def test_foreign_place_names_and_legacy_memo_are_localized_together_on_public_output(wire, language):
     value = course()
@@ -321,43 +287,6 @@ async def test_name_translation_outage_preserves_original_names_and_legacy_memo(
     assert result is value and facts(result) == before
     assert stop.place.placeName == 'Roots Boutique Hotel'
     assert stop.transportToNext.memo == 'Roots Boutique Hotel에서 북쪽으로 걸어가세요.'
-
-
-@pytest.mark.asyncio
-async def test_same_latin_script_names_and_memo_are_still_translated_to_english(wire):
-    value = course()
-    first, second = value.itinerary.days[0].stops
-    first.place.placeName = 'Bảo tàng Đà Nẵng'
-    second.place.placeName = 'Sông Hàn'
-    first.reason = 'Bảo tàng Đà Nẵng에서 전시를 감상해 보세요.'
-    second.reason = 'Sông Hàn에서 산책을 즐겨 보세요.'
-    first.transportToNext.memo = 'Đi về phía bắc trên đường Bạch Đằng.'
-    before = facts(value)
-
-    def respond(outgoing):
-        body = json.loads(outgoing.content)
-        source = json.loads(body['messages'][-1]['content'].split('Verified source copy:\n')[1])
-        mapping = {
-            'Đi về phía bắc trên đường Bạch Đằng.': 'Head north along Bach Dang Street.',
-            'Bảo tàng Đà Nẵng': 'Da Nang Museum',
-            'Sông Hàn': 'Han River',
-        }
-        return completion({
-            'title': 'A day in Da Nang', 'tags': ['Culture', 'Nature'],
-            'stops': [
-                {'day': 1, 'sequence': stop.sequence, 'placeId': stop.place.placeId,
-                 'reason': f'Explore {stop.place.placeName} during your visit.', 'memo': 'Follow the on-site visitor guidance.'}
-                for stop in (first, second)
-            ],
-            'navigation': [{'id': slot['id'], 'text': mapping[slot['text']]} for slot in source['navigation']],
-        })
-
-    wire(respond)
-    result = await localize_course(request('en'), value)
-    assert facts(result) == before
-    assert first.place.placeName == 'Da Nang Museum' and second.place.placeName == 'Han River'
-    assert first.reason == 'Explore Da Nang Museum during your visit.'
-    assert first.transportToNext.memo == 'Head north along Bach Dang Street.'
 
 
 JAPANESE_WALK = [
@@ -423,29 +352,30 @@ def test_valid_long_translation_survives_missing_peer_memo_and_repair_failure():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['503', 'timeout'])
-async def test_failed_repair_keeps_successfully_localized_copy_and_course(wire, failure):
+async def test_failed_repair_keeps_successful_korean_name_and_navigation(wire, failure):
     calls = []
-
     async def respond(outgoing):
         calls.append(outgoing)
         if len(calls) == 1:
-            output = translated()
-            output['navigation'].pop()  # Only the park name needs repair.
-            return completion(output)
+            return completion({'navigation': [
+                {'id': 'n0', 'text': '보행 경로를 따라 이동하세요.'},
+                {'id': 'n1', 'text': '도쿄 박물관'},
+            ]})
         if failure == '503':
             return httpx.Response(503, json={'error': {'message': 'Offline repair unavailable'}})
         await asyncio.Event().wait()
-
     clients = wire(respond)
     value = course()
+    value.itinerary.days[0].stops[0].place.placeName = 'Tokyo Museum'
+    value.itinerary.days[0].stops[1].place.placeName = 'Tokyo Park'
     before = facts(value)
     result = await asyncio.wait_for(localize_course(request('en'), value, timeout_seconds=.2), timeout=2)
     assert len(calls) == 2 and all(client.is_closed for client in clients)
     assert result is value and facts(result) == before
     stop = result.itinerary.days[0].stops[0]
-    assert stop.place.placeName == 'Verified Museum'
-    assert stop.reason == 'Visit Verified Museum for an exhibition experience.'
-    assert result.title == translated()['title']
+    assert stop.place.placeName == '도쿄 박물관'
+    assert stop.transportToNext.memo == '보행 경로를 따라 이동하세요.'
+    assert result.itinerary.days[0].stops[1].place.placeName == 'Tokyo Park'
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 """Keep measured transfers distinct from explicitly unavailable route information."""
 
 import math
+from collections.abc import Sequence
 
 from app.agent.tools.verified_maps import InternalTransportSchema, VerifiedPlace
 from app.schemas.course import TransportToNextSchema
@@ -25,7 +26,7 @@ def distance_meters(origin: VerifiedPlace, destination: VerifiedPlace) -> float:
 
 
 def has_route_metrics(route: object) -> bool:
-    """Recognize positive actual metrics independently of the 90-minute policy."""
+    """Recognize positive actual metrics without a fixed duration ceiling."""
     if not isinstance(route, TransportToNextSchema) or route.type in {'none', 'unknown'} or route.minutes is None or route.minutes <= 0:
         return False
     if (route.memo or '').startswith(ESTIMATE_MARKER):
@@ -34,8 +35,23 @@ def has_route_metrics(route: object) -> bool:
 
 
 def valid_route(route: object) -> bool:
-    """Accept measured routes within the duration cap; unknown stays unverified."""
-    return has_route_metrics(route) and route.minutes <= 90
+    """Accept real metrics; the daily schedule decides whether travel fits."""
+    return has_route_metrics(route)
+
+
+def route_preference_rank(routes: Sequence[TransportToNextSchema]) -> tuple[int, int]:
+    """Rank feasible days by missing links, then total measured minutes.
+
+    Args:
+        routes: Actual or explicitly unknown transfers after schedule checks.
+    Returns:
+        A lower-is-better key. Missing time is never a short measured journey;
+        preserving complete, nonoverlapping days takes priority at the caller.
+    """
+    return (
+        sum(is_unknown_route(route) for route in routes),
+        sum(route.minutes or 0 for route in routes if valid_route(route)),
+    )
 
 
 def is_unknown_route(route: object) -> bool:

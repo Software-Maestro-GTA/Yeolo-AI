@@ -37,8 +37,8 @@ def build_course_graph(
 
     Normal flow:
         prepare → quote_trip → draft → resolve_anchors → verify_places → verify_routes → schedule
-        → finalize → attach_lodging → attach_airports → localize_display
-        → finalize_course. Travel costs are resolved
+        → finalize → attach_lodging → attach_airports → translate_display
+        → generate_place_copy → finalize_course. Travel costs are resolved
         before daily proposals receive their remaining activity budget. Deferred
         venues are queried before further model calls. Failed proposals can
         refill missing days, repair verified candidates or restore a snapshot.
@@ -68,7 +68,8 @@ def build_course_graph(
     graph.add_node("finalize", nodes.finalize)
     graph.add_node("attach_lodging", nodes.attach_lodging)
     graph.add_node("attach_airports", nodes.attach_airports)
-    graph.add_node("localize_display", nodes.localize_display)
+    graph.add_node("translate_display", nodes.translate_display)
+    graph.add_node("generate_place_copy", nodes.generate_place_copy)
     graph.add_node("finalize_course", nodes.finalize_course)
     graph.add_node("quote_trip", nodes.quote_trip)
     graph.add_node("expand_places", nodes.bounded(nodes.expand_places))
@@ -85,8 +86,9 @@ def build_course_graph(
     graph.add_edge("repair", "verify_routes")
     graph.add_edge("restore", "schedule")
     graph.add_edge("attach_lodging", "attach_airports")
-    graph.add_edge("attach_airports", "localize_display")
-    graph.add_edge("localize_display", "finalize_course")
+    graph.add_edge("attach_airports", "translate_display")
+    graph.add_edge("translate_display", "generate_place_copy")
+    graph.add_edge("generate_place_copy", "finalize_course")
     graph.add_edge("finalize_course", END)
 
     # Every main stage shares the same bounded retry and snapshot decision.

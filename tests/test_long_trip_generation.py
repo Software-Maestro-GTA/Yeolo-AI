@@ -274,7 +274,7 @@ async def test_daily_metadata_cannot_replace_whole_trip_title_after_repair(mocke
     async def generate(request, recent_ids, feedback='', *, day_index, **kwargs):
         draft = daily_draft(day_index)
         draft.title = f'미확인 권역 {day_index}의 숨겨진 명소'
-        draft.reason = f'{day_index}일차의 모델 추측에 기반한 설명'
+        draft = type(draft).model_validate({**draft.model_dump(), 'reason': f'{day_index}일차의 모델 추측에 기반한 설명'})
         draft.tags = [f'미확인-{day_index}']
         return draft
 
@@ -285,4 +285,5 @@ async def test_daily_metadata_cannot_replace_whole_trip_title_after_repair(mocke
     assert original.title == repaired.title
     assert trip_request.tripCondition.destinationCity in repaired.title
     assert str(trip_request.tripCondition.totalDays) in repaired.title
-    assert '미확인' not in repaired.title + repaired.reason + ' '.join(repaired.tags)
+    assert '미확인' not in repaired.title + ' '.join(repaired.tags)
+    assert 'reason' not in repaired.model_dump()

@@ -36,12 +36,6 @@ TYPE_DEFINITIONS = (
     ("EXPERIENCE", "activityPreference.experience", "workshops and activity venues", "activity"),
 )
 
-AXIS_LABELS = {
-    "ko": ("약함", "강함"), "en": ("Weaker", "Stronger"),
-    "ja": ("弱め", "強め"), "zh": ("较弱", "较强"), "zh-Hant": ("較弱", "較強"),
-    "fr": ("Faible", "Fort"), "es": ("Menor", "Mayor"),
-    "de": ("Schwächer", "Stärker"), "pt": ("Menor", "Maior"),
-}
 
 
 def validate_taste_evidence(statistics: dict[str, Any]) -> None:
@@ -73,7 +67,7 @@ class SummaryContext:
     def model_input(self) -> dict[str, Any]:
         """Return the minimum facts needed by the summary model."""
         return {
-            "language": self.language,
+            "language": "ko",
             "hasSupportedPreferences": bool(self.types),
             "types": self.types,
             "recommendationInterests": self.recommendation_interests,
@@ -88,7 +82,7 @@ def prepare_summary_context(
     Args:
         profile: Final guarded profile, whose numeric values must remain unchanged.
         metadata: Internal evidence used to exclude compatibility placeholders.
-        language: Normalized request locale.
+        language: Legacy locale input; summary generation always uses Korean.
     Returns:
         Exactly three display axes and all supported interests for the model to
         recommend a city, including interests not displayed as sliders. No network I/O.
@@ -125,7 +119,7 @@ def prepare_summary_context(
         {key: item[key] for key in ("typeCode", "subject", "sourceScore")}
         for _, _, item in sorted(ranked)
     ]
-    return SummaryContext(language, selected, recommendation_interests)
+    return SummaryContext("ko", selected, recommendation_interests)
 
 
 def assemble_taste_summary(draft: TasteSummaryDraft, context: SummaryContext) -> TasteSummary:
@@ -142,10 +136,7 @@ def assemble_taste_summary(draft: TasteSummaryDraft, context: SummaryContext) ->
     titles = {item.typeCode: item.typeName for item in draft.types}
     if len(titles) != len(draft.types) or set(titles) != {item["typeCode"] for item in context.types}:
         raise ValueError("Summary types must match the supported input types exactly")
-    locale = context.language.split("-")[0]
-    if context.language in {"zh-TW", "zh-HK"} or "Hant" in context.language:
-        locale = "zh-Hant"
-    low, high = AXIS_LABELS.get(locale, AXIS_LABELS["en"])
+    low, high = "약함", "강함"
     return TasteSummary(
         intro=draft.intro, hashtags=draft.hashtags,
         types=[SummaryType(

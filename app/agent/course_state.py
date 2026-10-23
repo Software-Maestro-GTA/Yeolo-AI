@@ -19,6 +19,7 @@ from app.schemas.course import (
     TransportToNextSchema,
 )
 from app.schemas.course_anchors import AnchorCandidates
+from app.services.course_display_diagnostics import DisplayStageResult
 from app.services.course_diversity import (
     Experience,
 )
@@ -41,7 +42,6 @@ class Candidate(BaseModel):
         default="standard",
         description="Destination-relative spending level for the proposed use, independent of request budget; not a verified rating",
     )
-    reason: str = ""
     meal: Literal["none", "breakfast", "lunch", "dinner"] = "none"
     planned_area: str = Field(default="", max_length=100)
     experiences: list[Experience] = Field(default_factory=list, max_length=5)
@@ -53,7 +53,6 @@ class DraftDay(BaseModel):
 
 class CourseDraft(BaseModel):
     title: str
-    reason: str
     tags: list[str] = Field(default_factory=list)
     days: list[DraftDay]
     anchor_candidates: AnchorCandidates = Field(default_factory=AnchorCandidates)
@@ -89,6 +88,7 @@ class CourseState(TypedDict, total=False):
     request: CourseRequestSchema
     destination: Destination
     deadline: float
+    display_diagnostics: dict[str, DisplayStageResult]
 
     # Daily model proposals and feedback for bounded retries.
     attempt: int

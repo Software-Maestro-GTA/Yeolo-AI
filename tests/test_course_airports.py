@@ -214,7 +214,7 @@ async def test_unverified_airport_preserves_full_course(airport_case, result, fa
 
 @pytest.mark.asyncio
 async def test_long_measured_airport_transfer_is_preserved(airport_case):
-    """A genuine airport journey may exceed the normal 90-minute venue limit."""
+    """A genuine airport journey has no fixed route-duration limit."""
     request, course, destination, quotes, provider = airport_case
     provider.route.return_value = InternalTransportSchema(type='transit', distance=95000, minutes=110, cost=4200)
     result = await attach_airports(request, course, destination, quotes, provider)
@@ -366,8 +366,8 @@ async def test_caller_cancellation_joins_both_inflight_airport_transfers(airport
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['ko', 'en', 'ja', 'zh-CN', 'zh-TW', 'fr', 'es', 'de', 'pt'])
-async def test_airport_fallback_copy_keeps_arrival_and_departure_roles(airport_case, language):
-    """Localization failure must not replace airport guidance with attraction copy."""
+async def test_airport_copy_stays_empty_without_model_generation(airport_case, language):
+    """Localization failure must not create airport or attraction template copy."""
     request, course, destination, quotes, provider = airport_case
     request.language = language
     request.tripCondition.totalDays = course.totalDays = 1
@@ -375,9 +375,7 @@ async def test_airport_fallback_copy_keeps_arrival_and_departure_roles(airport_c
     attached = await attach_airports(request, course, destination, quotes, provider)
     result = await course_localization.localize_course(request, attached, timeout_seconds=0)
     first, last = result.itinerary.days[0].stops[0], result.itinerary.days[0].stops[-1]
-    assert (first.reason, first.memo) == course_localization.airport_copy(language, arrival=True)
-    assert (last.reason, last.memo) == course_localization.airport_copy(language, arrival=False)
-    assert first.memo != last.memo
+    assert first.reason == first.memo == last.reason == last.memo == ""
     assert first.place.placeId == last.place.placeId == 'places/verified-nrt'
     assert result.totalCost == attached.totalCost
 
@@ -418,7 +416,7 @@ async def test_real_graph_adds_airports_after_hotels_without_polluting_diversity
         {'request': request_data, 'attempt': 0}, stream_mode='updates',
     )]
     stages = [node for update in updates for node in update]
-    assert stages.index('finalize') < stages.index('attach_lodging') < stages.index('attach_airports') < stages.index('localize_display') < stages.index('finalize_course')
+    assert stages.index('finalize') < stages.index('attach_lodging') < stages.index('attach_airports') < stages.index('translate_display') < stages.index('generate_place_copy') < stages.index('finalize_course')
     result = updates[-1]['finalize_course']['course']
     assert [len(day.stops) for day in result.itinerary.days] == [7, 6]
     assert result.itinerary.days[0].stops[0].place.placeId == result.itinerary.days[-1].stops[-1].place.placeId == 'places/verified-nrt'
