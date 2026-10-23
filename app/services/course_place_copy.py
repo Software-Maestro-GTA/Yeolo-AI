@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.core.config import settings
 from app.core.llm import get_abto
 from app.schemas.course import CourseRequestSchema, CourseSchema
+from app.services.course_display_diagnostics import DisplayDiagnostics
 from app.services.course_reasons import preference_evidence
 from app.services.route_guidance import guidance_matches_language
 
@@ -191,18 +192,31 @@ def _valid_text(text: str, names: list[str], language: str) -> bool:
 
 def _checked_copy(
     copies: list[PlaceCopy], sources: list[dict[str, Any]], retained: list[PlaceCopy],
+    report: DisplayDiagnostics, attempt: int,
 ) -> dict[str, PlaceCopy]:
     """Check new pairs together without replacing previously approved pairs."""
     names = [source["display_name"] for source in sources]
     names_by_slot = {source["slot"]: source["display_name"] for source in sources}
     counts = Counter(_normalized(text, names) for copy in [*retained, *copies]
                      for text in (copy.reason, copy.memo))
-    return {copy.slot: copy for copy in copies if all(
-        _valid_text(text, names, 'ko') and counts[_normalized(text, names)] == 1
-        and not any(name in text for name in names
-                    if name and name != names_by_slot[copy.slot] and name not in names_by_slot[copy.slot])
-        for text in (copy.reason, copy.memo)
-    )}
+    checked = {}
+    for copy in copies:
+        reason = None
+        for text in (copy.reason, copy.memo):
+            if not _valid_text(text, names, 'ko'):
+                reason = 'invalid_text'
+            elif counts[_normalized(text, names)] != 1:
+                reason = 'duplicate_text'
+            elif any(name in text for name in names
+                     if name and name != names_by_slot[copy.slot] and name not in names_by_slot[copy.slot]):
+                reason = 'foreign_place_reference'
+            if reason is not None:
+                break
+        if reason is not None:
+            report.fail('place_copy_validation', reason, day=int(copy.slot.split(':')[0]), attempt=attempt)
+        else:
+            checked[copy.slot] = copy
+    return checked
 
 
 async def write_place_copy(
@@ -210,6 +224,7 @@ async def write_place_copy(
     course: CourseSchema,
     *,
     timeout_seconds: float | None = None,
+    diagnostics: DisplayDiagnostics | None = None,
 ) -> CourseSchema:
     """Replace visit prose only after independent evidence and identity checks.
 
@@ -219,6 +234,7 @@ async def write_place_copy(
         timeout_seconds: Remaining course request budget shared by writing,
             review, waiting and one retry. Direct callers that omit it use the
             configured whole-course budget; no separate copy limit is applied.
+        diagnostics: Optional internal stage report; no diagnostic fields enter the course.
     Returns:
         Same course, changing only approved reason/memo pairs. Failed, duplicate,
         incomplete or ungrounded output leaves empty strings instead of fallback prose.
@@ -230,13 +246,21 @@ async def write_place_copy(
             stop.reason = stop.memo = ""
     sources_by_day = _sources(request, course)
     sources = [source for day_sources in sources_by_day for source in day_sources]
+    report = diagnostics if diagnostics is not None else DisplayDiagnostics('place_copy')
+    report.total = len(sources)
     budget = settings.COURSE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    if not sources or not math.isfinite(budget) or budget <= 0.1:
+    if not sources:
+        report.finish(0)
+        return course
+    if not math.isfinite(budget) or budget <= 0.1:
+        report.fail('budget', 'exhausted', count=report.total)
+        report.finish(0)
         return course
     sync_options = None
     async_options = None
     accepted: list[PlaceCopy] = []
     retained: dict[str, PlaceCopy] = {}
+    validation_attempt = 1
     try:
         async with asyncio.timeout(budget):
             abto = get_abto()
@@ -257,29 +281,44 @@ async def write_place_copy(
                 CopyReview.model_json_schema(), method="json_schema", strict=False,
             )
 
-            async def one(batch: list[dict[str, Any]]) -> list[PlaceCopy]:
+            async def one(batch: list[dict[str, Any]], batch_index: int, attempt: int) -> list[PlaceCopy]:
+                context = {'day': int(batch[0]['slot'].split(':')[0]), 'batch': batch_index, 'attempt': attempt}
+                phase = 'place_copy_write'
                 try:
                     inputs = {"source": json.dumps(batch, ensure_ascii=False)}
                     with abto.with_context(feature_id="course.candidates.generate", device_id=str(request.userId)):
-                        proposed = PlaceCopyBatch.model_validate(await writer.ainvoke(inputs))
+                        report.call(phase)
+                        raw = await writer.ainvoke(inputs, config=report.config(phase, **context))
+                        phase = 'write_validation'
+                        proposed = PlaceCopyBatch.model_validate(raw)
                         expected = {source["slot"] for source in batch}
                         copies = _keyed(proposed.stops, expected)
-                        review = CopyReview.model_validate(await reviewer.ainvoke({
+                        phase = 'place_copy_review'
+                        report.call(phase)
+                        raw = await reviewer.ainvoke({
                             **inputs, "proposed": proposed.model_dump_json(),
-                        }))
+                        }, config=report.config(phase, **context))
+                        phase = 'review_validation'
+                        review = CopyReview.model_validate(raw)
                     decisions = _keyed(review.stops, expected)
                     approved = [copy for slot, copy in copies.items()
                                 if decisions[slot].reason_supported and decisions[slot].memo_supported]
+                    if len(approved) != len(copies):
+                        report.fail('place_copy_review', 'unsupported', count=len(copies) - len(approved), **context)
                     accepted.extend(approved)
                     return approved
+                except asyncio.CancelledError as exc:
+                    report.fail(phase, 'cancelled', error=exc, **context)
+                    raise
                 except Exception as exc:  # noqa: BLE001 - optional prose cannot discard a verified course
+                    report.fail(phase, 'exception', error=exc, **context)
                     logger.warning("Place copy batch unavailable or rejected: %s", type(exc).__name__)
                     return []
 
             batches = [day_sources[offset:offset + COPY_BATCH_SIZE]
                        for day_sources in sources_by_day
                        for offset in range(0, len(day_sources), COPY_BATCH_SIZE)]
-            tasks = [asyncio.create_task(one(batch)) for batch in batches]
+            tasks = [asyncio.create_task(one(batch, index, 1)) for index, batch in enumerate(batches, 1)]
             try:
                 await asyncio.gather(*tasks)
             finally:
@@ -287,16 +326,24 @@ async def write_place_copy(
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-            retained.update(_checked_copy(accepted, sources, []))
+            retained.update(_checked_copy(accepted, sources, [], report, 1))
             accepted.clear()
+            validation_attempt = 2
             # All initial pipelines have finished. A serial retry queue cannot
             # contend with them or with another retry after a capacity failure.
-            for batch in batches:
+            for index, batch in enumerate(batches, 1):
                 pending = [source for source in batch if source["slot"] not in retained]
                 if pending:
+                    report.retries += 1
                     logger.info("Retrying grounded place copy for %d failed slots", len(pending))
-                    await one(pending)
-    except Exception:  # noqa: BLE001 - leave missing copy empty on setup errors or timeout
+                    await one(pending, index, 2)
+    except asyncio.CancelledError as exc:
+        report.fail('request', 'cancelled', error=exc)
+        report.finish(len(retained), cancelled=True)
+        raise
+    except Exception as exc:  # noqa: BLE001 - leave missing copy empty on setup errors or timeout
+        report.fail('budget' if isinstance(exc, TimeoutError) else 'setup',
+                    'timeout' if isinstance(exc, TimeoutError) else 'exception', error=exc)
         logger.warning("Optional grounded place copy unavailable")
     finally:
         if async_options is not None:
@@ -310,10 +357,11 @@ async def write_place_copy(
             except Exception:  # noqa: BLE001 - preserve cancellation and the original failure
                 logger.warning("Place copy client cleanup unavailable")
 
-    retained.update(_checked_copy(accepted, sources, list(retained.values())))
+    retained.update(_checked_copy(accepted, sources, list(retained.values()), report, validation_attempt))
     for day in course.itinerary.days:
         for stop in day.stops:
             copy = retained.get(f"{day.day}:{stop.sequence}:{stop.place.placeId}")
             if copy:
                 stop.reason, stop.memo = " ".join(copy.reason.split()), " ".join(copy.memo.split())
+    report.finish(len(retained))
     return course

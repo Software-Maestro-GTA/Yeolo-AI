@@ -416,7 +416,7 @@ async def test_real_graph_adds_airports_after_hotels_without_polluting_diversity
         {'request': request_data, 'attempt': 0}, stream_mode='updates',
     )]
     stages = [node for update in updates for node in update]
-    assert stages.index('finalize') < stages.index('attach_lodging') < stages.index('attach_airports') < stages.index('localize_display') < stages.index('finalize_course')
+    assert stages.index('finalize') < stages.index('attach_lodging') < stages.index('attach_airports') < stages.index('translate_display') < stages.index('generate_place_copy') < stages.index('finalize_course')
     result = updates[-1]['finalize_course']['course']
     assert [len(day.stops) for day in result.itinerary.days] == [7, 6]
     assert result.itinerary.days[0].stops[0].place.placeId == result.itinerary.days[-1].stops[-1].place.placeId == 'places/verified-nrt'

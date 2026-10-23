@@ -13,6 +13,7 @@ from app.core.llm import get_abto
 from app.schemas.course import CourseRequestSchema, CourseSchema
 from app.schemas.taste_profile import TasteProfileSchema
 from app.services import course_localization
+from app.services.course_display_diagnostics import DisplayDiagnostics
 
 USER_ID = "550e8400-e29b-41d4-a716-446655440000"
 
@@ -363,13 +364,16 @@ async def test_localization_cancellation_propagates_and_closes_gateway_clients(w
     clients = wire(respond)
     value = course()
     before = value.model_dump()
-    task = asyncio.create_task(course_localization.localize_course(request(), value))
+    report = DisplayDiagnostics('translation')
+    task = asyncio.create_task(course_localization.localize_course(request(), value, diagnostics=report))
     await asyncio.wait_for(entered.wait(), timeout=2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert value.model_dump() == before
     assert len(clients) == 2 and all(client.is_closed for client in clients)
+    assert report.status == 'cancelled'
+    assert any(item['phase'] == 'display_translation' and item['reason'] == 'cancelled' for item in report.failures)
 
 
 @pytest.mark.asyncio
@@ -378,12 +382,15 @@ async def test_optional_local_timer_returns_localized_course_instead_of_failure(
         await asyncio.Event().wait()
 
     clients = wire(respond)
+    report = DisplayDiagnostics('translation')
     result = await asyncio.wait_for(
-        course_localization.localize_course(request(), course(), timeout_seconds=0.2),
+        course_localization.localize_course(request(), course(), timeout_seconds=0.2, diagnostics=report),
         timeout=2,
     )
     assert result.itinerary.days[0].stops[0].reason == course().itinerary.days[0].stops[0].reason
     assert len(clients) == 2 and all(client.is_closed for client in clients)
+    assert report.status == 'failed'
+    assert any(item['phase'] == 'display_translation' and item['reason'] == 'timeout' for item in report.failures)
 
 
 @pytest.mark.parametrize(

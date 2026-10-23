@@ -19,6 +19,7 @@ from app.schemas.course import (
     TransportToNextSchema,
 )
 from app.schemas.course_anchors import AnchorCandidates
+from app.services.course_display_diagnostics import DisplayStageResult
 from app.services.course_diversity import (
     Experience,
 )
@@ -87,6 +88,7 @@ class CourseState(TypedDict, total=False):
     request: CourseRequestSchema
     destination: Destination
     deadline: float
+    display_diagnostics: dict[str, DisplayStageResult]
 
     # Daily model proposals and feedback for bounded retries.
     attempt: int

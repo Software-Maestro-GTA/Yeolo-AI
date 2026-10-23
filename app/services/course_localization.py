@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from app.core.config import settings
 from app.core.llm import get_abto
 from app.schemas.course import CourseRequestSchema, CourseSchema
+from app.services.course_display_diagnostics import DisplayDiagnostics
 from app.services.route_copy import NAVIGATION_RULES, NavigationCopy, RouteCopyPlan
 from app.services.route_guidance import guidance_matches_language
 
@@ -39,7 +40,8 @@ PROGRESS_MESSAGES = {
     'refill': '장소가 부족한 일차에 가까운 명소를 보충하고 있습니다.',
     'repair': '확인한 장소로 이동과 식사에 여유가 있는 대안 일정을 구성하고 있습니다.',
     'restore': '확인된 장소와 이동 경로를 유지하여 일정을 마무리하고 있습니다.',
-    'localize': '한국어로 추천 이유와 방문 팁을 정리하고 있습니다.',
+    'translate_display': '장소 이름과 이동 안내를 한국어로 정리하고 있습니다.',
+    'generate_place_copy': '장소별 추천 이유와 방문 팁을 작성하고 검토하고 있습니다.',
     'quote': '왕복 이동·숙박 비용을 확인하고 여행 예산을 배분하고 있습니다.',
     'quote_estimated': '예상 경비에 {items} 기준 추정액을 포함했습니다.',
     'budget_over': '현재 예상 경비 {total:,.0f}원은 입력하신 예산 {budget:,.0f}원보다 높습니다. 확인된 코스는 유지했습니다.',
@@ -122,6 +124,7 @@ async def localize_course(
     course: CourseSchema,
     *,
     timeout_seconds: float = LOCALIZATION_TIMEOUT_SECONDS,
+    diagnostics: DisplayDiagnostics | None = None,
 ) -> CourseSchema:
     """Translate existing copy and navigation without creating visit descriptions.
 
@@ -129,6 +132,7 @@ async def localize_course(
         request: Identity for the existing course-generation model capability.
         course: Complete verified itinerary; only mutable display text is updated.
         timeout_seconds: Optional remaining request budget; at most sixty seconds.
+        diagnostics: Optional internal report; never included in the public course.
     Returns:
         The same course object with all identities, prices and route facts kept.
         Translate foreign place names, mixed visit tips and
@@ -139,12 +143,18 @@ async def localize_course(
         asyncio.CancelledError: Caller cancellation; owned HTTP clients still close.
     """
     navigation = RouteCopyPlan(course, 'ko')
+    report = diagnostics if diagnostics is not None else DisplayDiagnostics('translation')
+    report.total = len(navigation.units)
     if not navigation.units:
+        report.finish(0)
         return _finish_display(request, course)
     sync_options = None
     async_options = None
+    phase = 'setup'
+    cancelled = False
     try:
         if math.isnan(timeout_seconds) or timeout_seconds <= 0.1:
+            phase = 'budget'
             raise TimeoutError("No remaining budget for optional localization")
         async with asyncio.timeout(min(LOCALIZATION_TIMEOUT_SECONDS, timeout_seconds)):
             abto = get_abto()
@@ -180,17 +190,22 @@ async def localize_course(
             with abto.with_context(
                 feature_id="course.candidates.generate", device_id=str(request.userId)
             ):
+                phase = 'display_translation'
+                report.call(phase)
                 result = await chain.ainvoke(
                     {
                         "source": json.dumps(source, ensure_ascii=False),
-                    }
+                    }, config=report.config(phase),
                 )
+            phase = 'translation_validation'
             raw = result.model_dump() if isinstance(result, BaseModel) else result
             if not isinstance(raw, dict) or not isinstance(raw.get('navigation'), list):
                 raise TypeError('Missing structured localization response')
             navigation.apply(navigation.response_texts(result))
             pending = navigation.pending_units()
             if pending:
+                report.fail(phase, 'untranslated_or_rejected', count=len(pending), attempt=1)
+                report.retries += 1
                 logger.warning('Optional display translation repair: language=%s pending=%d total=%d', request.language, len(pending), len(navigation.units))
                 repair_prompt = ChatPromptTemplate.from_messages([
                     ('system', NAVIGATION_RULES + ' A previous response omitted these slots or failed validation. '
@@ -206,13 +221,25 @@ async def localize_course(
                 # Share the original timeout and SDK clients; retry only rejected
                 # text once, with no additional Maps lookup or route generation.
                 with abto.with_context(feature_id='course.candidates.generate', device_id=str(request.userId)):
+                    phase = 'display_translation_repair'
+                    report.call(phase)
                     repaired = await repair_chain.ainvoke({
                         'source': json.dumps({'navigation': pending}, ensure_ascii=False),
-                    })
+                    }, config=report.config(phase, attempt=2))
+                phase = 'translation_validation'
                 pending_ids = {unit['id'] for unit in pending}
                 navigation.apply([item for item in navigation.response_texts(repaired) if item.id in pending_ids])
+                missing = navigation.pending_units()
+                if missing:
+                    report.fail(phase, 'untranslated_or_rejected', count=len(missing), attempt=2)
             return _finish_display(request, course)
+    except asyncio.CancelledError as error:
+        cancelled = True
+        report.fail(phase, 'cancelled', error=error)
+        raise
     except Exception as error:  # noqa: BLE001 - optional display copy never discards a verified course
+        reason = 'timeout' if isinstance(error, TimeoutError) else 'exception'
+        report.fail(phase, reason, error=error)
         logger.warning(
             "Optional course localization unavailable: language=%s error=%s",
             request.language,
@@ -235,3 +262,4 @@ async def localize_course(
                     sync_options["http_client"].close()
                 except Exception:  # noqa: BLE001 - preserve a valid itinerary or cancellation
                     logger.warning("Course localization client cleanup unavailable")
+            report.finish(report.total - len(navigation.pending_units()), cancelled=cancelled)
