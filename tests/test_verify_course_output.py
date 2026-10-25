@@ -23,7 +23,7 @@ def archived_output():
             stops.append({
                 'sequence': sequence, 'stayMinutes': 60,
                 'memo': '합성 테스트 장소', 'reason': '테스트 입력과 일정에 맞춘 방문', 'cost': 10000,
-                'place': {'placeId': f'synthetic-{index}-{sequence}', 'placeName': f'테스트 장소 {index}-{sequence}',
+                'place': {'googlePlaceId': f'synthetic-{index}-{sequence}', 'placeName': f'테스트 장소 {index}-{sequence}',
                           'category': category, 'latitude': 37.55, 'longitude': 126.98},
                 'transportToNext': {'type': 'none' if last else 'walking',
                                     'minutes': 0 if last else 10, 'distance': 0 if last else 800, 'memo': None},
@@ -115,10 +115,19 @@ def test_trip_dates_and_day_count_must_match_request(archived_output, mismatch):
 def test_duplicate_place_across_days_fails(archived_output):
     request, result = archived_output
     days = result['course']['itinerary']['days']
-    days[1]['stops'][0]['place']['placeId'] = days[0]['stops'][0]['place']['placeId']
+    days[1]['stops'][0]['place']['googlePlaceId'] = days[0]['stops'][0]['place']['googlePlaceId']
     report = validate(request, result)
     assert not report['passed']
     assert report['errors']
+
+
+def test_old_place_id_key_is_rejected_in_public_course_output(archived_output):
+    request, result = archived_output
+    place = result['course']['itinerary']['days'][0]['stops'][0]['place']
+    place['placeId'] = place.pop('googlePlaceId')
+    report = validate(request, result)
+    assert not report['passed']
+    assert 'Unexpected or missing place response fields' in report['errors']
 
 
 @pytest.mark.parametrize(('field', 'invalid'), [('type', 'none'), ('minutes', None), ('minutes', -1), ('minutes', 0), ('distance', None), ('distance', -1), ('distance', 0)])

@@ -97,8 +97,8 @@ def assert_complete_contract(payload):
                 assert isinstance(stop[key], str)
             # Missing reviewed copy is explicit; neither field is fabricated.
             place = stop["place"]
-            assert set(place) == {"placeId", "placeName", "category", "latitude", "longitude"}
-            assert all(isinstance(place[key], str) and place[key] for key in ("placeId", "placeName"))
+            assert set(place) == {"googlePlaceId", "placeName", "category", "latitude", "longitude"}
+            assert all(isinstance(place[key], str) and place[key] for key in ("googlePlaceId", "placeName"))
             assert place["category"] in CATEGORIES
             assert_number(place["latitude"])
             assert_number(place["longitude"])
@@ -235,8 +235,8 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
         assert all(stop['reason'].endswith('검토된 방문 경험') and stop['memo'].endswith('검토된 방문 행동') for stop in stops)
     else:
         assert all(stop['reason'] == stop['memo'] == '' for stop in stops)
-    assert len(stops) == 5 and len({stop["place"]["placeId"] for stop in stops}) == 5
-    assert {stop["place"]["placeId"] for stop in stops} == {
+    assert len(stops) == 5 and len({stop["place"]["googlePlaceId"] for stop in stops}) == 5
+    assert {stop["place"]["googlePlaceId"] for stop in stops} == {
         venue.place.placeId.removeprefix("places/") for venue in venues.values()
     }
     assert [stop["sequence"] for stop in stops] == [1, 2, 3, 4, 5]

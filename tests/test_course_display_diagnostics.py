@@ -149,7 +149,7 @@ async def test_split_nodes_keep_optional_failures_visible_without_changing_publi
         assert all(getattr(stop, retained_field) and not getattr(stop, rejected_field)
                    for day in final.itinerary.days for stop in day.stops)
     assert facts(final) == translated_facts
-    assert 'display_diagnostics' not in final.model_dump(context={'public_response': True})
+    assert 'display_diagnostics' not in final.model_dump(by_alias=True, context={'public_response': True})
     assert all(client.is_closed for client in clients)
     diagnostic_text = json.dumps(generated['display_diagnostics'], ensure_ascii=False)
     assert 'private-provider-key' not in diagnostic_text + caplog.text

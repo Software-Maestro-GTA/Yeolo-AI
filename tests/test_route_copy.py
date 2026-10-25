@@ -76,7 +76,7 @@ async def test_provider_preserves_original_navigation_without_public_fields_or_e
         await provider.route(*venues, mode='transit')
         assert route.navigationSource == navigation_source(payload)
         value.itinerary.days[0].stops[0].transportToNext = route
-        assert 'navigationSource' not in json.dumps(value.model_dump(context={'public_response': True}))
+        assert 'navigationSource' not in json.dumps(value.model_dump(by_alias=True, context={'public_response': True}))
     assert len(calls) == 1 and payload == before
     assert (route.type, route.distance, route.minutes, route.cost) == ('transit', 1250, 21, None)
 
@@ -265,7 +265,7 @@ async def test_foreign_place_names_and_legacy_memo_are_localized_together_on_pub
 
     wire(respond)
     result = await localize_course(request(language), value)
-    public = result.model_dump(context={'public_response': True})
+    public = result.model_dump(by_alias=True, context={'public_response': True})
     stops = public['itinerary']['days'][0]['stops']
     assert facts(result) == before and len(calls) == 1
     assert stops[0]['place']['placeName'] == '루츠 부티크 호텔'

@@ -506,7 +506,7 @@ async def test_real_graph_uses_joint_candidates_without_supplier_inventory(
     llm.assert_awaited_once()
     quotes.quote.assert_awaited_once()
     localizer.assert_awaited_once()
-    public = course.model_dump(context={'public_response': True})
+    public = course.model_dump(by_alias=True, context={'public_response': True})
     assert public['itinerary']['days'][0]['stops'][0]['place']['category'] == 'AIRPORT'
     assert public['itinerary']['days'][0]['stops'][0]['cost'] == arrival_cost
     assert public['itinerary']['days'][0]['stops'][-1]['place']['category'] == 'LODGING'
