@@ -41,7 +41,7 @@ class CityRecommendation(SummaryModel):
 
     countryName: str = Field(..., min_length=1, max_length=60, description="추천 국가명")
     cityName: str = Field(..., min_length=1, max_length=60, description="추천 도시명")
-    reason: str = Field(..., min_length=1, max_length=160, description="추천 이유")
+    reason: str = Field(..., min_length=1, max_length=60, description="취향과 도시 특징을 연결한 한 문장 추천 이유 (공백 포함 최대 60자)")
 
 
 class SummaryCopy(SummaryModel):

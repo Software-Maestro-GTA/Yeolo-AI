@@ -970,6 +970,54 @@ async def test_actual_graph_root_callback_finishes_before_complete(request_data,
     assert error_roots == []
 
 
+@pytest.mark.asyncio
+async def test_successful_graph_followed_by_cleanup_cancellation_closes_actual_http_stream(
+    request_data, graph_dependencies, mocker,
+):
+    """A successful LangGraph trace cannot leave HTTP open if later cleanup is cancelled."""
+    from httpx import ASGITransport, AsyncClient
+    from langchain_core.callbacks import AsyncCallbackHandler
+
+    from app.agent.course_graph import build_course_graph
+    from app.core.config import settings
+    from app.main import app
+
+    ended = asyncio.Event()
+
+    class Observer(AsyncCallbackHandler):
+        async def on_chain_end(self, outputs, *, run_id, parent_run_id=None, **kwargs):
+            if parent_run_id is None:
+                ended.set()
+
+    async def cancelled_cleanup(*args):
+        assert ended.is_set()
+        asyncio.current_task().cancel()
+        await asyncio.sleep(0)
+
+    provider, history, _, _, _ = graph_dependencies
+    provider.__aenter__ = AsyncMock(return_value=provider)
+    provider.__aexit__ = AsyncMock(side_effect=cancelled_cleanup)
+    graph = build_course_graph(provider, history).with_config({'callbacks': [Observer()]})
+    mocker.patch('app.agent.course_graph.VerifiedMapsProvider', return_value=provider)
+    mocker.patch('app.agent.course_graph.CourseHistory', return_value=history)
+    mocker.patch('app.services.course_service.CourseHistory', return_value=history)
+    mocker.patch('app.agent.course_graph.build_course_graph', return_value=graph)
+    mocker.patch.object(settings, 'INTERNAL_API_KEY', 'offline-api-key')
+    mocker.patch.object(settings, 'GOOGLE_MAPS_API_KEY', 'offline-maps-key')
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await asyncio.wait_for(client.post(
+            '/internal/ai/courses', json=request_data.model_dump(mode='json'),
+            headers={'X-Internal-Api-Key': 'offline-api-key'},
+        ), timeout=2)
+    assert response.status_code == 200 and ended.is_set()
+    assert 'event: progress' in response.text
+    assert '여행 코스를 완성하지 못했습니다.' in response.text
+    assert 'event: complete' not in response.text
+    assert 'CancelledError' not in response.text
+    provider.__aexit__.assert_awaited_once()
+
+
 def candidate_pool_repair_fixture(request_data, graph_dependencies, include_second_attraction=True):
     """Build three days where only the failed day's candidate types complement on retry."""
     from app.agent.course_state import DraftDay
