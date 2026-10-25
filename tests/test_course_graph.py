@@ -886,7 +886,7 @@ async def test_complete_waits_for_graph_natural_exhaustion_and_cleanup(request_d
         assert (await anext(stream))[0] == 'progress'
         event, payload = await anext(stream)
         assert event == 'complete'
-        assert payload['course'] == course.model_dump(context={'public_response': True})
+        assert payload['course'] == course.model_dump(by_alias=True, context={'public_response': True})
         assert exhausted.is_set()
         assert cleaned.is_set()
         provider.__aexit__.assert_awaited_once()
@@ -1387,7 +1387,7 @@ async def test_verified_course_serializes_under_current_api_and_passes_output_va
 
     mocker.patch('app.agent.course_nodes.write_place_copy', side_effect=approved_copy)
     course = (await build_course_graph(provider, history).ainvoke({'request': request_data, 'attempt': 0}))['course']
-    output = {'completed': True, 'events': [{'event': 'progress', 'data': {'step': 'GENERATING_ROUTE', 'message': '검증 중'}}, {'event': 'complete', 'data': {}}], 'course': course.model_dump(context={'public_response': True})}
+    output = {'completed': True, 'events': [{'event': 'progress', 'data': {'step': 'GENERATING_ROUTE', 'message': '검증 중'}}, {'event': 'complete', 'data': {}}], 'course': course.model_dump(by_alias=True, context={'public_response': True})}
     report = validate_output(request_data.model_dump(), output)
     assert report['passed'], report['errors']
     assert not any('추정 도보' in stop.transportToNext.memo for stop in course.itinerary.days[0].stops[:-1])

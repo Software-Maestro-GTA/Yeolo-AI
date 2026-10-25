@@ -129,10 +129,10 @@ async def test_arrival_and_departure_surround_all_visits_and_charge_only_transfe
         ('places/day-3-visit-4', 'places/verified-nrt'),
     }
     assert all(call.kwargs.get('departure_time') is None for call in provider.route.await_args_list)
-    public = result.model_dump(context={'public_response': True})
+    public = result.model_dump(by_alias=True, context={'public_response': True})
     for stop in (public['itinerary']['days'][0]['stops'][0], public['itinerary']['days'][-1]['stops'][-1]):
         assert stop['place']['category'] == 'AIRPORT'
-        assert stop['place']['placeId'] == 'verified-nrt'
+        assert stop['place']['googlePlaceId'] == 'verified-nrt'
         assert 'arrivalTime' not in stop
 
 
@@ -191,7 +191,7 @@ async def test_round_trip_fare_splits_without_losing_odd_won_or_recharging_total
     assert (arrival.cost, departure.cost) == (200001, 200000)
     assert arrival.cost + departure.cost == quotes.flight.amount_krw
     assert result.totalCost == course.totalCost + 4600
-    public = result.model_dump(context={'public_response': True})
+    public = result.model_dump(by_alias=True, context={'public_response': True})
     assert public['itinerary']['days'][0]['stops'][0]['cost'] == 200001
     assert public['itinerary']['days'][-1]['stops'][-1]['cost'] == 200000
 

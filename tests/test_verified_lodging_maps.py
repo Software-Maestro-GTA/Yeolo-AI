@@ -59,7 +59,7 @@ async def test_named_lodging_uses_free_id_and_one_essentials_detail(lodging_payl
     assert metrics['skus']['place_details_essentials']['requests'] == 1
     stop = StopSchema(sequence=6, stayMinutes=30, memo='숙박 안내', reason='숙소 추천',
                       cost=100_000, place=hotel.place, transportToNext={'type': 'none'})
-    wire = stop.model_dump(context={'public_response': True})
+    wire = stop.model_dump(by_alias=True, context={'public_response': True})
     assert wire['place']['category'] == 'LODGING'
     assert PlaceSchema.model_validate(wire['place']).category == 'LODGING'
     assert wire['cost'] == 100_000

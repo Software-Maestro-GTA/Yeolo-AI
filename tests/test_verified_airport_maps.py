@@ -77,10 +77,10 @@ async def test_airport_outside_city_uses_correlated_free_ids_one_essentials_and_
     assert set(metrics['skus']) == {'text_search_ids', 'place_details_essentials'}
     stop = StopSchema(sequence=1, stayMinutes=60, memo='입국 안내', reason='여행의 출발점',
                       cost=0, place=airport.place, transportToNext={'type': 'none'})
-    public_place = stop.model_dump(context={'public_response': True})['place']
+    public_place = stop.model_dump(by_alias=True, context={'public_response': True})['place']
     assert public_place['category'] == 'AIRPORT'
     assert public_place['placeName'] == airport_identity.name
-    assert public_place['placeId'] == 'verified-airport'
+    assert public_place['googlePlaceId'] == 'verified-airport'
     assert PlaceSchema.model_validate(public_place).category == 'AIRPORT'
 
 

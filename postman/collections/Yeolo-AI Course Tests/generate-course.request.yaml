@@ -140,7 +140,7 @@ scripts:
           memo: {type: ["string", "null"], maxLength: 240}
         });
         const place = object({
-          placeId: {type: "string", minLength: 1, pattern: "^(?!places/).+"}, placeName: text,
+          googlePlaceId: {type: "string", minLength: 1, pattern: "^(?!places/).+"}, placeName: text,
           category: {enum: ["FOOD", "CAFE", "SPOT", "CULTURE", "NATURE", "ACTIVITY", "NIGHTLIFE"]},
           latitude: {type: "number", minimum: -90, maximum: 90},
           longitude: {type: "number", minimum: -180, maximum: 180}
@@ -180,7 +180,7 @@ scripts:
             days.forEach(day => day.stops.forEach((stop, i) => pm.expect(stop.sequence).to.equal(i + 1)));
           });
           pm.test("No duplicate place IDs, including across days", () => {
-            const ids = stops.map(stop => stop.place.placeId.replace(/^places\//, ""));
+            const ids = stops.map(stop => stop.place.googlePlaceId.replace(/^places\//, ""));
             pm.expect(new Set(ids).size).to.equal(ids.length);
           });
           pm.test("Unknown transfers keep null metrics and memo", () => {

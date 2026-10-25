@@ -110,7 +110,7 @@ async def test_two_day_course_uses_only_ids_details_essentials_and_actual_routes
     assert state['trip_quotes'].lodging.status == 'estimated'
     assert state['trip_quotes'].flight.status == 'not_applicable'
     assert course.totalCost == 60000 + 60000
-    wire = course.model_dump(context={'public_response': True})
+    wire = course.model_dump(by_alias=True, context={'public_response': True})
     public = CourseSchema.model_validate(wire)
     assert {stop.place.placeId for day in public.itinerary.days for stop in day.stops} == {
         f'venue-{day_index}-{index}' for day_index in range(2) for index in range(5)

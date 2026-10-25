@@ -1,7 +1,7 @@
 """Connect verified arrival/departure airports to an otherwise complete course.
 
-Flight prices already belong to totalCost. Airport endpoints display outbound
-and return allocations of that amount, adding only measured ground-transfer
+Flight prices already belong to totalCost. Airport endpoints display actual
+directional fares when available, otherwise legacy allocations, adding measured ground-transfer
 fares to the total. They do not imply separately quoted tickets or a booking.
 """
 
@@ -30,7 +30,7 @@ AIRPORT_TIMEOUT_SECONDS = 12.0
 
 
 def _airport_stop(airport: VerifiedPlace, *, arrival: bool, cost: int) -> StopSchema:
-    """Display an allocated flight cost, not a separately quoted one-way ticket."""
+    """Display a verified directional fare or an allocated planning amount."""
     return StopSchema(
         sequence=1, stayMinutes=60 if arrival else 120, reason="", memo="",
         cost=cost, place=airport.place.model_copy(deep=True),
@@ -68,9 +68,9 @@ async def attach_airports(
         course. A verified airport survives an expired transfer budget with
         unknown metrics. Existing visits, lodging and history are preserved.
         Measured airport transfers remain valid without a per-link duration cap.
-        The round-trip amount is split across the two endpoints for display;
-        an odd KRW goes to the outbound leg. This never adds airfare twice or
-        claims the supplier returned separate one-way prices.
+        Separate one-way quotes retain their actual outbound/return amounts.
+        Legacy totals and planning estimates are split for display, with an odd
+        KRW on the outbound leg. Endpoint costs never add airfare twice.
     Raises:
         asyncio.CancelledError: Caller cancellation after transfer tasks join.
     """
@@ -140,11 +140,13 @@ async def attach_airports(
         # and finalize has charged that amount once. Endpoint costs only expose
         # the outbound/return allocations; they cannot change the quoted total.
         one_way, remainder = divmod(quotes.flight.amount_krw or 0, 2)
-        arrival = _airport_stop(airport, arrival=True, cost=one_way + remainder)
+        outbound = quotes.flight.outbound_amount_krw if quotes.flight.outbound_amount_krw is not None else one_way + remainder
+        inbound = quotes.flight.return_amount_krw if quotes.flight.return_amount_krw is not None else one_way
+        arrival = _airport_stop(airport, arrival=True, cost=outbound)
         arrival.transportToNext = arrival_route
         first.stops.insert(0, arrival)
         last.stops[-1].transportToNext = departure_route
-        last.stops.append(_airport_stop(airport, arrival=False, cost=one_way))
+        last.stops.append(_airport_stop(airport, arrival=False, cost=inbound))
         for day in (first, last):
             for index, stop in enumerate(day.stops, start=1):
                 stop.sequence = index
