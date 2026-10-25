@@ -131,12 +131,12 @@ def test_intermediate_route_requires_confirmed_positive_metrics(archived_output,
 
 
 @pytest.mark.parametrize('field', ['reason', 'memo'])
-def test_partial_visit_copy_pair_fails(archived_output, field):
+def test_partial_visit_copy_is_usable_with_warning(archived_output, field):
     request, result = archived_output
     result['course']['itinerary']['days'][0]['stops'][0][field] = '   '
     report = validate(request, result)
-    assert not report['passed']
-    assert report['errors']
+    assert report['passed'] and report['errors'] == []
+    assert any('approved text retained' in warning for warning in report['warnings'])
 
 
 def test_spot_group_does_not_infer_shopping_malls_from_names(archived_output):

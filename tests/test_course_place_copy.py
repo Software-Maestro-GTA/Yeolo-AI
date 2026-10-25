@@ -325,12 +325,60 @@ async def test_real_sdk_writes_then_independently_reviews_only_verified_evidence
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('advice', [
+    '조용한 분위기를 유지하며 다른 이용자를 배려해 둘러보세요.',
+    '대표 메뉴가 있는지 현장 안내를 확인하고 취향에 맞게 선택해 보세요.',
+    '무료 입장 여부와 예약 조건을 확인한 뒤 방문 계획을 조정해 보세요.',
+    '상설 전시가 있다면 공개된 관람 안내에 따라 관심 있는 주제부터 살펴보세요.',
+])
+async def test_reviewed_conditional_advice_is_not_rejected_by_keyword(copy_request, copy_course, wire, advice):
+    output = proposed()
+    output['stops'][0]['memo'] = advice
+    calls, _ = wire(lambda request: copy_response(request, output))
+    report = DisplayDiagnostics('place_copy')
+    await course_place_copy.write_place_copy(copy_request, copy_course, diagnostics=report)
+    first = copy_course.itinerary.days[0].stops[0]
+    assert (first.reason, first.memo) == (output['stops'][0]['reason'], advice)
+    assert len(calls) == 2 and report.status == 'success' and report.retries == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('rejected_field', ['reason', 'memo'])
+async def test_field_review_preserves_approved_text_when_retry_fails(copy_request, copy_course, wire, rejected_field):
+    output = proposed()
+    approved_field = 'memo' if rejected_field == 'reason' else 'reason'
+    writers = []
+
+    def respond(request):
+        content = json.loads(request.content)['messages'][-1]['content']
+        if 'Proposed copy:' not in content:
+            writers.append(json.loads(content.split('Evidence:\n')[1]))
+            if len(writers) == 2:
+                return httpx.Response(503, json={'error': {'message': 'offline', 'type': 'server_error'}})
+        review = reviewed(output)
+        review['stops'][0][f'{rejected_field}_supported'] = False
+        return copy_response(request, output, review)
+
+    calls, _ = wire(respond)
+    before = facts(copy_course)
+    report = DisplayDiagnostics('place_copy')
+    await course_place_copy.write_place_copy(copy_request, copy_course, diagnostics=report)
+    first = copy_course.itinerary.days[0].stops[0]
+    assert getattr(first, rejected_field) == ''
+    assert getattr(first, approved_field) == output['stops'][0][approved_field]
+    assert writers[1][0]['approved_copy'] == {approved_field: output['stops'][0][approved_field]}
+    assert facts(copy_course) == before and len(calls) == 3
+    assert (report.completed, report.total, report.status) == (1, 2, 'partial')
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("unsupported", [
     "왕실 유물을 전시하는 박물관이에요.", "무료 입장과 예약 없는 방문이 가능해요.",
     "옥상 정원이 아름다운 숨은 명소예요.", "이곳의 대표 메뉴는 알레르기 걱정 없이 먹을 수 있어요.",
+    "소장품과 상설 전시를 감상해 보세요.", "조용한 분위기가 보장되는 박물관이에요.",
     "사용자가 좋아하는 자연 산책을 위해 이 박물관을 골랐어요.",
 ])
-async def test_unsupported_writer_claims_rejected_by_review_leave_rejected_slot_empty_and_keep_valid_peer(
+async def test_unsupported_writer_claims_leave_reason_empty_and_keep_approved_memo_and_peer(
     copy_request, copy_course, wire, unsupported,
 ):
     output = proposed()
@@ -339,7 +387,8 @@ async def test_unsupported_writer_claims_rejected_by_review_leave_rejected_slot_
     review["stops"][0]["reason_supported"] = False
     wire(lambda request: copy_response(request, output, review))
     original = copy_course.itinerary.days[0].stops[0].model_dump()
-    original["reason"] = original["memo"] = ""
+    original["reason"] = ""
+    original["memo"] = output['stops'][0]['memo']
     result = await course_place_copy.write_place_copy(copy_request, copy_course)
     assert result.itinerary.days[0].stops[0].model_dump() == original
     assert result.itinerary.days[0].stops[1].memo == output["stops"][1]["memo"]
@@ -348,9 +397,7 @@ async def test_unsupported_writer_claims_rejected_by_review_leave_rejected_slot_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unsafe", [
     "입장료는 1000원이에요.", "안내는 https://unverified.test 를 참고하세요.",
-    "A famous museum with a rooftop garden.", "왕실 유물을 전시하는 곳이에요.",
-    "소장품과 상설 전시를 감상해 보세요.", "무료 입장과 예약 없이 방문이 가능해요.",
-    "옥상 정원에서 조용한 분위기를 즐겨 보세요.",
+    "A famous museum with a rooftop garden.",
     "초록공원의 산책 경험을 이곳에서 더해 보세요.", "...",
 ])
 async def test_local_checks_reject_new_numbers_links_and_wrong_language_even_if_reviewer_approves(
@@ -362,6 +409,7 @@ async def test_local_checks_reject_new_numbers_links_and_wrong_language_even_if_
     original = ""
     result = await course_place_copy.write_place_copy(copy_request, copy_course)
     assert result.itinerary.days[0].stops[0].memo == original
+    assert result.itinerary.days[0].stops[0].reason == output['stops'][0]['reason']
 
 
 @pytest.mark.asyncio
@@ -391,7 +439,9 @@ async def test_name_swapped_repeated_templates_are_not_applied(copy_request, cop
     before = copy_course.model_dump()
     for day in before["itinerary"]["days"]:
         for stop in day["stops"]:
-            stop["reason"] = stop["memo"] = ""
+            stop["reason"] = ""
+            stop["memo"] = next(item['memo'] for item in output['stops']
+                                if item['slot'].endswith(stop['place']['placeId']))
     await course_place_copy.write_place_copy(copy_request, copy_course)
     assert copy_course.model_dump() == before
 
@@ -468,7 +518,7 @@ async def test_failed_pipeline_recovers_on_one_retry(copy_request, copy_course, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["review", "local_guard"])
-@pytest.mark.parametrize("retry_copy", ["valid", "duplicate"])
+@pytest.mark.parametrize("retry_copy", ["valid", "duplicate", "duplicate_memo"])
 async def test_retry_targets_failed_slots_only_and_preserves_approved_peer(
     copy_request, copy_course, wire, failure, retry_copy,
 ):
@@ -477,6 +527,8 @@ async def test_retry_targets_failed_slots_only_and_preserves_approved_peer(
     initial["stops"][0]["memo"] = "입장료는 1000원이에요."
     if retry_copy == "duplicate":
         fixed["stops"][0]["reason"] = fixed["stops"][1]["reason"].replace("초록공원", "한빛박물관")
+    elif retry_copy == 'duplicate_memo':
+        fixed['stops'][0]['memo'] = fixed['stops'][1]['memo']
 
     def respond(request):
         content = json.loads(request.content)["messages"][-1]["content"]
@@ -495,10 +547,10 @@ async def test_retry_targets_failed_slots_only_and_preserves_approved_peer(
     assert writers[1][0]["slot"] == "1:1:places/verified-1"
     first, second = copy_course.itinerary.days[0].stops
     assert (second.reason, second.memo) == (initial["stops"][1]["reason"], initial["stops"][1]["memo"])
-    if retry_copy == "valid":
-        assert (first.reason, first.memo) == (fixed["stops"][0]["reason"], fixed["stops"][0]["memo"])
-    else:
-        assert first.reason == first.memo == ""
+    # A retry cannot replace an already approved reason, even with a duplicate.
+    expected_memo = '' if retry_copy == 'duplicate_memo' else fixed['stops'][0]['memo']
+    assert (first.reason, first.memo) == (initial["stops"][0]["reason"], expected_memo)
+    assert writers[1][0]['approved_copy'] == {'reason': initial['stops'][0]['reason']}
     assert facts(copy_course) == before and len(calls) == 4
     assert all(client.is_closed for client in clients)
 
@@ -741,6 +793,6 @@ async def test_long_unsupported_detail_is_rejected_while_grounded_peer_survives(
     await course_place_copy.write_place_copy(copy_request, copy_course)
     first, second = copy_course.itinerary.days[0].stops
     assert len(output['stops'][0]['reason']) > 100
-    assert first.reason == first.memo == ''
+    assert first.reason == '' and first.memo == output['stops'][0]['memo']
     assert second.reason == output['stops'][1]['reason']
     assert facts(copy_course) == before

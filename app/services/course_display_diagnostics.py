@@ -86,8 +86,8 @@ class DisplayDiagnostics:
         """Count a named chain invocation attempt."""
         self.requests[phase] = self.requests.get(phase, 0) + 1
 
-    def finish(self, completed: int, *, cancelled: bool = False) -> None:
-        """Finalize and log counts; recovered failures remain in the report."""
+    def finish(self, completed: int, *, cancelled: bool = False, partial: bool = False) -> None:
+        """Log complete units, allowing usable fields within incomplete pairs."""
         self.completed = completed
         if cancelled:
             self.status = 'cancelled'
@@ -96,7 +96,7 @@ class DisplayDiagnostics:
         elif completed == self.total:
             self.status = 'success'
         else:
-            self.status = 'partial' if completed else 'failed'
+            self.status = 'partial' if completed or partial else 'failed'
         self.elapsed_seconds = round(time.monotonic() - self._started, 3)
         logger.info('Course display result: stage=%s result=%s', self.stage, self.snapshot())
 

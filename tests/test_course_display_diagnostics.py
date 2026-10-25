@@ -109,7 +109,8 @@ async def test_split_nodes_keep_optional_failures_visible_without_changing_publi
     assert translation['status'] == expected_translation
     assert translation['retries'] == int(failure in {'translation_repair', 'translation_recovered'})
     copy_failed = failure in {'writing', 'review', 'validation', 'grounding'}
-    assert copy['status'] == ('failed' if copy_failed else 'success')
+    expected_copy = 'partial' if failure in {'validation', 'grounding'} else 'failed' if copy_failed else 'success'
+    assert copy['status'] == expected_copy
     assert (copy['total'], copy['completed'], copy['missing']) == (5, 0 if copy_failed else 5, 5 if copy_failed else 0)
     assert copy['retries'] == int(copy_failed or failure == 'writing_retry')
     if failure and failure != 'no_translation_needed':
@@ -142,6 +143,11 @@ async def test_split_nodes_keep_optional_failures_visible_without_changing_publi
         'display_stage': 'place_copy', 'day': 1, 'batch': 1, 'attempt': 1,
     }
     final = updates[-1]['finalize_course']['course']
+    if failure in {'validation', 'grounding'}:
+        retained_field = 'reason' if failure == 'validation' else 'memo'
+        rejected_field = 'memo' if failure == 'validation' else 'reason'
+        assert all(getattr(stop, retained_field) and not getattr(stop, rejected_field)
+                   for day in final.itinerary.days for stop in day.stops)
     assert facts(final) == translated_facts
     assert 'display_diagnostics' not in final.model_dump(context={'public_response': True})
     assert all(client.is_closed for client in clients)

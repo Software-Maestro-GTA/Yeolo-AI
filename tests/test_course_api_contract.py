@@ -96,7 +96,6 @@ def assert_complete_contract(payload):
             for key in ("memo", "reason"):
                 assert isinstance(stop[key], str)
             # Missing reviewed copy is explicit; neither field is fabricated.
-            assert bool(stop['memo']) == bool(stop['reason'])
             place = stop["place"]
             assert set(place) == {"placeId", "placeName", "category", "latitude", "longitude"}
             assert all(isinstance(place[key], str) and place[key] for key in ("placeId", "placeName"))
@@ -118,7 +117,7 @@ def assert_complete_contract(payload):
     (None, None, False), ('taxi_only', None, False), ('empty', None, False), ('503', None, False), ('malformed', None, False),
     ('403', None, False), ('timeout', None, False), (None, 'stale_candidate', False),
     (None, 'malformed_candidate', False), (None, 'wrong_id_candidate', False),
-    (None, 'stale_destination', False), (None, None, True),
+    (None, 'stale_destination', False), (None, None, True), (None, None, 'reason_only'),
 ])
 async def test_production_endpoint_graph_and_serializer_emit_exact_public_contract(
     api_request, graph_dependencies, mocker, route_failure, place_failure, copy_available,
@@ -131,7 +130,7 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
             for day in course.itinerary.days:
                 for stop in day.stops:
                     stop.reason = f'{stop.place.placeName}의 검토된 방문 경험'
-                    stop.memo = f'{stop.place.placeName}의 검토된 방문 행동'
+                    stop.memo = '' if copy_available == 'reason_only' else f'{stop.place.placeName}의 검토된 방문 행동'
             return course
 
         mocker.patch('app.agent.course_nodes.write_place_copy', side_effect=approved_copy)
@@ -230,7 +229,9 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
     assert course["startDate"] == course["itinerary"]["days"][0]["date"] == api_request["tripCondition"]["startDate"]
     assert course["totalDays"] == len(course["itinerary"]["days"]) == 1
     stops = course["itinerary"]["days"][0]["stops"]
-    if copy_available:
+    if copy_available == 'reason_only':
+        assert all(stop['reason'].endswith('검토된 방문 경험') and stop['memo'] == '' for stop in stops)
+    elif copy_available:
         assert all(stop['reason'].endswith('검토된 방문 경험') and stop['memo'].endswith('검토된 방문 행동') for stop in stops)
     else:
         assert all(stop['reason'] == stop['memo'] == '' for stop in stops)
