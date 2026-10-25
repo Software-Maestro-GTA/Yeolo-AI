@@ -183,6 +183,23 @@ def test_summary_copy_is_nonempty_and_bounded(field, value):
         TasteSummaryDraft.model_validate(data)
 
 
+@pytest.mark.parametrize("schema", [TasteSummaryDraft, TasteSummary])
+@pytest.mark.parametrize("length", [60, 61])
+def test_city_reason_display_budget_applies_to_draft_and_response(schema, length):
+    _, _, context = three_interest_context()
+    draft = draft_for(json.dumps(context.model_input()))
+    data = (draft if schema is TasteSummaryDraft else assemble_taste_summary(draft, context)).model_dump()
+    reason = "가" * (length - 1) + "."
+    data["recommendCity"]["reason"] = reason
+    if length == 60:
+        assert schema.model_validate(data).recommendCity.reason == reason
+    else:
+        with pytest.raises(ValidationError) as raised:
+            schema.model_validate(data)
+        assert raised.value.errors()[0]["loc"] == ("recommendCity", "reason")
+        assert raised.value.errors()[0]["type"] == "string_too_long"
+
+
 @pytest.mark.parametrize('header', ['ko-KR, en;q=0.5', 'en;q=0.2, ja;q=0.9', '*', 'invalid instruction'])
 def test_legacy_language_header_always_selects_korean(header):
     assert language_from_header(header) == 'ko'
