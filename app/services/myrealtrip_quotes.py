@@ -25,6 +25,8 @@ from typing import Any, Literal, Self
 
 import httpx
 
+from app.schemas.course_anchors import AirportCandidate
+
 logger = logging.getLogger(__name__)
 MCP_URL = 'https://mcp-servers.myrealtrip.com/mcp'
 PARTNER_BASE_URL = 'https://partner-ext-api.myrealtrip.com'
@@ -51,6 +53,8 @@ class QuoteRequest:
         flight_budget_krw: Optional flight allowance; an overage triggers a cheaper fallback.
         lodging_budget_krw: Optional whole-stay allowance, never a fabricated price cap.
         origin_airport: Optional IATA departure override; otherwise the provider default.
+        separate_flights: Search two economy one-way fares instead of a round-trip ticket.
+        destination_airport: Proposed exact airport, corroborated by supplier autocomplete.
     Raises:
         ValueError: Invalid destination identity, dates or verified region names.
     """
@@ -68,6 +72,8 @@ class QuoteRequest:
     flight_budget_krw: float | None = None
     lodging_budget_krw: float | None = None
     origin_airport: str | None = None
+    separate_flights: bool = False
+    destination_airport: AirportCandidate | None = None
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r'[A-Z]{2}', self.country_code) or not self.city.strip():
@@ -84,6 +90,9 @@ class QuoteRequest:
         if self.origin_airport is not None and (not isinstance(self.origin_airport, str)
                                                or not re.fullmatch(r'[A-Z]{3}', self.origin_airport)):
             raise ValueError('Invalid quote origin airport')
+        if type(self.separate_flights) is not bool or (self.destination_airport is not None
+                                                     and not isinstance(self.destination_airport, AirportCandidate)):
+            raise ValueError('Invalid flight search options')
         for amount in (self.flight_budget_krw, self.lodging_budget_krw):
             if amount is not None and (isinstance(amount, bool) or not isinstance(amount, (int, float))
                                        or not math.isfinite(amount) or amount < 0):
@@ -143,6 +152,7 @@ class QuoteItem:
     Estimated amounts require a nonempty source and a calendar reference date
     in YYYY-MM-DD format. Invalid amounts or estimate provenance raise ValueError.
     Missing amounts are unknown rather than free.
+    Directional amounts, when supplied, must both be verified and sum to the total.
     """
 
     status: Literal['available', 'estimated', 'unavailable', 'not_applicable']
@@ -152,6 +162,8 @@ class QuoteItem:
     reference_date: str = ''
     lodging_identity: LodgingIdentity | None = None
     airport_identity: AirportIdentity | None = None
+    outbound_amount_krw: int | None = None
+    return_amount_krw: int | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {'available', 'estimated', 'unavailable', 'not_applicable'}:
@@ -169,6 +181,11 @@ class QuoteItem:
         if self.airport_identity is not None and (not isinstance(self.airport_identity, AirportIdentity)
                                                   or self.status == 'not_applicable'):
             raise ValueError('Invalid quote airport identity')
+        legs = (self.outbound_amount_krw, self.return_amount_krw)
+        if any(amount is not None for amount in legs) and (
+                self.status != 'available' or any(type(amount) is not int or amount <= 0 for amount in legs)
+                or sum(legs) != self.amount_krw):
+            raise ValueError('Invalid separate flight amounts')
         if self.status == 'estimated':
             if not self.source.strip() or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', self.reference_date):
                 raise ValueError('Estimated quote requires a source and ISO reference date')
@@ -248,7 +265,7 @@ def _amount(value: object) -> int | None:
 
 
 def _flight_amount(data: dict[str, Any], arguments: dict[str, Any]) -> int:
-    """Read actual matching round-trip item totals, never unrelated summaries."""
+    """Read matching dated route totals for a round trip or a single direction."""
     result = data.get('result')
     if data.get('success') is not True or not isinstance(result, dict):
         raise QuoteUnavailable('provider_error')
@@ -265,7 +282,8 @@ def _flight_amount(data: dict[str, Any], arguments: dict[str, Any]) -> int:
             continue
         if any(route.get(field) != arguments[field] for field in ('origin', 'destination')):
             continue
-        if any(travel.get(field) != arguments[field] for field in ('departDate', 'returnDate')):
+        date_fields = ('departDate', 'returnDate') if arguments['tripType'] == 'ROUND_TRIP' else ('departDate',)
+        if any(travel.get(field) != arguments[field] for field in date_fields):
             continue
         if price.get('currency') != 'KRW':
             unsupported_currency = True
@@ -574,18 +592,32 @@ class MyRealTripQuoteProvider:
             airport, city, country = entry.get('airport'), entry.get('city'), entry.get('country')
             if not all(isinstance(value, dict) for value in (airport, city, country)):
                 continue
-            country_codes = {code for code in (entry.get('isoCode'), country.get('code')) if isinstance(code, str) and code}
-            city_names = [city.get('koName'), city.get('enName')]
-            if country_codes != {request.country_code}:
+            # MRT uses different namespaces: isoCode='US', country.code='USA'.
+            # A conflicting ISO2 is invalid, but ISO3 is not an ISO2 mismatch.
+            iso, country_code = entry.get('isoCode'), country.get('code')
+            expected = iso if iso is not None else country_code
+            if expected != request.country_code:
                 continue
+            if country_code is not None and (not isinstance(country_code, str)
+                    or not re.fullmatch(r'[A-Z]{2,3}', country_code)
+                    or (len(country_code) == 2 and country_code != expected)):
+                continue
+            city_names = [city.get('koName'), city.get('enName')]
             expected_cities = {_normalized(name) for name in (request.city, request.verified_city_name) if name}
-            if not any(isinstance(name, str) and _normalized(name) in expected_cities for name in city_names):
+            if request.destination_airport is None and not any(
+                    isinstance(name, str) and _normalized(name) in expected_cities for name in city_names):
                 continue
             code = airport.get('code')
             if not isinstance(code, str) or not re.fullmatch(r'[A-Z]{3}', code) or code == origin:
                 continue
+            if request.destination_airport is not None and code != request.destination_airport.iata_code:
+                continue
             names = [value.strip() if isinstance(value, str) else ''
                      for value in (airport.get('koName'), airport.get('enName'))]
+            if code == city.get('code') and any(_normalized(name) == _normalized(city_name)
+                    for name in names if name for city_name in city_names if isinstance(city_name, str) and city_name):
+                # NYC is an aggregate city entry, not the actual JFK/EWR airport.
+                continue
             identity = AirportIdentity(code, names[0] or names[1], request.country_code, names[1] or None) if any(names) else None
             previous = options.get(code)
             if previous is not None and identity is not None and previous != identity:
@@ -600,7 +632,16 @@ class MyRealTripQuoteProvider:
         proximity. A city without a confirmed airport simply has no flight quote;
         the optional quote boundary preserves the verified itinerary.
         """
-        options = self._airport_options(await self._lookup_airports(request.verified_city_name or request.city), request)
+        proposal = request.destination_airport
+        keywords = ([proposal.iata_code, proposal.name, proposal.english_name] if proposal is not None
+                    else [request.verified_city_name or request.city])
+        options = {}
+        for keyword in dict.fromkeys(keywords):
+            if not keyword or len(keyword) > 100:
+                continue
+            options = self._airport_options(await self._lookup_airports(keyword), request)
+            if options:
+                break
         if not options:
             raise QuoteUnavailable('unverified_airport')
         return options
@@ -614,6 +655,8 @@ class MyRealTripQuoteProvider:
         if origin is None:
             raise QuoteUnavailable('missing_origin')
         airports = await self._airports(request)
+        if request.separate_flights:
+            return await self._separate_flights(request, airports, deadline, cleanup_margin=cleanup_margin)
         # Retain a sole verified airport even if fare lookup is unavailable.
         # Evaluate uniqueness before the bounded price-search candidate limit.
         sole_identity = next(iter(airports.values())) if len(airports) == 1 else None
@@ -657,6 +700,70 @@ class MyRealTripQuoteProvider:
             if asyncio.get_running_loop().time() >= expires - margin:
                 break
         return best if best is not None else replace(results[0], airport_identity=sole_identity)
+
+    async def _separate_flights(
+        self, request: QuoteRequest, airports: dict[str, AirportIdentity | None], deadline: float | None,
+        *, cleanup_margin: float | None,
+    ) -> QuoteItem:
+        """Choose the cheapest sum of two real economy fares for the same airport."""
+        origin = request.origin_airport or self.origin_airport
+        tool = 'searchDomesticFlights' if request.country_code == 'KR' else 'searchInternationalFlights'
+        passengers = {'adults': self.adults, 'children': self.children}
+        if request.country_code != 'KR':
+            passengers['infants'] = 0
+
+        async def direction(start: str, end: str, day: date) -> int:
+            arguments = {
+                'tripType': 'ONE_WAY', 'origin': start, 'destination': end,
+                'departDate': day.isoformat(), 'passengers': passengers,
+                'cabinClass': 'ECONOMY', 'maxResults': 5,
+            }
+            return _flight_amount(await self._call_tool(tool, arguments), arguments)
+
+        async def pair(destination: str) -> QuoteItem:
+            tasks = [asyncio.create_task(direction(start, end, day)) for start, end, day in (
+                (origin, destination, request.start_date), (destination, origin, request.end_date),
+            )]
+            try:
+                outbound, inbound = await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            return self._remember_item('flight', QuoteItem(
+                'available', outbound + inbound, airport_identity=airports[destination],
+                outbound_amount_krw=outbound, return_amount_krw=inbound,
+            ))
+
+        results = await self._bounded_items(
+            [pair(code) for code in list(airports)[:MAX_AIRPORT_CANDIDATES]], deadline,
+            cleanup_margin=cleanup_margin,
+        )
+        priced = [item for item in results if item.status == 'available']
+        if priced:
+            return min(priced, key=lambda item: item.amount_krw)
+        sole = next(iter(airports.values())) if len(airports) == 1 else None
+        return replace(results[0], airport_identity=sole)
+
+    async def quote_flight(self, request: QuoteRequest, *, deadline: float | None = None) -> QuoteItem:
+        """Requote a Maps-selected airport without repeating accommodation lookups.
+
+        Args:
+            request: Exact dates, country and proposed code to verify with MRT.
+            deadline: Shared anchor deadline; provider timeout also applies.
+        Returns:
+            Verified directional prices or an unavailable outcome. No price is invented.
+        Raises:
+            asyncio.CancelledError: Caller cancellation after child tasks close.
+        """
+        expires = min(asyncio.get_running_loop().time() + self.timeout_seconds,
+                      deadline if deadline is not None else float('inf'))
+        try:
+            async with asyncio.timeout_at(expires):
+                return await self._safe_item(self._flight(request, expires))
+        except TimeoutError:
+            return QuoteItem('unavailable', reason='timeout')
 
     @staticmethod
     def _preferred_deadline(deadline: float) -> float:

@@ -51,7 +51,7 @@ from app.schemas.course import (
     ItinerarySchema,
     TransportToNextSchema,
 )
-from app.schemas.course_anchors import AnchorCandidates
+from app.schemas.course_anchors import AirportCandidate, AnchorCandidates
 from app.services.course_airports import attach_airports as attach_course_airports
 from app.services.course_anchor_selection import (
     MAX_ANCHOR_LOOKUPS,
@@ -109,6 +109,7 @@ from app.services.course_routing import (
 from app.services.course_tags import verified_course_tags
 from app.services.myrealtrip_quotes import (
     MyRealTripQuoteProvider,
+    QuoteItem,
     QuoteRequest,
 )
 from app.services.travel_cost_baselines import baseline_trip_quotes, merge_trip_quotes
@@ -256,7 +257,8 @@ class CourseGraphNodes:
                 ),
                 verified_country_name=state["destination"].verified_country_name or None,
                 verified_city_name=state["destination"].verified_city_name or None,
-                preferred_cabin="BUSINESS" if trip.budget > 0 else "ECONOMY",
+                preferred_cabin="ECONOMY",
+                separate_flights=True,
                 preferred_stay_star_rating="fivestar" if trip.budget > 0 else None,
                 flight_budget_krw=trip.budget * FLIGHT_BUDGET_SHARE,
                 lodging_budget_krw=trip.budget * LODGING_BUDGET_SHARE,
@@ -373,11 +375,28 @@ class CourseGraphNodes:
         quotes = state.get("trip_quotes") or baseline_trip_quotes(
             state["request"], state["destination"], adults=settings.MYREALTRIP_ADULTS,
         )
+        flight_lookup = None
+        if isinstance(self.quotes, MyRealTripQuoteProvider):
+            async def lookup_selected_flight(airport: AirportCandidate) -> QuoteItem:
+                trip, destination = state['request'].tripCondition, state['destination']
+                start = date.fromisoformat(trip.startDate)
+                return await self.quotes.quote_flight(QuoteRequest(
+                    country_code=destination.country_code,
+                    country=trip.destinationCountry, city=trip.destinationCity,
+                    start_date=start, end_date=start + timedelta(days=trip.totalDays - 1),
+                    verified_country_name=destination.verified_country_name or None,
+                    verified_city_name=destination.verified_city_name or None,
+                    origin_airport=settings.MYREALTRIP_DOMESTIC_ORIGIN_AIRPORT
+                        if destination.country_code == 'KR' else None,
+                    separate_flights=True, destination_airport=airport,
+                ), deadline=state.get('deadline', float('inf')) - 28.0)
+            flight_lookup = lookup_selected_flight
         selected = await resolve_course_anchors(
             state["request"], state["destination"], quotes,
             candidates, self.provider,
             deadline=state.get("deadline", float("inf")) - 28.0,
             previous=previous,
+            flight_lookup=flight_lookup,
         )
         return {"anchor_selection": selected, "trip_quotes": selected.quotes}
 

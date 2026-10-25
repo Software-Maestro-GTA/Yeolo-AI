@@ -215,6 +215,55 @@ async def test_different_airport_precedes_repeat_supplier_candidate(selection_ca
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('recovery', ['available', 'wrong_airport', 'outage', 'timeout'])
+async def test_selected_generated_airport_gets_own_fares_without_losing_location(selection_case, mocker, recovery):
+    request, destination, quotes, candidates, provider = selection_case
+    provider.search_airport.return_value = None
+    mocker.patch('app.services.course_anchor_selection.ANCHOR_LOOKUP_TIMEOUT_SECONDS', .2)
+    fare = QuoteItem('available', 1637500,
+                     airport_identity=replace(airport_identity(), code='NRT' if recovery == 'wrong_airport' else 'HND'),
+                     outbound_amount_krw=781000, return_amount_krw=856500)
+    lookup = AsyncMock(return_value=fare)
+    if recovery == 'outage':
+        lookup.side_effect = RuntimeError('offline')
+    elif recovery == 'timeout':
+        async def hang(candidate):
+            await asyncio.Event().wait()
+        lookup.side_effect = hang
+
+    result = await resolve_course_anchors(request, destination, quotes, candidates, provider, flight_lookup=lookup)
+    assert result.airport.place.placeId == 'places/verified-hnd'
+    assert result.quotes.lodging == quotes.lodging
+    lookup.assert_awaited_once()
+    assert lookup.await_args.args[0].iata_code == 'HND'
+    if recovery == 'available':
+        assert result.quotes.flight == fare
+    else:
+        assert result.quotes.flight == baseline_trip_quotes(request, destination).flight
+
+
+@pytest.mark.asyncio
+async def test_anchor_node_passes_generated_code_and_separate_dates_to_flight_recovery(selection_case, mocker):
+    request, destination, quotes, candidates, provider = selection_case
+    provider.search_airport.return_value = None
+    supplier = mocker.Mock(spec=MyRealTripQuoteProvider)
+    fare = QuoteItem('available', 1637500, airport_identity=replace(airport_identity(), code='HND'),
+                     outbound_amount_krw=781000, return_amount_krw=856500)
+    supplier.quote_flight = AsyncMock(return_value=fare)
+    mocker.patch('app.agent.course_nodes._progress')
+    nodes = CourseGraphNodes(provider, mocker.Mock(), supplier)
+    result = await nodes.resolve_anchors({
+        'request': request, 'destination': destination, 'trip_quotes': quotes, 'anchor_candidates': candidates,
+    })
+    sent = supplier.quote_flight.await_args.args[0]
+    assert sent.destination_airport.iata_code == 'HND' and sent.separate_flights
+    assert sent.start_date.isoformat() == request.tripCondition.startDate
+    assert (sent.end_date - sent.start_date).days == 2
+    assert result['trip_quotes'].flight == fare
+    supplier.quote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_identical_supplier_airport_candidate_does_not_repeat_lookup(selection_case):
     """The same IATA, name and English alias are already covered by supplier verification."""
     request, destination, quotes, candidates, provider = selection_case
