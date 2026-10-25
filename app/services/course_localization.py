@@ -209,6 +209,8 @@ async def localize_course(
                 logger.warning('Optional display translation repair: language=%s pending=%d total=%d', request.language, len(pending), len(navigation.units))
                 repair_prompt = ChatPromptTemplate.from_messages([
                     ('system', NAVIGATION_RULES + ' A previous response omitted these slots or failed validation. '
+                     'If a slot includes previous_text and validation_error, correct that rejected draft using '
+                     'the original text as the source of truth; return only id and text, never those diagnostic fields. '
                      'Translate every remaining foreign name inside each instruction. Return complete natural sentences '
                      'in Korean, preserving protected tokens and every maneuver. '
                      'Do not introduce numeric month values when transliterating a street name. '

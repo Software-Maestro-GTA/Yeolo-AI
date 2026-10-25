@@ -125,6 +125,9 @@ async def test_gemini_gateway_request_preserves_schema_parameters_and_identity(o
         assert set(city_schema['required']) == {'countryName', 'cityName', 'reason'}
         assert set(city_schema['properties']) == {'countryName', 'cityName', 'reason'}
         assert all('enum' not in field for field in city_schema['properties'].values())
+        assert city_schema['properties']['reason']['maxLength'] == 60
+        assert '최대 60자의 한 문장' in body['messages'][0]['content']
+        assert '줄바꿈 없이 작성하세요' in body['messages'][0]['content']
     assert not {'temperature', 'top_p', 'top_k', 'candidate_count', 'generation_config', 'thinking_budget',
                 'parallel_tool_calls', 'tools', 'stream_options', 'metadata', 'store'} & body.keys()
     allowed = {'model', 'messages', 'stream', 'response_format', 'max_completion_tokens', 'reasoning_effort'}

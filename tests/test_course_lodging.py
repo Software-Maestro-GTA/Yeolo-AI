@@ -127,9 +127,9 @@ async def test_verified_lodging_follows_five_visits_only_on_overnight_days(lodgi
     for call, day in zip(provider.route.await_args_list, original.itinerary.days, strict=False):
         assert call.args[0].place.placeId == day.stops[-1].place.placeId
         assert call.args[1].place.placeId == 'places/verified-hotel'
-    public = result.model_dump(context={'public_response': True})
+    public = result.model_dump(by_alias=True, context={'public_response': True})
     assert [day['stops'][-1]['place']['category'] for day in public['itinerary']['days'][:-1]] == ['LODGING', 'LODGING']
-    assert public['itinerary']['days'][0]['stops'][-1]['place']['placeId'] == 'verified-hotel'
+    assert public['itinerary']['days'][0]['stops'][-1]['place']['googlePlaceId'] == 'verified-hotel'
 
 
 @pytest.mark.asyncio
@@ -319,7 +319,7 @@ async def test_remaining_day_time_checks_faster_taxi_when_first_mode_cannot_fit(
 async def test_public_course_retains_actual_transfers_without_inventing_clock_or_limit(lodging_case, minutes):
     """Missing internal timing must not introduce an arbitrary duration policy."""
     request, original, destination, quotes, provider = lodging_case
-    course = CourseSchema.model_validate(original.model_dump(context={'public_response': True}))
+    course = CourseSchema.model_validate(original.model_dump(by_alias=True, context={'public_response': True}))
     assert not hasattr(course.itinerary.days[0].stops[-1], 'arrivalTime')
     provider.route.return_value = InternalTransportSchema(
         type='transit', distance=65000, minutes=minutes, cost=5000,

@@ -52,6 +52,9 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
     async def sse_generator() -> AsyncGenerator[str]:
         queue: asyncio.Queue = asyncio.Queue(maxsize=8)
         finished = object()
+        failure_event = ('progress', {
+            'step': 'GENERATING_ROUTE', 'message': progress_message(request.language, 'failure'),
+        })
 
         async def produce() -> None:
             try:
@@ -62,28 +65,39 @@ async def generate_course_service(request: CourseRequestSchema) -> AsyncGenerato
                 raise
             except Exception as error:  # noqa: BLE001 - sanitize the provider boundary
                 logger.error('Course generation failed after stream start: %s', type(error).__name__)
-                await queue.put(('progress', {'step': 'GENERATING_ROUTE', 'message': progress_message(request.language, 'failure')}))
+                await queue.put(failure_event)
             finally:
-                # A cancelled producer must not block forever on a full queue.
-                if not asyncio.current_task().cancelling():
-                    await queue.put(finished)
+                # Wake the reader even on cancellation, without blocking on a
+                # full queue. Buffered events drain before QueueShutDown.
+                queue.shutdown()
 
         producer = asyncio.create_task(produce())
         try:
             while True:
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.QueueShutDown:
+                    item = finished
                 except TimeoutError:
                     yield ': keep-alive\n\n'
                     continue
+                terminal = item is finished or item[0] == 'complete'
+                if terminal:
+                    # Join before publishing, so closing a completed stream cannot cancel it.
+                    try:
+                        await producer
+                    except asyncio.CancelledError:
+                        if asyncio.current_task().cancelling():
+                            raise
+                        # Internal generation cancellation must close the SSE
+                        # response, while client cancellation still propagates.
+                        logger.error('Course generation cancelled before stream completion')
+                        item = failure_event
                 if item is finished:
                     break
                 event, payload = item
-                if event == 'complete':
-                    # Join before publishing, so closing a completed stream cannot cancel it.
-                    await producer
                 yield f'event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n'
-                if event == 'complete':
+                if terminal:
                     break
         finally:
             if not producer.done():

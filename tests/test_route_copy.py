@@ -12,6 +12,7 @@ from app.agent.tools.verified_maps import (
     VerifiedMapsProvider,
     VerifiedPlace,
 )
+from app.services.course_display_diagnostics import DisplayDiagnostics
 from app.services.course_localization import localize_course
 from app.services.route_copy import PROTECTED, NavigationText, RouteCopyPlan
 from app.services.route_guidance import navigation_source
@@ -75,7 +76,7 @@ async def test_provider_preserves_original_navigation_without_public_fields_or_e
         await provider.route(*venues, mode='transit')
         assert route.navigationSource == navigation_source(payload)
         value.itinerary.days[0].stops[0].transportToNext = route
-        assert 'navigationSource' not in json.dumps(value.model_dump(context={'public_response': True}))
+        assert 'navigationSource' not in json.dumps(value.model_dump(by_alias=True, context={'public_response': True}))
     assert len(calls) == 1 and payload == before
     assert (route.type, route.distance, route.minutes, route.cost) == ('transit', 1250, 21, None)
 
@@ -264,7 +265,7 @@ async def test_foreign_place_names_and_legacy_memo_are_localized_together_on_pub
 
     wire(respond)
     result = await localize_course(request(language), value)
-    public = result.model_dump(context={'public_response': True})
+    public = result.model_dump(by_alias=True, context={'public_response': True})
     stops = public['itinerary']['days'][0]['stops']
     assert facts(result) == before and len(calls) == 1
     assert stops[0]['place']['placeName'] == '루츠 부티크 호텔'
@@ -429,6 +430,9 @@ def test_complete_transit_memo_protects_alphabetic_line_codes_and_all_numeric_to
     ('Str. des 17. Juni/B2/B5에 진입', ['17', 'B2/B5']),
     ('M19(U Mehringdamm 방면)', ['M19']),
     ('G09에서 33m를 걸어가세요.', ['G09', '33m']),
+    ('CITY ROAD/B96 (CITY OFFICE 표지)', ['B96']),
+    ('B96/CITY ROAD 방면', ['B96']),
+    ('US-101과 DN-HC0039 방면', ['US-101', 'DN-HC0039']),
 ])
 def test_identifiers_next_to_korean_particles_and_separators_remain_complete(source, expected):
     assert [match.group() for match in PROTECTED.finditer(source)] == expected
@@ -453,3 +457,97 @@ def test_hidden_road_identifiers_resolve_unfinished_korean_particles(code, parti
     plan = RouteCopyPlan(value, 'ko')
     plan.apply([NavigationText(id='n0', text='우회전하여 도로/[[F0]](으)로 들어서세요.')])
     assert route.memo == f'우회전하여 도로/{code}{particle} 들어서세요.'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('structured', [True, False])
+async def test_reported_driving_sign_is_repaired_in_korean_with_road_numbers_preserved(wire, structured):
+    original = ('북서쪽으로 출발. 좌측 도로 유지. 약간 좌회전하여 東二番丁通り/国道286号에 진입 '
+                '(Pref. Office/City Office/国道4号 표지) 목적지는 길의 왼쪽에 있습니다.')
+    translated = ('북서쪽으로 출발해 좌측 도로를 유지하세요. 약간 좌회전하여 히가시니반초 거리/국도 [[F0]]호에 '
+                  '진입하세요. 현청/시청/국도 [[F1]]호 표지를 따라가면 목적지는 길 왼쪽에 있습니다.')
+    value = course()
+    route = value.itinerary.days[0].stops[0].transportToNext = InternalTransportSchema(
+        type='driving', distance=20800, minutes=32, memo=original,
+        navigationSource=[{'kind': 'instruction', 'text': original}] if structured else [],
+    )
+    before = facts(value)
+    calls = []
+
+    def respond(outgoing):
+        body = json.loads(outgoing.content)
+        source = json.loads(body['messages'][-1]['content'].split('Verified source copy:\n')[1])
+        calls.append(source)
+        assert 'road names, road-type words and every direction-sign label' in body['messages'][0]['content']
+        unit, = source['navigation']
+        assert '国道[[F0]]号' in unit['text'] and '国道[[F1]]号' in unit['text']
+        assert '286' not in unit['text'] and 'Pref. Office/City Office' in unit['text']
+        if len(calls) == 1:
+            return completion({'navigation': [{'id': unit['id'], 'text': unit['text']}]})
+        assert unit['previous_text'] == unit['text']
+        assert unit['validation_error'] == 'Navigation retains incompatible prose'
+        return completion({'navigation': [{'id': unit['id'], 'text': translated}]})
+
+    clients = wire(respond)
+    report = DisplayDiagnostics('translation')
+    result = await localize_course(request(), value, diagnostics=report)
+    assert facts(result) == before and len(calls) == 2
+    assert route.memo == translated.replace('[[F0]]', '286').replace('[[F1]]', '4')
+    assert all(text not in route.memo for text in ('東二番丁', '国道', 'Pref.', 'Office', '[[F'))
+    assert report.status == 'success' and report.retries == 1
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.asyncio
+async def test_labelled_stop_codes_and_supplied_rail_line_survive_translated_names_and_signs(wire):
+    value = course()
+    route = value.itinerary.days[0].stops[0].transportToNext = InternalTransportSchema(
+        type='transit', distance=1250, minutes=21,
+        navigationSource=[{'kind': 'transit', 'start': 'Victoria Coach Station (Stop W)',
+                           'end': 'Museum (Stop TB)', 'line': 'RER', 'direction': 'CITY OFFICE'}],
+    )
+    before = facts(value)
+    calls = []
+
+    def respond(outgoing):
+        source = json.loads(json.loads(outgoing.content)['messages'][-1]['content'].split('Verified source copy:\n')[1])
+        calls.append(source)
+        unit, = source['navigation']
+        assert unit['text'] == ('Victoria Coach Station (Stop [[F0]])에서 [[F1]](CITY OFFICE 방면)을 타고 '
+                                'Museum (Stop [[F2]])에서 내리세요.')
+        return completion({'navigation': [{'id': unit['id'], 'text':
+            '빅토리아 코치 정류장(정류장 [[F0]])에서 [[F1]](시청 방면)을 타고 박물관(정류장 [[F2]])에서 내리세요.'}]})
+
+    clients = wire(respond)
+    report = DisplayDiagnostics('translation')
+    result = await localize_course(request(), value, diagnostics=report)
+    assert route.memo == '빅토리아 코치 정류장(정류장 W)에서 RER(시청 방면)을 타고 박물관(정류장 TB)에서 내리세요.'
+    assert facts(result) == before and len(calls) == 1
+    assert report.status == 'success' and report.retries == 0
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize('label', ['Stop', 'Platform', '정류장'])
+def test_legacy_stop_identifier_is_protected_only_in_its_source_label_context(label):
+    value = course()
+    route = value.itinerary.days[0].stops[0].transportToNext
+    route.memo = f'Museum ({label} W)에서 CITY ROAD/B96 (CITY OFFICE 표지) 방면으로 이동하세요.'
+    plan = RouteCopyPlan(value, 'ko')
+    assert plan.protected['n0'] == ['W', 'B96']
+    assert 'CITY ROAD/[[F1]] (CITY OFFICE 표지)' in plan.units[0]['text']
+    plan.apply([NavigationText(id='n0', text='박물관(정류장 [[F0]])에서 시티 로드/[[F1]]의 시청 표지 방면으로 이동하세요.')])
+    assert route.memo == '박물관(정류장 W)에서 시티 로드/B96의 시청 표지 방면으로 이동하세요.'
+
+
+@pytest.mark.parametrize('invalid', [
+    '박물관(정류장 X)에서 시청으로 이동하세요.',
+    '박물관(정류장 [[F0]])에서 CITY OFFICE로 이동하세요.',
+])
+def test_stop_identifier_protection_still_rejects_changed_codes_and_untranslated_signs(invalid):
+    value = course()
+    route = value.itinerary.days[0].stops[0].transportToNext
+    original = route.memo = 'Museum (Stop W)에서 CITY OFFICE로 이동하세요.'
+    plan = RouteCopyPlan(value, 'ko')
+    plan.apply([NavigationText(id='n0', text=invalid)])
+    assert route.memo == original and len(plan.pending_units()) == 1
+    assert plan.pending_units()[0]['previous_text'] == invalid

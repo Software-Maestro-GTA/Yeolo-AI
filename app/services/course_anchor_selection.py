@@ -16,7 +16,11 @@ from app.agent.tools.verified_maps import (
 )
 from app.core.config import settings
 from app.schemas.course import CourseRequestSchema
-from app.schemas.course_anchors import AnchorCandidates, NamedLodgingCandidate
+from app.schemas.course_anchors import (
+    AirportCandidate,
+    AnchorCandidates,
+    NamedLodgingCandidate,
+)
 from app.services.myrealtrip_quotes import QuoteItem, TripQuotes
 from app.services.place_categories import map_actual_place_category
 from app.services.travel_cost_baselines import baseline_trip_quotes
@@ -58,6 +62,7 @@ async def resolve_course_anchors(
     *,
     deadline: float | None = None,
     previous: ResolvedCourseAnchors | None = None,
+    flight_lookup: Callable[[AirportCandidate], Awaitable[QuoteItem]] | None = None,
 ) -> ResolvedCourseAnchors:
     """Resolve supplier locations or bounded generated alternatives in parallel.
 
@@ -70,6 +75,7 @@ async def resolve_course_anchors(
         deadline: Optional shared absolute event-loop deadline.
         previous: Completed request-local selection. Keep successful locations
             and try only new airport codes within the original two-attempt cap.
+        flight_lookup: Optional exact-code price recovery for a verified generated airport.
     Returns:
         Verified locations and reconciled quotes. Alternative hotels use policy
         estimates; actual airfare survives only for the same supplier IATA code.
@@ -86,6 +92,22 @@ async def resolve_course_anchors(
     prior_codes = set(previous.airport_attempts) if previous is not None else set()
     airport_attempts = list(previous.airport_attempts) if previous is not None else []
 
+    async def fare_for(candidate: AirportCandidate, fallback: QuoteItem) -> QuoteItem:
+        """Keep the verified airport even if its optional price recovery expires."""
+        if fallback.status == 'available' or flight_lookup is None:
+            return fallback
+        try:
+            async with asyncio.timeout_at(expires - .05):
+                recovered = await flight_lookup(candidate)
+            if (isinstance(recovered, QuoteItem) and recovered.status == 'available'
+                    and recovered.airport_identity is not None
+                    and recovered.airport_identity.code == candidate.iata_code
+                    and recovered.airport_identity.country_code == destination.country_code):
+                return recovered
+        except Exception:  # noqa: BLE001 - price failure cannot discard a verified airport
+            logger.info('Selected airport fare unavailable: code=%s', candidate.iata_code)
+        return fallback
+
     async def airport() -> tuple[VerifiedPlace | None, QuoteItem]:
         if previous is not None and previous.airport is not None:
             return previous.airport, previous.quotes.flight
@@ -99,7 +121,12 @@ async def resolve_course_anchors(
                     venue = await _optional_lookup(lambda: provider.search_airport(identity, destination), 'AIRPORT')
                     if venue is not None:
                         logger.info('Trip airport selected: source=supplier code=%s', identity.code)
-                        return venue, quotes.flight
+                        fare = quotes.flight
+                        if len(identity.name) <= 160 and len(identity.english_name or '') <= 160:
+                            fare = await fare_for(AirportCandidate(
+                                name=identity.name, english_name=identity.english_name or '', iata_code=identity.code,
+                            ), fare)
+                        return venue, fare
                 # A repeat of the supplier airport must not consume the last
                 # slot before a different generated airport can be checked.
                 ordered = sorted(candidates.airports, key=lambda item: identity is not None and item.iata_code == identity.code)
@@ -120,7 +147,8 @@ async def resolve_course_anchors(
                         same_airport = (identity is not None and identity.country_code == destination.country_code
                                         and identity.code == candidate.iata_code)
                         logger.info('Trip airport selected: source=generated code=%s', candidate.iata_code)
-                        return venue, quotes.flight if same_airport else baseline.flight
+                        fare = quotes.flight if same_airport else baseline.flight
+                        return venue, await fare_for(candidate, fare)
         except TimeoutError:
             logger.info('Optional airport verification deadline reached')
         except Exception:  # noqa: BLE001 - malformed optional metadata cannot invalidate visits

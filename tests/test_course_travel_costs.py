@@ -94,7 +94,7 @@ async def test_required_costs_precede_draft_and_survive_provider_failure(
     assert stages.index('prepare') < stages.index('quote_trip') < stages.index('draft')
     assert final.totalCost == expected_trip_cost + 70000 + 8 * 1200
     assert all(len(day.stops) >= 5 for day in final.itinerary.days)
-    payload = {'course': final.model_dump(context={'public_response': True})}
+    payload = {'course': final.model_dump(by_alias=True, context={'public_response': True})}
     assert_complete_contract(payload)
     estimated_items = tuple(name for name, amount in (('transport', flight), ('lodging', lodging)) if amount is None)
     assert any(item['message'] == progress_message('ko', 'quote_estimated', items=estimated_items)

@@ -72,7 +72,7 @@ def validate_output(request: dict, result: dict) -> dict:
             for raw_stop in raw_day['stops']:
                 if set(raw_stop) != {'sequence', 'stayMinutes', 'memo', 'reason', 'cost', 'place', 'transportToNext'}:
                     errors.append('Unexpected or missing stop response fields')
-                if set(raw_stop['place']) != {'placeId', 'placeName', 'category', 'latitude', 'longitude'}:
+                if set(raw_stop['place']) != {'googlePlaceId', 'placeName', 'category', 'latitude', 'longitude'}:
                     errors.append('Unexpected or missing place response fields')
                 if set(raw_stop['transportToNext']) != {'type', 'distance', 'minutes', 'memo'}:
                     errors.append('Unexpected or missing transport response fields')
@@ -116,7 +116,7 @@ def validate_output(request: dict, result: dict) -> dict:
             food_stops += int(place.category == 'FOOD')
             has_reason, has_memo = bool(stop.reason.strip()), bool(stop.memo.strip())
             if has_reason != has_memo:
-                errors.append(f'{label}: incomplete visit copy pair')
+                warnings.append(f'{label}: one visit copy field unavailable; approved text retained')
             elif not has_reason:
                 warnings.append(f'{label}: grounded visit copy unavailable')
             route = stop.transportToNext

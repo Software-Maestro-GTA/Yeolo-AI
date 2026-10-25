@@ -615,9 +615,9 @@
       "PlaceSchema": {
         "description": "Verified identity and map marker only; rich details stay in Google Maps.",
         "properties": {
-          "placeId": {
+          "googlePlaceId": {
             "description": "검증된 Google Maps Place ID",
-            "title": "Placeid",
+            "title": "Googleplaceid",
             "type": "string"
           },
           "placeName": {
@@ -653,7 +653,7 @@
           }
         },
         "required": [
-          "placeId",
+          "googlePlaceId",
           "placeName",
           "category",
           "latitude",

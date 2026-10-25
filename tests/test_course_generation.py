@@ -413,6 +413,47 @@ async def test_service_complete_allows_producer_to_finish_normally(mock_env, val
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('queued', [0, 12])
+@pytest.mark.parametrize('completion_queued', [False, True])
+async def test_cancelled_generation_ends_sse_even_with_full_queue_or_pending_complete(
+    mock_env, valid_course_request_payload, sample_course_schema, mocker, queued, completion_queued,
+):
+    """An independently cancelled graph must not leave an open heartbeat-only response."""
+    from app.schemas.course import CourseRequestSchema
+    from app.services.course_service import generate_course_service
+
+    cancelled = asyncio.Event()
+
+    async def cancelled_generation(request, *, deadline):
+        try:
+            for index in range(queued):
+                yield 'progress', {'step': 'GENERATING_ROUTE', 'message': f'검증 {index}'}
+            if completion_queued:
+                yield 'complete', {'course': sample_course_schema.model_dump()}
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+        finally:
+            cancelled.set()
+
+    mocker.patch('app.services.course_service.stream_course_generation', side_effect=cancelled_generation)
+    stream = await generate_course_service(CourseRequestSchema.model_validate(valid_course_request_payload))
+    first = [await anext(stream)] if queued else []
+    # Pause the consumer so a fast producer can fill the bounded queue.
+    if queued:
+        await asyncio.sleep(0)
+
+    async def consume():
+        return [frame async for frame in stream]
+
+    frames = first + await asyncio.wait_for(consume(), timeout=.5)
+    assert cancelled.is_set()
+    assert len(frames) == queued + 1
+    assert all(frame.startswith('event: progress') for frame in frames)
+    assert '여행 코스를 완성하지 못했습니다.' in frames[-1]
+    assert all('CancelledError' not in frame for frame in frames)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('storage_error', [
     PermissionError(errno.EACCES, 'Permission denied', '.data'),
     sqlite3.OperationalError('attempt to write a readonly database: /private/db'),

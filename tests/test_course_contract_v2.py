@@ -157,9 +157,9 @@ async def test_budget_policy_reaches_initial_draft_and_travel_quotes(
         {'request': request_data, 'attempt': 0},
     )
     quoted = quotes.quote.await_args.args[0]
-    # Affordability comes from destination/date-specific quotes, not a global
-    # KRW band. A cheap upper-class product can also be good value locally.
-    assert quoted.preferred_cabin == 'BUSINESS'
+    # Airfare now searches the lowest economy fare in each direction,
+    # independently of the activity/hotel budget tier.
+    assert quoted.preferred_cabin == 'ECONOMY' and quoted.separate_flights
     assert quoted.preferred_stay_star_rating == 'fivestar'
     assert quoted.flight_budget_krw == pytest.approx(budget * .35)
     assert quoted.lodging_budget_krw == pytest.approx(budget * .25)

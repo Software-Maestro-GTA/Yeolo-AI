@@ -160,7 +160,7 @@ async def stream_course_generation(
                             completed = {
                                 "course": value["finalize_course"][
                                     "course"
-                                ].model_dump(context={"public_response": True})
+                                ].model_dump(by_alias=True, context={"public_response": True})
                             }
     finally:
         metrics = getattr(provider, "metrics", None)

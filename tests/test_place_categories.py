@@ -37,9 +37,9 @@ def test_actual_provider_types_map_to_requested_app_groups(actual, expected):
 def test_public_codes_survive_validation_and_repeated_serialization(code):
     place = PlaceSchema(placeId='id', placeName='장소', category=code,
                         latitude=37.5, longitude=127.)
-    wire = place.model_dump(context={'public_response': True})
+    wire = place.model_dump(by_alias=True, context={'public_response': True})
     assert wire['category'] == code
-    assert PlaceSchema.model_validate(wire).model_dump(context={'public_response': True}) == wire
+    assert PlaceSchema.model_validate(wire).model_dump(by_alias=True, context={'public_response': True}) == wire
 
 
 @pytest.mark.parametrize('raw_type', ['museum', 'restaurant', 'hospital', 'UNKNOWN'])
@@ -61,10 +61,10 @@ def test_public_serialization_preserves_internal_meal_and_tourism_evidence(categ
     core_before = _core_visit((proposal, venue))
     stop = StopSchema(sequence=1, stayMinutes=60, memo='방문 팁', reason='추천 이유',
                       place=raw, transportToNext={'type': 'none'})
-    wire = stop.model_dump(context={'public_response': True})
-    assert wire['place']['placeId'] == 'id'
+    wire = stop.model_dump(by_alias=True, context={'public_response': True})
+    assert wire['place']['googlePlaceId'] == 'id'
     assert wire['place']['category'] == map_actual_place_category(category)
-    assert set(wire['place']) == {'placeId', 'placeName', 'category', 'latitude', 'longitude'}
+    assert set(wire['place']) == {'googlePlaceId', 'placeName', 'category', 'latitude', 'longitude'}
     assert raw.category == stop.place.category == category
     assert raw.placeId == stop.place.placeId == 'places/id'
     assert raw.model_dump() == before
@@ -76,6 +76,9 @@ def test_public_serialization_preserves_internal_meal_and_tourism_evidence(categ
 @pytest.mark.parametrize('mode', ['validation', 'serialization'])
 def test_public_response_schema_exposes_visit_groups_lodging_and_airport(mode):
     schema = CourseResponseSchema.model_json_schema(mode=mode)
+    place = schema['$defs']['PlaceSchema']
+    assert 'googlePlaceId' in place['properties'] and 'googlePlaceId' in place['required']
+    assert 'placeId' not in place['properties']
     values = schema['$defs']['PlaceSchema']['properties']['category']['enum']
     assert values == ['FOOD', 'CAFE', 'SPOT', 'CULTURE', 'NATURE', 'ACTIVITY', 'NIGHTLIFE', 'LODGING', 'AIRPORT']
 
@@ -90,7 +93,7 @@ def test_generic_tourist_type_uses_existing_specific_facts_only_for_display(type
     raw = InternalPlaceSchema(placeId='id', placeName='이름만으로는 분류하지 않는 장소',
                               category='tourist_attraction', providerTypes=types,
                               latitude=37.5, longitude=127.)
-    wire = raw.model_dump(context={'public_response': True})
+    wire = raw.model_dump(by_alias=True, context={'public_response': True})
     assert wire['category'] == expected
     assert 'providerTypes' not in wire
     assert raw.category == 'tourist_attraction'

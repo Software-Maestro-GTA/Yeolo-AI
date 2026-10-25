@@ -5,6 +5,7 @@ from typing import Literal, Self
 from uuid import UUID
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     Field,
     FieldSerializationInfo,
@@ -67,7 +68,10 @@ class CourseRequestSchema(BaseModel):
 class PlaceSchema(BaseModel):
     """Verified identity and map marker only; rich details stay in Google Maps."""
 
-    placeId: str = Field(..., description="검증된 Google Maps Place ID")
+    placeId: str = Field(
+        ..., validation_alias=AliasChoices("googlePlaceId", "placeId"),
+        serialization_alias="googlePlaceId", description="검증된 Google Maps Place ID",
+    )
     placeName: str = Field(..., description="한국어로 표기한 검증 장소명; Google 공식 표시 이름은 조회하지 않음")
     category: PlaceCategoryCode = Field(
         ...,
