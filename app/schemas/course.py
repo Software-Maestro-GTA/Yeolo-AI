@@ -41,7 +41,7 @@ class TripConditionSchema(BaseModel):
 class CourseRequestSchema(BaseModel):
     userId: UUID = Field(..., description="사용자 ID (UUID)")
     language: str = Field(
-        ..., description="호환용 BCP 47 언어 코드; 값과 관계없이 응답은 항상 한국어"
+        ..., description="호환용 BCP 47 언어 코드; 표시 문구는 한국어, 이동 안내는 공급자 원문"
     )
     mbti: str | None = Field(None, description="사용자 MBTI")
     tasteProfile: TasteProfileSchema | None = Field(
@@ -109,7 +109,7 @@ class TransportToNextSchema(BaseModel):
     )
     distance: float | None = Field(None, description="실제 이동 거리 (미터)")
     minutes: int | None = Field(None, description="실제 이동 소요 시간 (분)")
-    memo: str | None = Field(None, description="실제 경로 정보에 근거한 이동 안내; 작성 가능한 정보가 없으면 null")
+    memo: str | None = Field(None, description="공급자 경로 응답의 원문 이동 안내; 확보한 정보가 없으면 null")
 
     @model_validator(mode="after")
     def check_unknown_metrics(self) -> Self:

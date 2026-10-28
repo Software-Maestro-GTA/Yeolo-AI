@@ -102,7 +102,7 @@ async def analyze_behavior_stream(
         API-AI-1 events; complete contains tasteProfile and summary only.
     Raises:
         HTTPException: 400 for no valid records; 500 for inference failures.
-        InsufficientTasteEvidenceError: Repetition or guarded interest scores are insufficient.
+        InsufficientTasteEvidenceError: Valid sample size, dates or observed interest coverage is insufficient.
     """
     statistics = build_behavior_statistics(request.items)
     if not statistics["validPhotoCount"]:

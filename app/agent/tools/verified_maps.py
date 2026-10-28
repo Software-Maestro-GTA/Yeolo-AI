@@ -26,7 +26,6 @@ from app.services.route_guidance import (
     MAX_MEMO_LENGTH,
     ROUTE_FIELD_MASK,
     format_route_guidance,
-    navigation_source,
 )
 
 # Text Search retrieves free provider IDs. These two detail masks request only
@@ -177,7 +176,6 @@ class InternalTransportSchema(TransportToNextSchema):
     """Actual route with optional internal fare used by cost calculation."""
 
     cost: int | None = Field(default=None, ge=0, description='Known route fare in KRW; None is unknown')
-    navigationSource: list[dict[str, str]] = Field(default_factory=list, exclude=True, description='Request-local original navigation for optional copy translation')
 
 
 @dataclass(frozen=True)
@@ -885,13 +883,10 @@ class VerifiedMapsProvider:
         # Guidance is optional: only validated numeric route facts determine
         # feasibility. Cancellation remains observable (it is BaseException).
         try:
-            memo = format_route_guidance(data, mode, language=self.language)
+            memo = format_route_guidance(data, mode)
             if memo is not None and (not isinstance(memo, str) or not memo.strip() or len(memo) > MAX_MEMO_LENGTH):
                 raise ValueError('Unusable optional route guidance')
         except Exception:  # noqa: BLE001 - optional presentation must not invalidate verified metrics
             memo = None
-        try:
-            source = navigation_source(data)
-        except Exception:  # noqa: BLE001 - optional sources must not invalidate verified metrics
-            source = []
-        return InternalTransportSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=memo, navigationSource=source)
+
+        return InternalTransportSchema(type=mode, distance=distance, minutes=math.ceil(seconds / 60), cost=0 if mode == 'walking' else None, memo=memo)

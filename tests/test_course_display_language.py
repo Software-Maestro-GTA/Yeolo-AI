@@ -5,8 +5,8 @@ import json
 import httpx
 import pytest
 
-from app.agent.tools.verified_maps import InternalTransportSchema
 from app.services import course_localization
+from app.services.course_display_copy import DisplayCopyPlan, DisplayText
 from tests.test_course_localization import (
     completion,
     course,
@@ -27,97 +27,6 @@ def source_copy(outgoing):
 
 
 @pytest.mark.asyncio
-async def test_korean_structured_navigation_skips_optional_llm_when_display_is_localized(
-    mocker,
-):
-    constructor = mocker.patch.object(
-        course_localization,
-        "get_abto",
-        side_effect=AssertionError("Localized display needs no optional LLM call"),
-    )
-    value = course()
-    value.itinerary.days[0].stops[0].transportToNext = InternalTransportSchema(
-        type="transit",
-        distance=700,
-        minutes=12,
-        memo="박물관 정류장에서 B96을 타고 공원 정류장에서 내리세요.",
-        navigationSource=[
-            {
-                "kind": "transit",
-                "start": "박물관 정류장",
-                "end": "공원 정류장",
-                "line": "B96",
-                "direction": "",
-            }
-        ],
-    )
-    before = value.model_dump()
-
-    result = await course_localization.localize_course(request("ko"), value)
-
-    assert result is value and result.model_dump() == before
-    constructor.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_localized_structured_route_with_spaced_units_skips_model_setup(mocker):
-    constructor = mocker.patch.object(
-        course_localization,
-        "get_abto",
-        side_effect=AssertionError("Measured units are not foreign-language prose"),
-    )
-    value = course()
-    memo = "왼쪽 33 m에 있는 박물관을 지나 1.2 km를 더 걸으세요."
-    value.itinerary.days[0].stops[0].transportToNext = InternalTransportSchema(
-        type="walking",
-        distance=1233,
-        minutes=20,
-        memo=memo,
-        navigationSource=[{"kind": "instruction", "text": memo}],
-    )
-    before = value.model_dump()
-
-    result = await course_localization.localize_course(request("ko"), value)
-
-    assert result is value and result.model_dump() == before
-    constructor.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_malformed_structured_action_translates_complete_legacy_memo(wire):
-    calls = []
-    original = "雁荡路에서 南昌路 방면 북쪽으로 걷기. 우회전하여 南昌路에 진입."
-    localized = "옌당루에서 난창루 방면 북쪽으로 걷다가 우회전해 난창루로 들어서세요."
-
-    def respond(outgoing):
-        calls.append(outgoing)
-        source = source_copy(outgoing)
-        assert len(source["navigation"]) == 1
-        unit = source["navigation"][0]
-        assert unit["kind"] == "instruction" and unit["text"] == original
-        return completion(
-            {"navigation": [{"id": unit["id"], "text": localized}]}
-        )
-
-    clients = wire(respond)
-    value = course()
-    value.itinerary.days[0].stops[0].transportToNext = InternalTransportSchema(
-        type="walking",
-        distance=700,
-        minutes=12,
-        memo=original,
-        navigationSource=[{"kind": "transit", "start": "도중 정류장", "line": "B96"}],
-    )
-    before = facts(value)
-
-    result = await course_localization.localize_course(request("ko"), value)
-
-    assert result.itinerary.days[0].stops[0].transportToNext.memo == localized
-    assert result is value and facts(result) == before
-    assert len(calls) == 1 and all(client.is_closed for client in clients)
-
-
-@pytest.mark.asyncio
 async def test_korean_foreign_title_tags_and_reason_share_one_existing_copy_call(wire):
     calls = []
     expected = {
@@ -131,13 +40,13 @@ async def test_korean_foreign_title_tags_and_reason_share_one_existing_copy_call
     def respond(outgoing):
         calls.append(outgoing)
         source = source_copy(outgoing)
-        assert set(source) == {"navigation"}
-        assert {unit["text"] for unit in source["navigation"]} == set(expected)
+        assert set(source) == {"texts"}
+        assert {unit["text"] for unit in source["texts"]} == set(expected)
         return completion(
             {
-                "navigation": [
+                "texts": [
                     {"id": unit["id"], "text": expected[unit["text"]]}
-                    for unit in source["navigation"]
+                    for unit in source["texts"]
                 ]
             }
         )
@@ -167,11 +76,11 @@ async def test_known_foreign_place_name_is_translated_once_for_all_display_refer
     def respond(outgoing):
         calls.append(outgoing)
         source = source_copy(outgoing)
-        assert len(source["navigation"]) == 1
-        name = source["navigation"][0]
+        assert len(source["texts"]) == 1
+        name = source["texts"][0]
         assert name["kind"] == "name" and name["text"] == "Seoul Museum"
         return completion(
-            {"navigation": [{"id": name["id"], "text": "서울 박물관"}]}
+            {"texts": [{"id": name["id"], "text": "서울 박물관"}]}
         )
 
     clients = wire(respond)
@@ -180,7 +89,7 @@ async def test_known_foreign_place_name_is_translated_once_for_all_display_refer
     first.place.placeName = "Seoul Museum"
     first.reason = "Seoul Museum에서 전시를 둘러보세요."
     first.memo = "Seoul Museum의 현장 안내를 살펴보세요."
-    first.transportToNext.memo = "보행 경로를 따라 이동하세요."
+    original_memo = first.transportToNext.memo = "Seoul Museum → 菸廠路 (276)"
     value.title = "Seoul Museum에서 즐기는 산책"
     value.tags = ["Seoul Museum", "자연 산책"]
     before = facts(value)
@@ -192,7 +101,7 @@ async def test_known_foreign_place_name_is_translated_once_for_all_display_refer
     assert first.memo == "서울 박물관의 현장 안내를 살펴보세요."
     assert result.title == "서울 박물관에서 즐기는 산책"
     assert result.tags == ["서울 박물관", "자연 산책"]
-    assert "Seoul Museum" not in result.model_dump_json()
+    assert first.transportToNext.memo == original_memo
     assert facts(result) == before
     assert len(calls) == 1 and all(client.is_closed for client in clients)
 
@@ -210,20 +119,19 @@ async def test_invalid_peer_schema_keeps_valid_name_and_memo_when_repair_fails(
         calls.append(outgoing)
         source = source_copy(outgoing)
         if len(calls) > 1:
-            assert source["navigation"] == [pending]
+            assert source["texts"] == [pending]
             return httpx.Response(503, json={"error": {"message": "offline failure"}})
         output = []
-        for unit in source["navigation"]:
+        for unit in source["texts"]:
             if unit["text"] == "Tokyo Park":
                 pending = unit
                 text = invalid_text
             elif unit["text"] == "Tokyo Museum":
                 text = "도쿄 박물관"
             else:
-                assert unit["text"] == "劇場通りで右折してください。"
-                text = "게키조도리에서 우회전하세요."
+                pytest.fail(f"Unexpected display slot: {unit}")
             output.append({"id": unit["id"], "text": text})
-        return completion({"navigation": output})
+        return completion({"texts": output})
 
     clients = wire(respond)
     value = course()
@@ -236,6 +144,52 @@ async def test_invalid_peer_schema_keeps_valid_name_and_memo_when_repair_fails(
     result = await course_localization.localize_course(request("ko"), value)
 
     assert first.place.placeName == "도쿄 박물관"
-    assert first.transportToNext.memo == "게키조도리에서 우회전하세요."
+    assert first.transportToNext.memo == "劇場通りで右折してください。"
     assert result is value and facts(result) == before
     assert len(calls) == 2 and all(client.is_closed for client in clients)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('original', [
+    '長安東路二段에서 遼寧街 방면 서쪽으로 걷기. Zhonglun에서 276번(Jiuzhuang 방면)을 타고 내리세요.',
+    '菸廠路에서 市民大道五段14巷 방면 서쪽으로 걷기 목적지는 길의 오른쪽에 있습니다.',
+    'Take JR from Shinjuku (Platform W) to Tokyo.',
+])
+async def test_foreign_route_memo_alone_never_initializes_translation(original, mocker):
+    value = course()
+    route = value.itinerary.days[0].stops[0].transportToNext
+    route.memo = original
+    gateway = mocker.patch.object(course_localization, 'get_abto', side_effect=AssertionError('Route guidance must not reach an LLM'))
+    before = value.model_dump()
+    result = await course_localization.localize_course(request(), value)
+    assert result.model_dump() == before and route.memo == original
+    gateway.assert_not_called()
+
+
+@pytest.mark.parametrize('invalid', [
+    '호텔 [[F0]]의 2층', 'Hotel [[F0]]', '호텔 99', '호텔 [[F1]]',
+])
+def test_display_name_validation_preserves_source_numbers_and_language(invalid):
+    value = course()
+    place = value.itinerary.days[0].stops[0].place
+    place.placeName = 'Hotel 17'
+    plan = DisplayCopyPlan(value)
+    assert plan.units == [{'id': 'd0', 'kind': 'name', 'text': 'Hotel [[F0]]'}]
+    plan.apply([DisplayText(id='d0', text=invalid)])
+    assert place.placeName == 'Hotel 17' and len(plan.pending_units()) == 1
+    plan.apply([DisplayText(id='d0', text='호텔 [[F0]]')])
+    assert place.placeName == '호텔 17' and plan.pending_units() == []
+
+
+def test_duplicate_display_slots_do_not_discard_a_valid_peer_or_overwrite_approved_text():
+    value = course()
+    first, second = value.itinerary.days[0].stops
+    first.place.placeName, second.place.placeName = 'Museum', 'Park'
+    plan = DisplayCopyPlan(value)
+    plan.apply(plan.response_texts({'texts': [
+        {'id': 'd0', 'text': '박물관'}, {'id': 'd0', 'text': '다른 이름'}, {'id': 'd1', 'text': '공원'},
+    ]}))
+    assert first.place.placeName == 'Museum' and second.place.placeName == '공원'
+    assert [unit['id'] for unit in plan.pending_units()] == ['d0']
+    plan.apply([DisplayText(id='d0', text='박물관'), DisplayText(id='d1', text='다른 공원')])
+    assert first.place.placeName == '박물관' and second.place.placeName == '공원'
