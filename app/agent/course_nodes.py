@@ -1335,12 +1335,12 @@ class CourseGraphNodes:
         return {"course": course}
 
     async def translate_display(self, state: CourseState) -> dict:
-        """Translate names/navigation and retain the optional stage's outcome.
+        """Translate course labels and retain the optional display stage outcome.
 
         Args:
             state: Verified course, user preferences and request-wide deadline.
         Returns:
-            Course with localized navigation and internal translation diagnostics.
+            Course with localized labels and internal translation diagnostics.
             Source facts and valid partial translations survive model failures.
         Raises:
             asyncio.CancelledError: Request cancellation propagates to model calls.

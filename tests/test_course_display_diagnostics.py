@@ -7,6 +7,7 @@ import pytest
 from langchain_core.callbacks import AsyncCallbackHandler
 
 from app.agent.course_graph import build_course_graph
+from app.services.course_localization import localize_course
 from app.services.course_place_copy import write_place_copy
 from tests.test_course_graph import graph_dependencies as _graph_dependencies
 from tests.test_course_graph import request_data as _request_data
@@ -39,6 +40,14 @@ async def test_split_nodes_keep_optional_failures_visible_without_changing_publi
     provider, history, _, _, _ = graph_dependencies
     provider.route.return_value.memo = '길을 따라 이동하세요.' if failure == 'no_translation_needed' else 'Walk along the road.'
     mocker.patch('app.agent.course_nodes.write_place_copy', side_effect=write_place_copy)
+
+    async def localize_display(request, course, **kwargs):
+        if failure != 'no_translation_needed':
+            course.itinerary.days[0].stops[0].place.placeName = 'Museum'
+        return await localize_course(request, course, **kwargs)
+
+    mocker.patch('app.agent.course_nodes.localize_course', side_effect=localize_display)
+
     writers = 0
     calls = []
 
@@ -51,16 +60,16 @@ async def test_split_nodes_keep_optional_failures_visible_without_changing_publi
         body = json.loads(request.content)
         schema = body['response_format']['json_schema']['name']
         content = body['messages'][-1]['content']
-        if schema == 'NavigationCopy':
+        if schema == 'DisplayCopy':
             if failure == 'translation_recovered' and len(calls) == 1:
-                return completion({'navigation': []})
+                return completion({'texts': []})
             if failure in {'translation', 'translation_repair'}:
                 if failure == 'translation_repair' and len(calls) == 1:
-                    return completion({'navigation': []})
+                    return completion({'texts': []})
                 return outage()
             source = json.loads(content.split('Verified source copy:\n')[1])
-            return completion({'navigation': [{'id': unit['id'], 'text': '길을 따라 이동하세요.'}
-                                               for unit in source['navigation']]})
+            return completion({'texts': [{'id': unit['id'], 'text': '박물관'}
+                                               for unit in source['texts']]})
         source = json.loads(content.split('Evidence:\n')[1].split('\nProposed copy:')[0])
         if schema == 'PlaceCopyBatch':
             writers += 1

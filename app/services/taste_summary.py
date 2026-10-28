@@ -11,7 +11,9 @@ from app.schemas.taste_summary import (
     TasteSummary,
     TasteSummaryDraft,
 )
-from app.services.behavior_evidence import MIN_EVIDENCE_DAYS, MIN_EVIDENCE_VISITS
+
+MIN_ANALYSIS_PHOTOS = 5
+MIN_ANALYSIS_DAYS = 3
 
 
 class InsufficientTasteEvidenceError(ValueError):
@@ -37,20 +39,21 @@ TYPE_DEFINITIONS = (
 )
 
 
-
 def validate_taste_evidence(statistics: dict[str, Any]) -> None:
-    """Require repeated evidence for three distinct interest groups before inference.
+    """Require five valid photos on three days and three observed interest groups.
 
     Args:
-        statistics: Deduplicated visit counts and distinct-day counts by field.
+        statistics: Valid deduplicated photo counts, visit counts and distinct-day counts.
     Raises:
-        InsufficientTasteEvidenceError: Fewer than three groups meet the guard threshold.
+        InsufficientTasteEvidenceError: The sample or observed group coverage is insufficient.
     """
+    if statistics['validPhotoCount'] < MIN_ANALYSIS_PHOTOS or statistics['distinctDayCount'] < MIN_ANALYSIS_DAYS:
+        raise InsufficientTasteEvidenceError
     visits = statistics['fieldVisitCounts']
     days = statistics['fieldDayCounts']
     supported_groups = {
         group for _, path, _, group in TYPE_DEFINITIONS
-        if visits.get(path, 0) >= MIN_EVIDENCE_VISITS and days.get(path, 0) >= MIN_EVIDENCE_DAYS
+        if visits.get(path, 0) > 0 and days.get(path, 0) > 0
     }
     if len(supported_groups) < SUMMARY_TYPE_COUNT:
         raise InsufficientTasteEvidenceError
@@ -77,31 +80,37 @@ class SummaryContext:
 def prepare_summary_context(
     profile: TasteProfileSchema, metadata: AnalysisMetadataSchema, language: str,
 ) -> SummaryContext:
-    """Select exactly three distinct interests supported by guarded evidence.
+    """Select three observed interests, including explicitly provisional signals.
 
     Args:
         profile: Final guarded profile, whose numeric values must remain unchanged.
-        metadata: Internal evidence used to exclude compatibility placeholders.
+        metadata: Internal visit evidence separating observed signals from unobserved placeholders.
         language: Legacy locale input; summary generation always uses Korean.
     Returns:
         Exactly three display axes and all supported interests for the model to
         recommend a city, including interests not displayed as sliders. No network I/O.
     Raises:
-        InsufficientTasteEvidenceError: Fewer than three groups have supported scores of 4 or 5.
+        InsufficientTasteEvidenceError: The sample is insufficient or fewer than three groups were observed.
     """
+    validate_taste_evidence(metadata.statistics)
     ranked = []
     for order, (code, path, subject, group) in enumerate(TYPE_DEFINITIONS):
         evidence = metadata.fieldEvidence.get(path)
         section, key = path.split(".")
         score = getattr(getattr(profile, section), key)
-        if evidence is None or evidence.insufficientEvidence or path in metadata.fallbackFields or score < 4:
+        if evidence is None:
             continue
         days = evidence.evidence.get("distinctDayCount", 0)
         visits = evidence.evidence.get("visitCount", 0)
+        if visits <= 0 or days <= 0:
+            continue
+        # Repetition governs score confidence, not eligibility for an observed UI axis.
+        provisional = evidence.insufficientEvidence or path in metadata.fallbackFields or score < 4
         ranked.append(((-score, -days, -visits, order), group, {
             "typeCode": code, "subject": subject, "sourceField": path,
             "sourceScore": score, "score": (score - 1) * 25,
             "visitCount": visits, "distinctDayCount": days,
+            "confidence": evidence.confidence, "isProvisional": provisional,
         }))
     selected = []
     groups = set()
@@ -116,7 +125,10 @@ def prepare_summary_context(
         raise InsufficientTasteEvidenceError
 
     recommendation_interests = [
-        {key: item[key] for key in ("typeCode", "subject", "sourceScore")}
+        {key: item[key] for key in (
+            "typeCode", "subject", "sourceScore", "visitCount",
+            "distinctDayCount", "confidence", "isProvisional",
+        )}
         for _, _, item in sorted(ranked)
     ]
     return SummaryContext("ko", selected, recommendation_interests)

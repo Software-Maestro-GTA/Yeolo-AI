@@ -191,15 +191,17 @@ async def test_real_gateway_wire_is_korean_only_and_preserves_schema_identity_de
     calls = []
     def respond(outgoing):
         calls.append(outgoing)
-        return completion({'navigation': [{'id': 'n0', 'text': '보행 경로를 따라 이동하세요.'}]})
+        return completion({'texts': [{'id': 'd0', 'text': '서울 박물관'}]})
     clients = wire(respond)
     value = course()
+    value.itinerary.days[0].stops[0].place.placeName = "Seoul Museum"
     before = value.model_dump()
     immutable = facts(value)
     result = await course_localization.localize_course(request(legacy_language), value)
     assert result is value and facts(result) == immutable
     assert result.title == before['title'] and result.tags == before['tags']
-    assert result.itinerary.days[0].stops[0].transportToNext.memo == '보행 경로를 따라 이동하세요.'
+    assert result.itinerary.days[0].stops[0].place.placeName == '서울 박물관'
+    assert result.itinerary.days[0].stops[0].transportToNext.memo == 'Follow the pedestrian route.'
     assert len(calls) == 1
     outgoing = calls[0]
     assert str(outgoing.url) == 'https://gateway.abto.app/v1/chat/completions'
@@ -213,8 +215,8 @@ async def test_real_gateway_wire_is_korean_only_and_preserves_schema_identity_de
     assert body['response_format']['type'] == 'json_schema'
     assert body['response_format']['json_schema']['strict'] is False
     schema = body['response_format']['json_schema']['schema']
-    assert set(schema['properties']) == {'navigation'}
-    assert set(schema['$defs']['NavigationText']['properties']) == {'id', 'text'}
+    assert set(schema['properties']) == {'texts'}
+    assert set(schema['$defs']['DisplayText']['properties']) == {'id', 'text'}
     assert 'temperature' not in body and 'tools' not in body
     source = body['messages'][-1]['content']
     assert 'Target language: Korean (ko)' in source
@@ -269,6 +271,7 @@ async def test_optional_model_outage_does_not_create_visit_templates(
 
     clients = wire(respond)
     value = course()
+    value.itinerary.days[0].stops[0].place.placeName = "Seoul Museum"
     before = facts(value)
     result = await course_localization.localize_course(request(language), value)
     assert facts(result) == before
@@ -307,50 +310,13 @@ async def test_strong_actual_preferences_only_and_low_budget_skip_model(mocker):
     )
     fields["travelPurpose"]["culturalExperience"] = 5
     value = course()
+    value.itinerary.days[0].stops[0].place.placeName = "Seoul Museum"
     result = await course_localization.localize_course(
         request("en", fields), value, timeout_seconds=0.1
     )
     museum, park = result.itinerary.days[0].stops
     assert (museum.reason, museum.memo, park.reason, park.memo) == tuple(text for stop in course().itinerary.days[0].stops for text in (stop.reason, stop.memo))
     constructor.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_korean_mixed_navigation_preserves_source_when_translation_is_unavailable(mocker):
-    constructor = mocker.patch.object(
-        course_localization, "get_abto", side_effect=ValueError("Offline translation unavailable")
-    )
-    value = course()
-    route = value.itinerary.days[0].stops[0].transportToNext
-    route.type = "transit"
-    route.memo = "Số 131 Hoàng Diệu에서 07번을 타고 Đối Diện 18-20에서 내리세요."
-    before = facts(value)
-
-    result = await course_localization.localize_course(request("ko-KR"), value)
-
-    assert result is value and facts(result) == before
-    assert route.memo == "Số 131 Hoàng Diệu에서 07번을 타고 Đối Diện 18-20에서 내리세요."
-    assert result.itinerary.days[0].stops[1].transportToNext.memo is None
-    constructor.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_foreign_and_legacy_mixed_navigation_use_requested_language(
-    mocker,
-):
-    mocker.patch.object(
-        course_localization, "get_abto", side_effect=ValueError("Missing optional key")
-    )
-    value = course()
-    value.itinerary.days[0].stops[
-        0
-    ].transportToNext.memo = "Follow the pedestrian route to 검증된 공원."
-    value.itinerary.days[0].stops[
-        1
-    ].transportToNext.memo = "주요 이동: 안내를 따라 이동하세요."
-    result = await course_localization.localize_course(request("ja"), value)
-    assert result.itinerary.days[0].stops[0].transportToNext.memo == "Follow the pedestrian route to 검증된 공원."
-    assert result.itinerary.days[0].stops[1].transportToNext.memo is None
 
 
 @pytest.mark.asyncio
@@ -363,6 +329,7 @@ async def test_localization_cancellation_propagates_and_closes_gateway_clients(w
 
     clients = wire(respond)
     value = course()
+    value.itinerary.days[0].stops[0].place.placeName = "Seoul Museum"
     before = value.model_dump()
     report = DisplayDiagnostics('translation')
     task = asyncio.create_task(course_localization.localize_course(request(), value, diagnostics=report))
@@ -382,9 +349,11 @@ async def test_optional_local_timer_returns_localized_course_instead_of_failure(
         await asyncio.Event().wait()
 
     clients = wire(respond)
+    value = course()
+    value.itinerary.days[0].stops[0].place.placeName = 'Seoul Museum'
     report = DisplayDiagnostics('translation')
     result = await asyncio.wait_for(
-        course_localization.localize_course(request(), course(), timeout_seconds=0.2, diagnostics=report),
+        course_localization.localize_course(request(), value, timeout_seconds=0.2, diagnostics=report),
         timeout=2,
     )
     assert result.itinerary.days[0].stops[0].reason == course().itinerary.days[0].stops[0].reason
@@ -426,7 +395,9 @@ async def test_other_bcp47_locale_uses_korean_without_foreign_fallback(
         )
 
     wire(respond)
-    result = await course_localization.localize_course(request("vi-VN"), course())
+    value = course()
+    value.itinerary.days[0].stops[0].place.placeName = "Seoul Museum"
+    result = await course_localization.localize_course(request("vi-VN"), value)
     assert (
         "Target language: Korean (ko)"
         in json.loads(calls[0].content)["messages"][-1]["content"]
