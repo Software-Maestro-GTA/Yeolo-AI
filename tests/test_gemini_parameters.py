@@ -292,7 +292,8 @@ async def test_langchain_callbacks_keep_metadata_and_hide_keys(offline_wire):
 
 
 @pytest.mark.asyncio
-async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, mocker):
+@pytest.mark.parametrize('sparse', [False, True], ids=['repeated-interests', 'five-provisional-photos'])
+async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, mocker, sparse):
     from httpx import ASGITransport, AsyncClient
 
     from app.main import app
@@ -302,6 +303,7 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
         request,
         sse_events,
     )
+    from tests.test_taste_evidence_gate import minimum_observed_photos
     from tests.test_taste_summary import draft_for
 
     requests = []
@@ -318,6 +320,8 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
             return completion(full_profile(['warm_region']).model_dump())
         assert schema_name == 'TasteSummaryDraft'
         assert len(requests) == 2
+        assert 'isProvisional' in body['messages'][0]['content']
+        assert 'sourceScore=3' in body['messages'][0]['content']
         city_schema = body['response_format']['json_schema']['schema']['$defs']['CityRecommendation']['properties']
         assert set(city_schema) == {'countryName', 'cityName', 'reason'}
         assert all('enum' not in field for field in city_schema.values())
@@ -327,7 +331,7 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
         return completion(draft.model_dump())
 
     clients = offline_wire(respond)
-    payload = request(repeated_photos()).model_dump(mode='json')
+    payload = request(minimum_observed_photos() if sparse else repeated_photos()).model_dump(mode='json')
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
         response = await client.post('/internal/ai/taste-profile/analysis', json=payload,
                                      headers={'X-Internal-Api-Key': 'offline-api-key'})
@@ -338,12 +342,16 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
     assert set(result) == {'tasteProfile', 'summary'}
     assert result['tasteProfile']['companionType'] == 'solo'
     assert result['summary']['types'] == [{
-        'typeCode': code, 'typeName': '나만의 ' + code, 'lowName': '약함', 'highName': '강함', 'score': 100,
+        'typeCode': code, 'typeName': '나만의 ' + code, 'lowName': '약함', 'highName': '강함', 'score': 50 if sparse else 100,
     } for code in ('CAFE_DESSERT', 'CULTURE', 'SHOPPING')]
     assert result['summary']['recommendCity']['countryName'] == '슬로베니아'
     assert result['summary']['recommendCity']['cityName'] == '류블랴나'
     assert 'cityCode' not in result['summary']['recommendCity']
-    assert summary_contexts[0]['types'][0]['visitCount'] == 3
+    assert summary_contexts[0]['types'][0]['visitCount'] == (2 if sparse else 3)
+    assert all(item['isProvisional'] is sparse for item in summary_contexts[0]['types'])
+    assert all(item['confidence'] == ('low' if sparse else 'medium') for item in summary_contexts[0]['types'])
+    assert 'isProvisional' not in json.dumps(result)
+    assert 'confidence' not in json.dumps(result)
     assert 'cityCandidates' not in summary_contexts[0]
     assert {'CAFE_DESSERT', 'CULTURE', 'SHOPPING'} <= {
         interest['typeCode'] for interest in summary_contexts[0]['recommendationInterests']
