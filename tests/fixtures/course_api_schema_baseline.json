@@ -460,7 +460,7 @@
         "type": "string"
       },
       "language": {
-        "description": "호환용 BCP 47 언어 코드; 값과 관계없이 응답은 항상 한국어",
+        "description": "호환용 BCP 47 언어 코드; 표시 문구는 한국어, 이동 안내는 공급자 원문",
         "title": "Language",
         "type": "string"
       },
@@ -764,7 +764,7 @@
               }
             ],
             "default": null,
-            "description": "실제 경로 정보에 근거한 이동 안내; 작성 가능한 정보가 없으면 null",
+            "description": "공급자 경로 응답의 원문 이동 안내; 확보한 정보가 없으면 null",
             "title": "Memo"
           }
         },

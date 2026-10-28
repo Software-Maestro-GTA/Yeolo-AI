@@ -888,7 +888,6 @@ async def test_missing_route_steps_return_null_memo_and_preserve_actual_departur
     assert result.type == mode and result.distance == 1250 and result.minutes == 11
     assert result.cost == (0 if mode == 'walking' else None)
     assert result.memo is None
-    assert result.navigationSource == []
     if mode == 'transit' and departure_supplied:
         assert bodies[0]['departureTime'] == '2026-10-05T05:25:00Z'
     else:

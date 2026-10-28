@@ -118,6 +118,7 @@ def assert_complete_contract(payload):
     ('403', None, False), ('timeout', None, False), (None, 'stale_candidate', False),
     (None, 'malformed_candidate', False), (None, 'wrong_id_candidate', False),
     (None, 'stale_destination', False), (None, None, True), (None, None, 'reason_only'),
+    (None, None, 'raw_guidance'),
 ])
 async def test_production_endpoint_graph_and_serializer_emit_exact_public_contract(
     api_request, graph_dependencies, mocker, route_failure, place_failure, copy_available,
@@ -125,6 +126,12 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
     """Exercise final serialization with real verified IDs, types and routes."""
     api_request['language'] = 'ja'
     _, _, llm, draft, venues = graph_dependencies
+    original_guidance = '菸廠路에서 市民大道五段14巷 방면 서쪽으로 걷기 목적지는 길의 오른쪽에 있습니다.'
+    if copy_available == 'raw_guidance':
+        from app.services.course_localization import localize_course
+
+        mocker.patch('app.agent.course_nodes.localize_course', side_effect=localize_course)
+        gateway = mocker.patch('app.services.course_localization.get_abto', side_effect=AssertionError('No route translation'))
     if copy_available:
         async def approved_copy(request, course, **kwargs):
             for day in course.itinerary.days:
@@ -191,6 +198,10 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
             return httpx.Response(200, text='<html>unavailable</html>')
         if route_failure == 'taxi_only' and route['travelMode'] != 'DRIVE':
             return httpx.Response(200, json={'routes': []})
+        if copy_available == 'raw_guidance':
+            return httpx.Response(200, json={'routes': [{'duration': '720s', 'distanceMeters': 700,
+                'legs': [{'steps': [{'travelMode': route['travelMode'],
+                                    'navigationInstruction': {'instructions': original_guidance}}]}]}]})
         return httpx.Response(200, json={'routes': []} if route_failure == 'empty'
                               else {"routes": [{"duration": "720s", "distanceMeters": 700}]})
 
@@ -250,6 +261,9 @@ async def test_production_endpoint_graph_and_serializer_emit_exact_public_contra
         if route_failure == 'taxi_only':
             assert all(stop['transportToNext']['type'] == 'taxi' for stop in stops[:-1])
     assert stops[-1]["transportToNext"] == {"type": "none", "distance": 0.0, "minutes": 0, "memo": None}
+    if copy_available == 'raw_guidance':
+        assert all(stop['transportToNext']['memo'] == original_guidance for stop in stops[:-1])
+        gateway.assert_not_called()
     llm.assert_awaited_once()
     assert llm.call_args.args[0].language == 'ko'
     assert factory.call_args.kwargs['language'] == 'ko'

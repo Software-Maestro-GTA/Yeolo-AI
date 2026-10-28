@@ -1,4 +1,4 @@
-"""Translate foreign display names and factual navigation into Korean only.
+"""Translate course names and visit prose, leaving provider route memos intact.
 
 Protected source facts, partial-result recovery and client cleanup are retained.
 """
@@ -18,9 +18,9 @@ from pydantic import BaseModel
 from app.core.config import settings
 from app.core.llm import get_abto
 from app.schemas.course import CourseRequestSchema, CourseSchema
+from app.services.course_display_copy import DISPLAY_RULES, DisplayCopy, DisplayCopyPlan
 from app.services.course_display_diagnostics import DisplayDiagnostics
-from app.services.route_copy import NAVIGATION_RULES, NavigationCopy, RouteCopyPlan
-from app.services.route_guidance import guidance_matches_language
+from app.services.display_language import is_korean_text
 
 logger = logging.getLogger(__name__)
 LOCALIZATION_TIMEOUT_SECONDS = 60.0
@@ -40,7 +40,7 @@ PROGRESS_MESSAGES = {
     'refill': '장소가 부족한 일차에 가까운 명소를 보충하고 있습니다.',
     'repair': '확인한 장소로 이동과 식사에 여유가 있는 대안 일정을 구성하고 있습니다.',
     'restore': '확인된 장소와 이동 경로를 유지하여 일정을 마무리하고 있습니다.',
-    'translate_display': '장소 이름과 이동 안내를 한국어로 정리하고 있습니다.',
+    'translate_display': '장소 이름과 표시 문구를 한국어로 정리하고 있습니다.',
     'generate_place_copy': '장소별 추천 이유와 방문 팁을 작성하고 검토하고 있습니다.',
     'quote': '왕복 이동·숙박 비용을 확인하고 여행 예산을 배분하고 있습니다.',
     'quote_estimated': '예상 경비에 {items} 기준 추정액을 포함했습니다.',
@@ -99,12 +99,11 @@ def progress_message(language: str, key: str, **values: Any) -> str:
     )
 
 
-def _finish_display(request: CourseRequestSchema, course: CourseSchema) -> CourseSchema:
+def _finish_display(course: CourseSchema) -> CourseSchema:
     """Clear unavailable visit copy without creating replacement sentences.
 
     Args:
-        request: Requested display language.
-        course: Itinerary whose navigation and existing copy were localized.
+        course: Itinerary whose display labels and existing visit copy were localized.
     Returns:
         Same course; invalid-language visit fields become empty strings.
         Missing visit prose is written only by the grounded place-copy service.
@@ -114,7 +113,7 @@ def _finish_display(request: CourseRequestSchema, course: CourseSchema) -> Cours
             if stop.transportToNext.type in {'none', 'unknown'}:
                 stop.transportToNext.memo = None
             for field in ('reason', 'memo'):
-                if not guidance_matches_language(getattr(stop, field), request.language):
+                if not is_korean_text(getattr(stop, field)):
                     setattr(stop, field, '')
     return course
 
@@ -126,28 +125,25 @@ async def localize_course(
     timeout_seconds: float = LOCALIZATION_TIMEOUT_SECONDS,
     diagnostics: DisplayDiagnostics | None = None,
 ) -> CourseSchema:
-    """Translate existing copy and navigation without creating visit descriptions.
+    """Translate labels and existing visit copy without touching route guidance.
 
     Args:
         request: Identity for the existing course-generation model capability.
-        course: Complete verified itinerary; only mutable display text is updated.
+        course: Complete verified itinerary; only names/title/tags/visit copy may change.
         timeout_seconds: Optional remaining request budget; at most sixty seconds.
         diagnostics: Optional internal report; never included in the public course.
     Returns:
-        The same course object with all identities, prices and route facts kept.
-        Translate foreign place names, mixed visit tips and
-        navigation, including existing memos without structured provider steps.
-        The translation target is always Korean. Translation failures preserve
-        place identities, source route facts and valid peer text.
+        The same course object with identities, prices and provider route memos
+        kept intact. Failed display translations retain their original labels.
     Raises:
         asyncio.CancelledError: Caller cancellation; owned HTTP clients still close.
     """
-    navigation = RouteCopyPlan(course, 'ko')
+    display = DisplayCopyPlan(course)
     report = diagnostics if diagnostics is not None else DisplayDiagnostics('translation')
-    report.total = len(navigation.units)
-    if not navigation.units:
+    report.total = len(display.units)
+    if not display.units:
         report.finish(0)
-        return _finish_display(request, course)
+        return _finish_display(course)
     sync_options = None
     async_options = None
     phase = 'setup'
@@ -174,13 +170,13 @@ async def localize_course(
             # The OpenAI SDK's native Pydantic parse path serializes strict=True.
             # Use an explicit JSON schema and validate with Pydantic locally so
             # the Gateway actually receives the requested strict=False value.
-            source = {'navigation': navigation.units}
+            source = {'texts': display.units}
             prompt = ChatPromptTemplate.from_messages([
-                ('system', NAVIGATION_RULES),
+                ('system', DISPLAY_RULES),
                 ('human', 'Target language: Korean (ko)\nVerified source copy:\n{source}'),
             ])
             chain = prompt | model.with_structured_output(
-                NavigationCopy.model_json_schema(),
+                DisplayCopy.model_json_schema(),
                 method="json_schema",
                 strict=False,
             )
@@ -199,26 +195,24 @@ async def localize_course(
                 )
             phase = 'translation_validation'
             raw = result.model_dump() if isinstance(result, BaseModel) else result
-            if not isinstance(raw, dict) or not isinstance(raw.get('navigation'), list):
+            if not isinstance(raw, dict) or not isinstance(raw.get('texts'), list):
                 raise TypeError('Missing structured localization response')
-            navigation.apply(navigation.response_texts(result))
-            pending = navigation.pending_units()
+            display.apply(display.response_texts(result))
+            pending = display.pending_units()
             if pending:
                 report.fail(phase, 'untranslated_or_rejected', count=len(pending), attempt=1)
                 report.retries += 1
-                logger.warning('Optional display translation repair: language=%s pending=%d total=%d', request.language, len(pending), len(navigation.units))
+                logger.warning('Optional display translation repair: language=%s pending=%d total=%d', request.language, len(pending), len(display.units))
                 repair_prompt = ChatPromptTemplate.from_messages([
-                    ('system', NAVIGATION_RULES + ' A previous response omitted these slots or failed validation. '
+                    ('system', DISPLAY_RULES + ' A previous response omitted these slots or failed validation. '
                      'If a slot includes previous_text and validation_error, correct that rejected draft using '
                      'the original text as the source of truth; return only id and text, never those diagnostic fields. '
-                     'Translate every remaining foreign name inside each instruction. Return complete natural sentences '
-                     'in Korean, preserving protected tokens and every maneuver. '
-                     'Do not introduce numeric month values when transliterating a street name. '
-                     'A placeholder may contain a whole road identifier; do not add an alphabetic prefix to it.'),
+                     'Translate only the supplied labels or existing prose into Korean. '
+                     'Return names as labels and preserve every numeric placeholder exactly.'),
                     ('human', 'Target language: Korean (ko)\nVerified source copy:\n{source}'),
                 ])
                 repair_chain = repair_prompt | model.with_structured_output(
-                    NavigationCopy.model_json_schema(), method='json_schema', strict=False,
+                    DisplayCopy.model_json_schema(), method='json_schema', strict=False,
                 )
                 # Share the original timeout and SDK clients; retry only rejected
                 # text once, with no additional Maps lookup or route generation.
@@ -226,15 +220,15 @@ async def localize_course(
                     phase = 'display_translation_repair'
                     report.call(phase)
                     repaired = await repair_chain.ainvoke({
-                        'source': json.dumps({'navigation': pending}, ensure_ascii=False),
+                        'source': json.dumps({'texts': pending}, ensure_ascii=False),
                     }, config=report.config(phase, attempt=2))
                 phase = 'translation_validation'
                 pending_ids = {unit['id'] for unit in pending}
-                navigation.apply([item for item in navigation.response_texts(repaired) if item.id in pending_ids])
-                missing = navigation.pending_units()
+                display.apply([item for item in display.response_texts(repaired) if item.id in pending_ids])
+                missing = display.pending_units()
                 if missing:
                     report.fail(phase, 'untranslated_or_rejected', count=len(missing), attempt=2)
-            return _finish_display(request, course)
+            return _finish_display(course)
     except asyncio.CancelledError as error:
         cancelled = True
         report.fail(phase, 'cancelled', error=error)
@@ -247,8 +241,8 @@ async def localize_course(
             request.language,
             type(error).__name__,
         )
-        navigation.apply()
-        return _finish_display(request, course)
+        display.apply()
+        return _finish_display(course)
     finally:
         try:
             if async_options is not None:
@@ -264,4 +258,4 @@ async def localize_course(
                     sync_options["http_client"].close()
                 except Exception:  # noqa: BLE001 - preserve a valid itinerary or cancellation
                     logger.warning("Course localization client cleanup unavailable")
-            report.finish(report.total - len(navigation.pending_units()), cancelled=cancelled)
+            report.finish(report.total - len(display.pending_units()), cancelled=cancelled)

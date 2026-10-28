@@ -28,7 +28,7 @@ from app.core.llm import get_abto
 from app.schemas.course import CourseRequestSchema, CourseSchema
 from app.services.course_display_diagnostics import DisplayDiagnostics
 from app.services.course_reasons import preference_evidence
-from app.services.route_guidance import guidance_matches_language
+from app.services.display_language import is_korean_text
 
 logger = logging.getLogger(__name__)
 COPY_BATCH_SIZE = 12
@@ -181,7 +181,7 @@ def _normalized(text: str, names: list[str]) -> str:
     return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", text).casefold())
 
 
-def _valid_text(text: str, names: list[str], language: str) -> bool:
+def _valid_text(text: str, names: list[str]) -> bool:
     remainder = text
     for name in sorted(names, key=len, reverse=True):
         remainder = remainder.replace(name, "")
@@ -191,7 +191,7 @@ def _valid_text(text: str, names: list[str], language: str) -> bool:
         remainder.strip()
         and any(char.isalpha() for char in remainder)
         and not re.search(r"\d|https?://|www\.", unicodedata.normalize("NFKC", remainder), re.IGNORECASE)
-        and guidance_matches_language(remainder, language)
+        and is_korean_text(remainder)
     )
 
 
@@ -221,7 +221,7 @@ def _checked_copy(
             if not text:
                 continue
             reason = None
-            if not _valid_text(text, names, 'ko'):
+            if not _valid_text(text, names):
                 reason = 'invalid_text'
             elif counts[_normalized(text, names)] != 1:
                 reason = 'duplicate_text'
