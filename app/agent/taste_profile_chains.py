@@ -1,10 +1,13 @@
 """Two sequential structured calls sharing the existing taste ABTO route."""
 
+import logging
+import random
+from typing import Any
 from uuid import UUID
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.agent.prompts import TASTE_PROFILE_PROMPT
 from app.agent.taste_summary_prompt import TASTE_SUMMARY_PROMPT
@@ -12,6 +15,36 @@ from app.core.config import settings
 from app.core.llm import get_abto
 from app.schemas.taste_profile import TasteProfileAnalysisOutput
 from app.schemas.taste_summary import TasteSummaryDraft
+
+logger = logging.getLogger(__name__)
+SAFE_TRAVEL_HASHTAGS = (
+    "#여행기록", "#공간탐색", "#취향탐색", "#여행탐색", "#장소탐색",
+    "#여행발견", "#장소발견", "#공간발견", "#여행순간", "#여행노트",
+    "#여행앨범", "#사진기록", "#여행장면", "#여행풍경", "#여행일지",
+    "#여행지도", "#여행수첩", "#여행모음", "#여행생각", "#여행한컷",
+)
+
+
+def _validate_generated_output[Output: BaseModel](output_schema: type[Output], output: Any) -> Output:
+    """Recover only malformed summary tags; retain validation for every other field.
+
+    Args:
+        output_schema: Expected structured model.
+        output: Parsed provider JSON, without changing valid scores or copy.
+    Returns:
+        Validated output, sampling three distinct neutral tags only for hashtag errors.
+    Raises:
+        ValidationError: A non-hashtag field is invalid.
+    """
+    try:
+        return output_schema.model_validate(output)
+    except ValidationError as error:
+        if output_schema is not TasteSummaryDraft or any(
+            not item["loc"] or item["loc"][0] != "hashtags" for item in error.errors()
+        ):
+            raise
+        logger.warning("Invalid generated hashtags replaced with neutral travel tags")
+        return output_schema.model_validate({**output, "hashtags": random.sample(SAFE_TRAVEL_HASHTAGS, k=3)})
 
 
 async def generate_taste_profile(statistics_report: str, *, user_id: UUID) -> TasteProfileAnalysisOutput:
@@ -78,11 +111,14 @@ async def _generate_structured[Output: BaseModel](
             **sync_options,
             http_async_client=async_options['http_client'],
         )
+        # Keep the full schema on the wire, then validate summary JSON here so a
+        # hashtag-only error cannot discard otherwise valid analysis and copy.
+        wire_schema = output_schema.model_json_schema() if output_schema is TasteSummaryDraft else output_schema
         chain = prompt | model.with_structured_output(
-            output_schema, method='json_schema', strict=False,
+            wire_schema, method='json_schema', strict=False,
         )
         with abto.with_context(feature_id='taste.profile.analysis', device_id=str(user_id)):
-            return await chain.ainvoke(values)
+            return _validate_generated_output(output_schema, await chain.ainvoke(values))
     finally:
         try:
             if async_options is not None:

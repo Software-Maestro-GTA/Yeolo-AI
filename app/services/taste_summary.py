@@ -13,14 +13,13 @@ from app.schemas.taste_summary import (
 )
 
 MIN_ANALYSIS_PHOTOS = 5
-MIN_ANALYSIS_DAYS = 3
 
 
 class InsufficientTasteEvidenceError(ValueError):
     """Signal a recoverable lack of evidence, mapped to API-AI-1 status 400."""
 
     def __init__(self) -> None:
-        super().__init__('분석 가능한 기록이 부족해요. 다른 날짜와 장소의 사진을 추가해 주세요.')
+        super().__init__('분석 가능한 사진을 최소 5장 추가해 주세요.')
 
 
 # A display registry for the existing profile, not the proposed v2 scoring model.
@@ -38,24 +37,24 @@ TYPE_DEFINITIONS = (
     ("EXPERIENCE", "activityPreference.experience", "workshops and activity venues", "activity"),
 )
 
+UNCONFIRMED_TYPE_NAMES = {
+    "CAFE_DESSERT": "카페 취향 미확인", "CULTURE": "문화 취향 미확인",
+    "BEACH": "해변 취향 미확인", "OUTDOOR": "야외활동 취향 미확인",
+    "NATURE": "자연 취향 미확인", "FOOD": "미식 취향 미확인",
+    "SHOPPING": "쇼핑 취향 미확인", "NIGHTLIFE": "밤문화 취향 미확인",
+    "WELLNESS": "휴식 취향 미확인", "EXPERIENCE": "체험 취향 미확인",
+}
+
 
 def validate_taste_evidence(statistics: dict[str, Any]) -> None:
-    """Require five valid photos on three days and three observed interest groups.
+    """Require only five valid photos; dates and interest coverage are not gates.
 
     Args:
-        statistics: Valid deduplicated photo counts, visit counts and distinct-day counts.
+        statistics: Photo counts after duplicate IDs and unusable metadata are excluded.
     Raises:
-        InsufficientTasteEvidenceError: The sample or observed group coverage is insufficient.
+        InsufficientTasteEvidenceError: Fewer than five usable photos remain.
     """
-    if statistics['validPhotoCount'] < MIN_ANALYSIS_PHOTOS or statistics['distinctDayCount'] < MIN_ANALYSIS_DAYS:
-        raise InsufficientTasteEvidenceError
-    visits = statistics['fieldVisitCounts']
-    days = statistics['fieldDayCounts']
-    supported_groups = {
-        group for _, path, _, group in TYPE_DEFINITIONS
-        if visits.get(path, 0) > 0 and days.get(path, 0) > 0
-    }
-    if len(supported_groups) < SUMMARY_TYPE_COUNT:
+    if statistics['validPhotoCount'] < MIN_ANALYSIS_PHOTOS:
         raise InsufficientTasteEvidenceError
 
 
@@ -71,7 +70,7 @@ class SummaryContext:
         """Return the minimum facts needed by the summary model."""
         return {
             "language": "ko",
-            "hasSupportedPreferences": bool(self.types),
+            "hasSupportedPreferences": bool(self.recommendation_interests),
             "types": self.types,
             "recommendationInterests": self.recommendation_interests,
         }
@@ -80,17 +79,17 @@ class SummaryContext:
 def prepare_summary_context(
     profile: TasteProfileSchema, metadata: AnalysisMetadataSchema, language: str,
 ) -> SummaryContext:
-    """Select three observed interests, including explicitly provisional signals.
+    """Prefer observed interests and fill missing display axes as unconfirmed.
 
     Args:
         profile: Final guarded profile, whose numeric values must remain unchanged.
         metadata: Internal visit evidence separating observed signals from unobserved placeholders.
         language: Legacy locale input; summary generation always uses Korean.
     Returns:
-        Exactly three display axes and all supported interests for the model to
-        recommend a city, including interests not displayed as sliders. No network I/O.
+        Three display axes with explicit observation flags and observed recommendation
+        interests. Unobserved axes are neutral placeholders, never recommendation evidence.
     Raises:
-        InsufficientTasteEvidenceError: The sample is insufficient or fewer than three groups were observed.
+        InsufficientTasteEvidenceError: Fewer than five usable photos remain.
     """
     validate_taste_evidence(metadata.statistics)
     ranked = []
@@ -110,7 +109,7 @@ def prepare_summary_context(
             "typeCode": code, "subject": subject, "sourceField": path,
             "sourceScore": score, "score": (score - 1) * 25,
             "visitCount": visits, "distinctDayCount": days,
-            "confidence": evidence.confidence, "isProvisional": provisional,
+            "confidence": evidence.confidence, "isProvisional": provisional, "isObserved": True,
         }))
     selected = []
     groups = set()
@@ -121,8 +120,18 @@ def prepare_summary_context(
         if len(selected) == SUMMARY_TYPE_COUNT:
             break
 
-    if len(selected) != SUMMARY_TYPE_COUNT:
-        raise InsufficientTasteEvidenceError
+    # Preserve the three-axis UI without inventing preference evidence or scores.
+    for code, path, subject, group in TYPE_DEFINITIONS:
+        if len(selected) == SUMMARY_TYPE_COUNT:
+            break
+        if group in groups:
+            continue
+        selected.append({
+            "typeCode": code, "subject": subject, "sourceField": path,
+            "sourceScore": 3, "score": 50, "visitCount": 0, "distinctDayCount": 0,
+            "confidence": "low", "isProvisional": True, "isObserved": False,
+        })
+        groups.add(group)
 
     recommendation_interests = [
         {key: item[key] for key in (
@@ -152,7 +161,8 @@ def assemble_taste_summary(draft: TasteSummaryDraft, context: SummaryContext) ->
     return TasteSummary(
         intro=draft.intro, hashtags=draft.hashtags,
         types=[SummaryType(
-            typeCode=item["typeCode"], typeName=titles[item["typeCode"]],
+            typeCode=item["typeCode"],
+            typeName=titles[item["typeCode"]] if item["isObserved"] else UNCONFIRMED_TYPE_NAMES[item["typeCode"]],
             lowName=low, highName=high, score=item["score"],
         ) for item in context.types],
         recommendCity=CityRecommendation(
