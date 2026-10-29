@@ -78,7 +78,7 @@ async def _summarize_profile(
     """Turn supported profile facts into display copy without rescoring.
 
     Args:
-        context: Exactly three display interests and all supported recommendation interests.
+        context: Three display axes, with unobserved axes marked unconfirmed, and observed interests.
         user_id: Validated identity, without the original photo payload.
     Returns:
         Summary with validated references and server-owned numeric values.
@@ -102,7 +102,7 @@ async def analyze_behavior_stream(
         API-AI-1 events; complete contains tasteProfile and summary only.
     Raises:
         HTTPException: 400 for no valid records; 500 for inference failures.
-        InsufficientTasteEvidenceError: Valid sample size, dates or observed interest coverage is insufficient.
+        InsufficientTasteEvidenceError: Fewer than five usable photos remain.
     """
     statistics = build_behavior_statistics(request.items)
     if not statistics["validPhotoCount"]:
