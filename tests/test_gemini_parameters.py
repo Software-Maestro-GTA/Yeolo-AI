@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from uuid import UUID
 
 import httpx
@@ -10,6 +11,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.exceptions import OutputParserException
 from langchain_core.runnables import RunnableLambda
 from openai import APIStatusError
+from pydantic import ValidationError
 
 from app.agent import course_drafting, taste_profile_chains
 from app.core.config import settings
@@ -117,6 +119,13 @@ async def test_gemini_gateway_request_preserves_schema_parameters_and_identity(o
         summary_schema = body['response_format']['json_schema']['schema']
         assert summary_schema['properties']['hashtags']['minItems'] == 3
         assert summary_schema['properties']['hashtags']['maxItems'] == 4
+        tag_schema = summary_schema['properties']['hashtags']['items']
+        assert tag_schema['minLength'] == 2 and tag_schema['maxLength'] == 5
+        assert re.fullmatch(tag_schema['pattern'], '#미식탐방')
+        assert not re.fullmatch(tag_schema['pattern'], '#미식탐방 shopping')
+        assert not re.fullmatch(tag_schema['pattern'], '#문화 산책')
+        assert not re.fullmatch(tag_schema['pattern'], '#카페/디저트')
+        assert '공백·줄바꿈·영문' in body['messages'][0]['content']
         assert summary_schema['properties']['types']['minItems'] == 3
         assert summary_schema['properties']['types']['maxItems'] == 3
         assert 'score' not in summary_schema['$defs']['SummaryTypeCopy']['properties']
@@ -362,4 +371,98 @@ async def test_analysis_then_summary_pipeline_over_real_sdk_wire(offline_wire, m
     assert all(str(req.url) == 'https://gateway.abto.app/v1/chat/completions' for req in requests)
     assert all(req.headers['x-abto-feature-id'] == 'taste.profile.analysis' for req in requests)
     assert all(req.headers['x-abto-device-id'] == str(USER_ID) for req in requests)
+    assert len(clients) == 4 and all(client.is_closed for client in clients)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tags', [
+    ['#미식탐방 shopping', '#쇼핑투어', '#자연풍경'],
+    ['#문화 산책', '#쇼핑투어', '#자연풍경'],
+    ['#문화/예술', '#쇼핑투어', '#자연풍경'],
+    ['#너무긴여행태그', '#쇼핑투어', '#자연풍경'],
+    ['#여행기록', '#여행기록', '#자연풍경'],
+    ['#여행기록'],
+])
+async def test_summary_hashtag_only_errors_use_safe_tags_without_another_llm_call(offline_wire, tags):
+    requests = []
+    output = output_for('summary')
+    output['hashtags'] = tags
+    def respond(request):
+        requests.append(request)
+        return completion(output)
+    clients = offline_wire(respond)
+    result = await invoke('summary')
+    assert len(result.hashtags) == len(set(result.hashtags)) == 3
+    assert set(result.hashtags) <= set(taste_profile_chains.SAFE_TRAVEL_HASHTAGS)
+    assert result.intro == output['intro']
+    assert [item.model_dump() for item in result.types] == output['types']
+    assert result.recommendCity.model_dump() == output['recommendCity']
+    assert len(requests) == 1
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('other_error', ['missing-intro', 'two-types', 'long-reason'])
+async def test_hashtag_recovery_does_not_hide_other_invalid_summary_fields(offline_wire, other_error):
+    requests = []
+    output = output_for('summary')
+    output['hashtags'] = ['#미식탐방 shopping', '#쇼핑투어', '#자연풍경']
+    if other_error == 'missing-intro':
+        del output['intro']
+    elif other_error == 'two-types':
+        output['types'] = output['types'][:2]
+    else:
+        output['recommendCity']['reason'] = '가' * 61
+    def respond(request):
+        requests.append(request)
+        return completion(output)
+    clients = offline_wire(respond)
+    with pytest.raises(ValidationError):
+        await invoke('summary')
+    assert len(requests) == 1
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('place_types,observed_count', [(['cafe'], 1), ([], 0)])
+async def test_same_day_five_photo_api_and_reported_hashtag_error_complete_over_sdk_wire(
+    offline_wire, mocker, place_types, observed_count,
+):
+    from app.main import app
+    from tests.test_behavior_evidence import full_profile, request, sse_events
+    from tests.test_behavior_statistics import photo
+    from tests.test_taste_summary import draft_for
+
+    requests, contexts = [], []
+    mocker.patch.object(settings, 'INTERNAL_API_KEY', 'offline-api-key')
+    mocker.patch.object(settings, 'GOOGLE_MAPS_API_KEY', '')
+    def respond(http_request):
+        requests.append(http_request)
+        body = json.loads(http_request.content)
+        if len(requests) == 1:
+            return completion(full_profile(['warm_region']).model_dump())
+        assert len(requests) == 2
+        context = body['messages'][-1]['content'].split('\n', 1)[1]
+        contexts.append(json.loads(context))
+        output = draft_for(context).model_dump()
+        output['hashtags'] = ['#미식탐방 shopping', '#쇼핑투어', '#자연풍경']
+        return completion(output)
+    clients = offline_wire(respond)
+    items = [photo(str(index), types=place_types) for index in range(5)]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post('/internal/ai/taste-profile/analysis',
+                                     json=request(items).model_dump(mode='json'),
+                                     headers={'X-Internal-Api-Key': 'offline-api-key'})
+    assert response.status_code == 200
+    events = sse_events(response)
+    assert [kind for kind, _ in events] == ['progress', 'progress', 'complete']
+    summary = events[-1][1]['summary']
+    assert len(summary['hashtags']) == len(set(summary['hashtags'])) == 3
+    assert set(summary['hashtags']) <= set(taste_profile_chains.SAFE_TRAVEL_HASHTAGS)
+    assert len(summary['types']) == 3
+    assert sum(item['isObserved'] for item in contexts[0]['types']) == observed_count
+    assert all(item['score'] == 50 for item in summary['types'])
+    assert sum(item['typeName'].endswith('미확인') for item in summary['types']) == 3 - observed_count
+    assert len(requests) == 2
+    assert all(str(item.url) == 'https://gateway.abto.app/v1/chat/completions' for item in requests)
     assert len(clients) == 4 and all(client.is_closed for client in clients)

@@ -1,13 +1,19 @@
 """Bounded UI copy and the public API-AI-1 summary contract."""
 
 import unicodedata
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.taste_profile import TasteProfileSchema
 
 SUMMARY_TYPE_COUNT = 3
+
+# Four Korean characters per tag fit even when the model returns four tags.
+GeneratedHashtag = Annotated[str, Field(
+    min_length=2, max_length=5, pattern=r"^#[가-힣0-9_]{1,4}$",
+    description="# 뒤에 공백 없는 한글·숫자·밑줄 1~4자만 작성. 영문·공백·문장부호 금지",
+)]
 
 SummaryTypeCode = Literal[
     "CAFE_DESSERT", "CULTURE", "BEACH", "OUTDOOR", "NATURE",
@@ -29,7 +35,7 @@ class SummaryTypeCopy(SummaryModel):
 
 
 class SummaryType(SummaryTypeCopy):
-    """An evidence-supported, unipolar interest slider; not a personality test."""
+    """An observed interest or an explicitly unconfirmed axis; not a personality test."""
 
     lowName: str = Field(..., min_length=1, max_length=16, description="관심 신호가 약한 방향")
     highName: str = Field(..., min_length=1, max_length=16, description="관심 신호가 강한 방향")
@@ -49,6 +55,17 @@ class SummaryCopy(SummaryModel):
 
     intro: str = Field(..., min_length=1, max_length=96, description="근거가 있는 여행 취향의 간단한 소개")
     hashtags: list[str] = Field(..., min_length=3, max_length=4, description="짧고 중복 없는 해시태그 3~4개")
+
+    @field_validator("hashtags", mode="before")
+    @classmethod
+    def normalize_hashtag_prefixes(cls, values: Any) -> Any:
+        """Preserve legacy prefix/Unicode normalization before item validation."""
+        if not isinstance(values, list):
+            return values
+        return [
+            "#" + unicodedata.normalize("NFKC", value).strip().removeprefix("#")
+            if isinstance(value, str) else value for value in values
+        ]
 
     @field_validator("hashtags")
     @classmethod
@@ -81,12 +98,17 @@ class SummaryCopy(SummaryModel):
 class TasteSummaryDraft(SummaryCopy):
     """Internal structured LLM output without editable scores or axis endpoints."""
 
-    types: list[SummaryTypeCopy] = Field(..., min_length=SUMMARY_TYPE_COUNT, max_length=SUMMARY_TYPE_COUNT, description="근거가 있는 입력 유형 정확히 3개를 각 1회 사용")
+    hashtags: list[GeneratedHashtag] = Field(
+        ..., min_length=3, max_length=4,
+        description="서로 다른 한국어 해시태그 3~4개. # 뒤 한글·숫자·밑줄 1~4자, 공백과 영문 금지",
+        examples=[["#미식탐방", "#쇼핑투어", "#자연풍경"]],
+    )
+    types: list[SummaryTypeCopy] = Field(..., min_length=SUMMARY_TYPE_COUNT, max_length=SUMMARY_TYPE_COUNT, description="입력의 관측 또는 미확인 유형 정확히 3개를 각 1회 사용")
     recommendCity: CityRecommendation = Field(..., description="취향에 맞게 직접 추천한 국가·도시·이유")
 
 
 class TasteSummary(SummaryCopy):
-    types: list[SummaryType] = Field(..., min_length=SUMMARY_TYPE_COUNT, max_length=SUMMARY_TYPE_COUNT, description="근거가 있는 맞춤 유형 정확히 3개")
+    types: list[SummaryType] = Field(..., min_length=SUMMARY_TYPE_COUNT, max_length=SUMMARY_TYPE_COUNT, description="관측 관심사 또는 미확인 유형 정확히 3개")
     recommendCity: CityRecommendation = Field(..., description="국가·도시·추천 이유")
 
 

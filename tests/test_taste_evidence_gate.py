@@ -1,4 +1,4 @@
-"""Accept sparse observed interests while rejecting unusable or unmapped samples."""
+"""Require only five valid photos and preserve truthful three-axis summaries."""
 
 import json
 from unittest.mock import AsyncMock
@@ -12,7 +12,7 @@ from tests.test_behavior_evidence import full_profile, request, sse_events
 from tests.test_behavior_statistics import photo
 from tests.test_taste_summary import mock_summary_model
 
-MESSAGE = '분석 가능한 기록이 부족해요. 다른 날짜와 장소의 사진을 추가해 주세요.'
+MESSAGE = '분석 가능한 사진을 최소 5장 추가해 주세요.'
 
 
 def repeated_cafe_visits():
@@ -43,15 +43,8 @@ def repeated_interests(*kinds):
 @pytest.mark.parametrize('items', [
     [photo('a'), photo('b', '2026-07-19T10:00:00+09:00')],
     [photo(str(hour), f'2026-07-18T{hour}:00:00+09:00') for hour in ('10', '14', '18')],
-    [photo(f'burst-{index}') for index in range(30)],
-    [photo(f'{kind}-{day}', f'2026-07-{day:02d}T10:00:00+09:00', place=kind, types=[kind])
-     for kind in ('cafe', 'museum', 'beach') for day in (1, 2)],
-    [photo(str(day), f'2026-07-{day:02d}T10:00:00+09:00', types=['festival']) for day in (1, 2, 3, 4, 5)],
-    repeated_interests('cafe') + [photo('extra-1'), photo('extra-2')],
-    repeated_interests('cafe', 'museum'),
-    repeated_interests('cafe', 'beach'),
-], ids=['two-visits', 'single-day', 'photo-burst', 'scattered-interests', 'no-display-mapping',
-        'one-group', 'two-groups', 'related-fields-do-not-add-groups'])
+    [photo('same-id') for _ in range(20)],
+], ids=['two-valid', 'three-valid', 'duplicate-ids'])
 async def test_insufficient_sample_returns_json_400_without_any_llm(mocker, endpoint, items):
     mocker.patch('app.core.config.settings.INTERNAL_API_KEY', 'offline-api-key')
     analysis = mocker.patch('app.services.behavior_service.generate_taste_profile', new_callable=AsyncMock)
@@ -186,14 +179,12 @@ async def test_five_photos_on_three_days_complete_without_repeated_high_scores(m
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('sample', ['four-valid', 'two-days', 'duplicate-id', 'invalid-time', 'unknown-place'])
+@pytest.mark.parametrize('sample', ['four-valid', 'duplicate-id', 'invalid-time', 'unknown-place'])
 async def test_minimum_sample_uses_valid_deduplicated_records(mocker, sample):
     mocker.patch('app.core.config.settings.INTERNAL_API_KEY', 'offline-api-key')
     items = minimum_observed_photos()
     if sample == 'four-valid':
         items.pop(0)
-    elif sample == 'two-days':
-        items[-1].timeContext.capturedAt = '2026-07-19T11:00:00+09:00'
     elif sample == 'duplicate-id':
         items[2] = items[0].model_copy(deep=True)
     elif sample == 'invalid-time':
@@ -210,3 +201,42 @@ async def test_minimum_sample_uses_valid_deduplicated_records(mocker, sample):
     assert response.json() == {'status': 400, 'message': MESSAGE, 'data': None}
     analysis.assert_not_awaited()
     summary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('endpoint', ['analysis', 'behavior'])
+@pytest.mark.parametrize('items,observed_count', [
+    ([photo(f'burst-{index}') for index in range(5)], 1),
+    ([photo(f'{kind}-{day}', f'2026-07-{day:02d}T10:00:00+09:00', place=kind, types=[kind])
+      for kind in ('cafe', 'museum', 'beach') for day in (1, 2)], 3),
+    ([photo(str(index), types=['festival']) for index in range(5)], 0),
+    ([photo(str(index), types=[]) for index in range(5)], 0),
+    (repeated_interests('cafe', 'museum'), 2),
+    (repeated_interests('cafe', 'beach'), 2),
+], ids=['same-day-single-visit', 'two-days', 'unmapped-types', 'empty-types',
+        'two-interest-groups', 'related-fields-stay-in-one-group'])
+async def test_photo_count_is_the_only_sampling_gate(mocker, endpoint, items, observed_count):
+    mocker.patch('app.core.config.settings.INTERNAL_API_KEY', 'offline-api-key')
+    analysis = mocker.patch('app.services.behavior_service.generate_taste_profile',
+                            new_callable=AsyncMock, return_value=full_profile())
+    summary = mock_summary_model(mocker)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+        response = await client.post(f'/internal/ai/taste-profile/{endpoint}',
+                                     json=request(items).model_dump(mode='json'),
+                                     headers={'X-Internal-Api-Key': 'offline-api-key'})
+    assert response.status_code == 200
+    events = sse_events(response)
+    assert [kind for kind, _ in events] == ['progress', 'progress', 'complete']
+    context = json.loads(summary.call_args.args[0])
+    assert sum(item['isObserved'] for item in context['types']) == observed_count
+    assert context['hasSupportedPreferences'] is bool(observed_count)
+    types = events[-1][1]['summary']['types']
+    assert len(types) == 3 and len({item['typeCode'] for item in types}) == 3
+    by_code = {item['typeCode']: item for item in types}
+    for axis in context['types']:
+        if not axis['isObserved']:
+            assert axis['visitCount'] == 0
+            assert by_code[axis['typeCode']]['score'] == 50
+            assert by_code[axis['typeCode']]['typeName'].endswith('미확인')
+    analysis.assert_awaited_once()
+    summary.assert_awaited_once()
